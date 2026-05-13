@@ -498,7 +498,7 @@ function createDatabase(databasePath) {
         edited_at AS editedAt,
         archived_at AS archivedAt
       FROM archived_messages
-      WHERE channel_id = ?
+      WHERE channel_id = ? OR thread_id = ?
       ORDER BY datetime(created_at) ASC, message_id ASC
       LIMIT 1
     `),
@@ -814,7 +814,7 @@ function createDatabase(databasePath) {
         return statements.listRecentArchivedMessagesByAuthorInGuild.all(guildId, authorId, limit);
       },
       getThreadStarterMessage(channelId) {
-        return statements.getThreadStarterArchivedMessage.get(channelId) || null;
+        return statements.getThreadStarterArchivedMessage.get(channelId, channelId) || null;
       },
       countMessages() {
         return Number(statements.countArchivedMessages.get()?.count || 0);

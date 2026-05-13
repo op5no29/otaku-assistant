@@ -1,7 +1,13 @@
 const { saveMessageToArchive } = require('./saveMessage');
-const { getRecentArchivedMessages } = require('./getRecentMessages');
+const {
+  getRecentArchivedMessages,
+  getRecentArchivedMessagesByAuthor,
+  getThreadStarterArchivedMessage
+} = require('./getRecentMessages');
 
 module.exports = {
   saveMessageToArchive,
-  getRecentArchivedMessages
+  getRecentArchivedMessages,
+  getRecentArchivedMessagesByAuthor,
+  getThreadStarterArchivedMessage
 };

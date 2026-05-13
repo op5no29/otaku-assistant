@@ -200,9 +200,54 @@ async function getThreadStarterContext(client, message) {
     return null;
   }
 
-  let starter = getThreadStarterArchivedMessage(client, { channelId: channel.id });
+  let starter = null;
+
+  client.logger.info('LLM thread starter lookup started', {
+    sourceMessageId: message.id,
+    threadId: channel.id
+  });
+
+  try {
+    if (typeof getThreadStarterArchivedMessage === 'function') {
+      starter = getThreadStarterArchivedMessage(client, { channelId: channel.id });
+      client.logger.info('LLM thread starter archived lookup result', {
+        sourceMessageId: message.id,
+        threadId: channel.id,
+        hit: Boolean(starter),
+        threadStarterMessageId: starter?.messageId || null
+      });
+    } else {
+      client.logger.warn('LLM thread starter archive lookup failed', {
+        sourceMessageId: message.id,
+        threadId: channel.id,
+        reason: 'missing_function'
+      });
+    }
+  } catch (error) {
+    client.logger.warn('LLM thread starter archive lookup failed', {
+      sourceMessageId: message.id,
+      threadId: channel.id,
+      reason: error.message
+    });
+  }
+
   if (!starter && typeof channel.fetchStarterMessage === 'function') {
-    const starterMessage = await channel.fetchStarterMessage().catch(() => null);
+    const starterMessage = await channel.fetchStarterMessage().catch((error) => {
+      client.logger.warn('LLM thread starter fetch fallback failed', {
+        sourceMessageId: message.id,
+        threadId: channel.id,
+        reason: error.message
+      });
+      return null;
+    });
+
+    client.logger.info('LLM thread starter fetch fallback result', {
+      sourceMessageId: message.id,
+      threadId: channel.id,
+      hit: Boolean(starterMessage),
+      threadStarterMessageId: starterMessage?.id || null
+    });
+
     if (starterMessage) {
       const resolved = await resolveDiscordTokens(client, message.guild, starterMessage.content || starterMessage.cleanContent || '');
       starter = {
