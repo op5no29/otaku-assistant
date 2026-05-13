@@ -163,13 +163,14 @@ function addFileComponentsIfPresent(container, post) {
   }
 }
 
-function buildBottomActionRows(post) {
+function buildBottomActionRows(post, options = {}) {
   const buttons = [];
+  const jumpLabel = options.jumpLabel || 'メッセージに飛ぶ';
 
   if (post.jumpUrl) {
     buttons.push(
       new ButtonBuilder()
-        .setLabel('メッセージに飛ぶ')
+        .setLabel(jumpLabel)
         .setStyle(ButtonStyle.Link)
         .setURL(post.jumpUrl)
     );
@@ -411,9 +412,6 @@ function buildTweetTimelineMessage({ post, config }) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent('（本文はまだありません）'));
   }
   addBotHashtagSection(container, post);
-  if (body) {
-    addAttachmentNamesSection(container, post);
-  }
   addMediaIfPresent(container, post);
   addMusicLinkPreviewIfPresent(container, post);
   if (!post.musicLink) {
@@ -442,14 +440,15 @@ function buildTweetTimelineMessage({ post, config }) {
 }
 
 function buildQuestionTimelineMessage({ post, config }) {
-  const container = createBaseContainer(ACCENT_COLORS.question);
+  const accentColor = post.isResolved ? ACCENT_COLORS.questionResolved : ACCENT_COLORS.question;
+  const container = createBaseContainer(accentColor);
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
   const body = trimmedContent || null;
   const questionTitle = post.title?.trim() || 'タイトルなし';
   const statusLabel = post.isResolved ? '解決済み' : '受付中';
   const headline = post.isResolved
-    ? `${post.forumName}の質問が解決済みになりました`
-    : `${post.forumName}に質問が追加されました`;
+    ? `${post.forumName} / 解決済み`
+    : `${post.forumName} / 受付中`;
   const primaryMediaUrls = [...new Set([
     ...(Array.isArray(post.imageUrls) ? post.imageUrls : []),
     post.firstImageUrl,
@@ -457,7 +456,7 @@ function buildQuestionTimelineMessage({ post, config }) {
   ].filter(Boolean))];
 
   addQuestionHeader(container, {
-    title: headline,
+    title: questionTitle,
     subtitle: null
   });
   container.addSectionComponents(
@@ -470,9 +469,8 @@ function buildQuestionTimelineMessage({ post, config }) {
     new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
   );
   container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`## ${questionTitle}`),
-    new TextDisplayBuilder().setContent(`**カテゴリ**\n${post.forumName}`),
-    new TextDisplayBuilder().setContent(`**ステータス**\n${statusLabel}`),
+    new TextDisplayBuilder().setContent(headline),
+    new TextDisplayBuilder().setContent(`**カテゴリ**: ${post.forumName}\n**ステータス**: ${statusLabel}${buildAttachmentFileNameBlock(post) ? `\n**添付ファイル**\n${buildAttachmentFileNameBlock(post)}` : ''}`),
     new TextDisplayBuilder().setContent(body || buildAttachmentFileNameBlock(post) || '（本文はまだありません）')
   );
   if (body) {
@@ -490,7 +488,7 @@ function buildQuestionTimelineMessage({ post, config }) {
       new TextDisplayBuilder().setContent('他にも添付ファイルがあります')
     );
   }
-  for (const row of buildBottomActionRows(post)) {
+  for (const row of buildBottomActionRows(post, { jumpLabel: '質問フォーラムへ飛ぶ' })) {
     container.addActionRowComponents(row);
   }
 

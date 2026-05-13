@@ -177,6 +177,20 @@ function runMigrations(database) {
 
     CREATE INDEX IF NOT EXISTS idx_user_llm_memories_guild_user
       ON user_llm_memories (guild_id, user_id);
+
+    CREATE TABLE IF NOT EXISTS timeline_merge_state (
+      guild_id TEXT NOT NULL,
+      source_channel_id TEXT NOT NULL,
+      source_thread_id TEXT,
+      author_id TEXT NOT NULL,
+      destination_channel_id TEXT NOT NULL,
+      last_source_message_id TEXT NOT NULL,
+      relayed_message_id TEXT NOT NULL,
+      merged_text_json TEXT NOT NULL,
+      merged_count INTEGER NOT NULL DEFAULT 1,
+      last_message_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, source_channel_id, author_id, destination_channel_id)
+    );
   `);
 
   const vcProfileColumns = new Set(

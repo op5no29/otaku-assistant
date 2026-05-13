@@ -750,6 +750,47 @@ function createDatabase(databasePath) {
       FROM intro_profiles
       WHERE guild_id = ? AND intro_channel_id = ?
     `),
+    getTimelineMergeState: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        source_channel_id AS sourceChannelId,
+        source_thread_id AS sourceThreadId,
+        author_id AS authorId,
+        destination_channel_id AS destinationChannelId,
+        last_source_message_id AS lastSourceMessageId,
+        relayed_message_id AS relayedMessageId,
+        merged_text_json AS mergedTextJson,
+        merged_count AS mergedCount,
+        last_message_at AS lastMessageAt
+      FROM timeline_merge_state
+      WHERE guild_id = ? AND source_channel_id = ? AND author_id = ? AND destination_channel_id = ?
+      LIMIT 1
+    `),
+    upsertTimelineMergeState: sqlite.prepare(`
+      INSERT INTO timeline_merge_state (
+        guild_id,
+        source_channel_id,
+        source_thread_id,
+        author_id,
+        destination_channel_id,
+        last_source_message_id,
+        relayed_message_id,
+        merged_text_json,
+        merged_count,
+        last_message_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, source_channel_id, author_id, destination_channel_id) DO UPDATE SET
+        source_thread_id = excluded.source_thread_id,
+        last_source_message_id = excluded.last_source_message_id,
+        relayed_message_id = excluded.relayed_message_id,
+        merged_text_json = excluded.merged_text_json,
+        merged_count = excluded.merged_count,
+        last_message_at = excluded.last_message_at
+    `),
+    deleteTimelineMergeState: sqlite.prepare(`
+      DELETE FROM timeline_merge_state
+      WHERE guild_id = ? AND source_channel_id = ? AND author_id = ? AND destination_channel_id = ?
+    `),
     upsertUserLlmMemory: sqlite.prepare(`
       INSERT INTO user_llm_memories (
         guild_id, user_id, memory_key, memory_text, source, confidence, created_at, updated_at
@@ -1133,6 +1174,39 @@ function createDatabase(databasePath) {
       },
       getLatestDate(guildId, introChannelId) {
         return statements.getLatestIntroProfileDate.get(guildId, introChannelId)?.latestDate || null;
+      }
+    },
+    timelineMerge: {
+      get(guildId, sourceChannelId, authorId, destinationChannelId) {
+        return statements.getTimelineMergeState.get(guildId, sourceChannelId, authorId, destinationChannelId) || null;
+      },
+      upsert({
+        guildId,
+        sourceChannelId,
+        sourceThreadId,
+        authorId,
+        destinationChannelId,
+        lastSourceMessageId,
+        relayedMessageId,
+        mergedTextJson,
+        mergedCount,
+        lastMessageAt
+      }) {
+        statements.upsertTimelineMergeState.run(
+          guildId,
+          sourceChannelId,
+          sourceThreadId,
+          authorId,
+          destinationChannelId,
+          lastSourceMessageId,
+          relayedMessageId,
+          mergedTextJson,
+          mergedCount,
+          lastMessageAt
+        );
+      },
+      delete(guildId, sourceChannelId, authorId, destinationChannelId) {
+        statements.deleteTimelineMergeState.run(guildId, sourceChannelId, authorId, destinationChannelId);
       }
     },
     userMemories: {

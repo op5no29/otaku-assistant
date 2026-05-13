@@ -27,6 +27,10 @@
     "includeFirstImage": true,
     "ignoreBotPosts": true
   },
+  "timelineShortMergeEnabled": true,
+  "timelineShortMergeMaxChars": 60,
+  "timelineShortMergeWindowSeconds": 180,
+  "timelineShortMergeMaxParts": 5,
   "voiceProfile": {
     "ignoreBots": true
   },

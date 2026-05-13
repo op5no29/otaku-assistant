@@ -5,16 +5,20 @@ const { prepareVideoThumbnail } = require('./videoThumbnail');
 const { prepareAttachmentRelay } = require('./attachmentRelay');
 const { enrichPostWithMusicLink } = require('./musicLinks');
 const { applyQuestionStatusTag } = require('../questionResolver/threadTags');
+const { getRecentArchivedMessages } = require('../messageArchive');
+const { getMessageJumpUrl } = require('../../services/discordLinks');
 
-const QUESTION_GUIDE_MESSAGE = [
-  '質問を受け付けました。',
-  'タイムラインにも共有しました。',
-  '',
-  '解決した場合は、この質問内で `/resolve` を使用してください。',
-  '質問タイトルに `[解決済]` が付き、タイムライン上の質問カードも解決済みに更新されます。',
-  '',
-  '再び確認が必要になった場合は、同じ質問内で `/unresolve` を使用すると未解決に戻せます。'
-].join('\n');
+function buildQuestionGuideMessage(timelineMessageUrl = null) {
+  return [
+    '質問を受け付けました。',
+    timelineMessageUrl ? `[タイムラインにも共有しました](${timelineMessageUrl})` : 'タイムラインにも共有しました。',
+    '',
+    '解決した場合は、この質問内で `/resolve` を使用してください。',
+    '質問タイトルに `[解決済]` が付き、タイムライン上の質問カードも解決済みに更新されます。',
+    '',
+    '再び確認が必要になった場合は、同じ質問内で `/unresolve` を使用すると未解決に戻せます。'
+  ].join('\n');
+}
 
 function getForumType(parentId, config) {
   const normalizedParentId = String(parentId || '');
@@ -37,6 +41,14 @@ function getForumType(parentId, config) {
 async function buildTimelinePayload(post, { config, forumType, logger }) {
   const videoPrepared = await prepareVideoThumbnail(post, logger);
   const attachmentPrepared = await prepareAttachmentRelay(videoPrepared.post, config, logger);
+  if (forumType === 'question') {
+    logger.info('Question card built', {
+      sourceMessageId: post.messageId,
+      questionCardStatusColor: post.isResolved ? 'green' : 'red',
+      questionCardTitleIncluded: Boolean(post.title?.trim()),
+      questionCardBodyIncluded: Boolean(String(post.content || '').trim())
+    });
+  }
 
   return {
     payload: buildTimelineMessage({
@@ -49,6 +61,241 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
       await videoPrepared.cleanup();
     }
   };
+}
+
+function isMergeableShortTweetPost(post, config) {
+  const text = String(post.content || '').trim();
+  if (!config.timeline.shortMergeEnabled) {
+    return false;
+  }
+  if (!text || text.length > Number(config.timeline.shortMergeMaxChars || 60)) {
+    return false;
+  }
+  if (post.referencedSourceMessageId) {
+    return false;
+  }
+  if (post.title || post.rawTitle || post.replyContext) {
+    return false;
+  }
+  if (Array.isArray(post.attachments) && post.attachments.length) {
+    return false;
+  }
+  if (Array.isArray(post.imageUrls) && post.imageUrls.length) {
+    return false;
+  }
+  if (post.firstImageUrl || post.firstVideoUrl || post.generatedVideoThumbnailUrl) {
+    return false;
+  }
+  if (post.socialPreview || post.musicLink) {
+    return false;
+  }
+  if (Array.isArray(post.customEmojiMediaItems) && post.customEmojiMediaItems.length) {
+    return false;
+  }
+  if (Array.isArray(post.matchedBotHashtagRoutes) && post.matchedBotHashtagRoutes.length) {
+    return false;
+  }
+  if (/\bhttps?:\/\//i.test(text)) {
+    return false;
+  }
+  return true;
+}
+
+function getConsecutiveMergeChain(client, message, post, config, logger) {
+  logger.info('timeline short merge candidate evaluated', {
+    sourceMessageId: message.id,
+    sourceThreadId: message.channelId,
+    authorId: message.author?.id || null,
+    mergeable: isMergeableShortTweetPost(post, config)
+  });
+
+  if (!isMergeableShortTweetPost(post, config)) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      reason: 'current_not_mergeable'
+    });
+    return null;
+  }
+
+  const recentMessages = getRecentArchivedMessages(client, {
+    channelId: message.channelId,
+    limit: Number(config.timeline.shortMergeMaxParts || 5) + 3
+  });
+  const currentIndex = recentMessages.findIndex((entry) => String(entry.messageId) === String(message.id));
+  if (currentIndex <= 0) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      reason: 'no_previous_message'
+    });
+    return null;
+  }
+
+  const current = recentMessages[currentIndex];
+  const currentTime = new Date(current.createdAt || message.createdAt || Date.now()).getTime();
+  const previous = recentMessages[currentIndex - 1];
+  const sameAuthor = String(previous.authorId || '') === String(current.authorId || '');
+  logger.info('timeline short merge previous message checked', {
+    sourceMessageId: message.id,
+    previousSourceMessageId: previous.messageId,
+    sameAuthor
+  });
+  if (!sameAuthor) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      reason: 'intervening_author_detected'
+    });
+    return null;
+  }
+
+  const chain = [current];
+  for (let index = currentIndex - 1; index >= 0; index -= 1) {
+    const entry = recentMessages[index];
+    if (String(entry.authorId || '') !== String(current.authorId || '')) {
+      break;
+    }
+
+    const text = String(entry.content || '').trim();
+    const withinWindow = currentTime - new Date(entry.createdAt || 0).getTime() <= Number(config.timeline.shortMergeWindowSeconds || 180) * 1000;
+    const mergeable =
+      text &&
+      text.length <= Number(config.timeline.shortMergeMaxChars || 60) &&
+      !entry.referencedMessageId &&
+      !(Array.isArray(entry.attachments) && entry.attachments.length) &&
+      !(Array.isArray(entry.embeds) && entry.embeds.length) &&
+      !/\bhttps?:\/\//i.test(text);
+    if (!withinWindow || !mergeable) {
+      logger.info('timeline short merge skipped', {
+        sourceMessageId: message.id,
+        reason: withinWindow ? 'previous_not_mergeable' : 'outside_merge_window'
+      });
+      break;
+    }
+
+    chain.unshift(entry);
+    if (chain.length >= Number(config.timeline.shortMergeMaxParts || 5)) {
+      break;
+    }
+  }
+
+  if (chain.length < 2) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      reason: 'chain_too_short'
+    });
+    return null;
+  }
+
+  return chain;
+}
+
+async function tryMergeShortTweetMessage(message, post, target, { config, db, logger }) {
+  if (String(target.destinationChannelId) !== String(config.timelineChannelId || '')) {
+    return null;
+  }
+
+  const chain = getConsecutiveMergeChain(message.client, message, post, config, logger);
+  if (!chain) {
+    return null;
+  }
+
+  const previousEntry = chain[chain.length - 2];
+  const existingRelay = db.relays.getMessageRelayTarget(previousEntry.messageId, target.destinationChannelId);
+  logger.info('timeline short merge state checked', {
+    sourceMessageId: message.id,
+    previousSourceMessageId: previousEntry.messageId,
+    mergeStateFound: Boolean(existingRelay?.relayedMessageId)
+  });
+  if (!existingRelay?.relayedMessageId) {
+    return null;
+  }
+
+  const destinationChannel = await getTextChannel(message.guild, target.destinationChannelId);
+  if (!destinationChannel) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      reason: 'destination_missing'
+    });
+    return null;
+  }
+
+  const timelineMessage = await destinationChannel.messages.fetch(existingRelay.relayedMessageId).catch(() => null);
+  if (!timelineMessage) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      reason: 'timeline_message_missing'
+    });
+    return null;
+  }
+
+  const mergedParts = chain.map((entry) => String(entry.content || '').trim()).filter(Boolean);
+  const mergedPost = {
+    ...post,
+    content: mergedParts.join('\n'),
+    attachments: [],
+    imageUrls: [],
+    firstImageUrl: null,
+    firstVideoUrl: null,
+    generatedVideoThumbnailUrl: null,
+    socialPreview: null,
+    musicLink: null,
+    customEmojiMediaItems: [],
+    matchedBotHashtagRoutes: [],
+    displayBotHashtags: [],
+    componentFiles: [],
+    downloadableAttachments: []
+  };
+
+  try {
+    const mergePayload = buildTimelineMessage({
+      post: mergedPost,
+      config,
+      forumType: 'tweet'
+    });
+    await timelineMessage.edit({
+      ...mergePayload,
+      attachments: []
+    });
+    db.relays.upsertMessageRelayTarget({
+      sourceMessageId: message.id,
+      destinationChannelId: target.destinationChannelId,
+      threadId: message.channel.id,
+      parentChannelId: String(message.channel.parentId || ''),
+      forumType: 'tweet',
+      relayKind: target.relayKind,
+      relayedMessageId: timelineMessage.id,
+      authorId: message.author?.id || null
+    });
+    db.timelineMerge.upsert({
+      guildId: message.guildId,
+      sourceChannelId: message.channelId,
+      sourceThreadId: message.channel.id,
+      authorId: message.author?.id || null,
+      destinationChannelId: target.destinationChannelId,
+      lastSourceMessageId: message.id,
+      relayedMessageId: timelineMessage.id,
+      mergedTextJson: JSON.stringify(mergedParts),
+      mergedCount: mergedParts.length,
+      lastMessageAt: new Date(message.createdAt || Date.now()).toISOString()
+    });
+    logger.info('timeline card edited for merge', {
+      sourceMessageId: message.id,
+      previousSourceMessageId: previousEntry.messageId,
+      relayedMessageId: timelineMessage.id,
+      mergedCount: mergedParts.length
+    });
+    return {
+      merged: true,
+      relayedMessageId: timelineMessage.id
+    };
+  } catch (error) {
+    logger.warn('merge edit failed fallback send', {
+      sourceMessageId: message.id,
+      previousSourceMessageId: previousEntry.messageId,
+      relayedMessageId: existingRelay.relayedMessageId,
+      error: error.message
+    });
+    return null;
+  }
 }
 
 function buildReplyOptions({ message, destinationChannelId, db, logger }) {
@@ -345,6 +592,12 @@ async function relayForumThread(thread, { config, db, logger }) {
         threadId: thread.id,
         authorId: post.author?.id || null
       });
+      logger.info('Question starter sources resolved', {
+        threadId: thread.id,
+        questionTitleSource: 'thread.name',
+        questionBodySource: String(post.content || '').trim() ? 'starter_message' : 'missing',
+        starterFetched: Boolean(post.messageId)
+      });
     }
 
     const timelineChannel = await thread.guild.channels.fetch(config.timelineChannelId);
@@ -385,12 +638,26 @@ async function relayForumThread(thread, { config, db, logger }) {
 
       const questionRecord = db.questions.getQuestionThread(thread.id);
       if (!questionRecord?.guideMessageId) {
-        await thread.send(QUESTION_GUIDE_MESSAGE)
+        const timelineMessageUrl = getMessageJumpUrl({
+          guildId: thread.guildId,
+          channelId: config.timelineChannelId,
+          messageId: sentMessage.id
+        });
+        logger.info('Question timeline message returned', {
+          threadId: thread.id,
+          timelineMessageId: sentMessage.id,
+          timelineMessageUrl
+        });
+        await thread.send(buildQuestionGuideMessage(timelineMessageUrl))
           .then((guideMessage) => {
             db.questions.setGuideMessage(thread.id, guideMessage.id);
             logger.info('Question acceptance guide posted', {
               threadId: thread.id,
               guideMessageId: guideMessage.id
+            });
+            logger.info('Question accepted response linked timeline', {
+              threadId: thread.id,
+              timelineMessageId: sentMessage.id
             });
           })
           .catch((error) => {
@@ -756,6 +1023,15 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
           continue;
         }
 
+        const mergedResult = await tryMergeShortTweetMessage(message, post, target, {
+          config,
+          db,
+          logger
+        });
+        if (mergedResult?.merged) {
+          continue;
+        }
+
         sentMessage = await sendRelayMessage(destinationChannel, {
           ...payload,
           ...(reply ? { reply } : {})
@@ -838,7 +1114,8 @@ async function updateQuestionTimelineCard(thread, { config, db, logger }) {
   logger.info('Question timeline card updated', {
     threadId: thread.id,
     timelineMessageId: relay.timelineMessageId,
-    resolved: post.isResolved
+    resolved: post.isResolved,
+    questionCardStatusColor: post.isResolved ? 'green' : 'red'
   });
 }
 

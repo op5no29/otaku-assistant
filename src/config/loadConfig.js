@@ -165,7 +165,11 @@ function loadConfig(configPath) {
     timeline: {
       maxContentLength: Number(parsed.timeline?.maxContentLength ?? 800),
       includeFirstImage: parsed.timeline?.includeFirstImage !== false,
-      ignoreBotPosts: parsed.timeline?.ignoreBotPosts !== false
+      ignoreBotPosts: parsed.timeline?.ignoreBotPosts !== false,
+      shortMergeEnabled: parsed.timelineShortMergeEnabled !== false,
+      shortMergeMaxChars: Number(parsed.timelineShortMergeMaxChars ?? 60),
+      shortMergeWindowSeconds: Number(parsed.timelineShortMergeWindowSeconds ?? 180),
+      shortMergeMaxParts: Number(parsed.timelineShortMergeMaxParts ?? 5)
     },
     voiceProfile: {
       ignoreBots: parsed.voiceProfile?.ignoreBots !== false
