@@ -749,6 +749,46 @@ function createDatabase(databasePath) {
       SELECT MAX(COALESCE(updated_at, posted_at)) AS latestDate
       FROM intro_profiles
       WHERE guild_id = ? AND intro_channel_id = ?
+    `),
+    upsertUserLlmMemory: sqlite.prepare(`
+      INSERT INTO user_llm_memories (
+        guild_id, user_id, memory_key, memory_text, source, confidence, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, user_id, memory_key) DO UPDATE SET
+        memory_text = excluded.memory_text,
+        source = excluded.source,
+        confidence = excluded.confidence,
+        updated_at = excluded.updated_at
+    `),
+    getUserLlmMemory: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId, user_id AS userId, memory_key AS memoryKey,
+        memory_text AS memoryText, source, confidence,
+        created_at AS createdAt, updated_at AS updatedAt
+      FROM user_llm_memories
+      WHERE guild_id = ? AND user_id = ? AND memory_key = ?
+      LIMIT 1
+    `),
+    listUserLlmMemoriesByUser: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId, user_id AS userId, memory_key AS memoryKey,
+        memory_text AS memoryText, source, confidence,
+        created_at AS createdAt, updated_at AS updatedAt
+      FROM user_llm_memories
+      WHERE guild_id = ? AND user_id = ?
+      ORDER BY updated_at DESC
+    `),
+    deleteUserLlmMemoryByKey: sqlite.prepare(`
+      DELETE FROM user_llm_memories WHERE guild_id = ? AND user_id = ? AND memory_key = ?
+    `),
+    deleteAllUserLlmMemoriesByUser: sqlite.prepare(`
+      DELETE FROM user_llm_memories WHERE guild_id = ? AND user_id = ?
+    `),
+    countUserLlmMemoriesByUser: sqlite.prepare(`
+      SELECT COUNT(*) AS count FROM user_llm_memories WHERE guild_id = ? AND user_id = ?
+    `),
+    countAllUserLlmMemories: sqlite.prepare(`
+      SELECT COUNT(*) AS count FROM user_llm_memories WHERE guild_id = ?
     `)
   };
 
@@ -1093,6 +1133,30 @@ function createDatabase(databasePath) {
       },
       getLatestDate(guildId, introChannelId) {
         return statements.getLatestIntroProfileDate.get(guildId, introChannelId)?.latestDate || null;
+      }
+    },
+    userMemories: {
+      upsert({ guildId, userId, memoryKey, memoryText, source = 'explicit_user_request', confidence = 100 }) {
+        const now = new Date().toISOString();
+        statements.upsertUserLlmMemory.run(guildId, userId, memoryKey, memoryText, source, confidence, now, now);
+      },
+      get(guildId, userId, memoryKey) {
+        return statements.getUserLlmMemory.get(guildId, userId, memoryKey) || null;
+      },
+      listByUser(guildId, userId) {
+        return statements.listUserLlmMemoriesByUser.all(guildId, userId);
+      },
+      deleteByKey(guildId, userId, memoryKey) {
+        statements.deleteUserLlmMemoryByKey.run(guildId, userId, memoryKey);
+      },
+      deleteAllByUser(guildId, userId) {
+        statements.deleteAllUserLlmMemoriesByUser.run(guildId, userId);
+      },
+      countByUser(guildId, userId) {
+        return Number(statements.countUserLlmMemoriesByUser.get(guildId, userId)?.count || 0);
+      },
+      countAll(guildId) {
+        return Number(statements.countAllUserLlmMemories.get(guildId)?.count || 0);
       }
     }
   };

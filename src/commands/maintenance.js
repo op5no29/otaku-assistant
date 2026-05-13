@@ -19,6 +19,7 @@ const {
   backfillWelcomeReactions,
   formatSavedEmoji
 } = require('../modules/welcomeReactions');
+const { getUserMemories, deleteAllUserMemories } = require('../modules/userMemory');
 
 function buildStatusLines(interaction) {
   const { client } = interaction;
@@ -162,6 +163,33 @@ module.exports = {
       subcommand
         .setName('intro-dm-scan-dry-run')
         .setDescription('自己紹介なしメンバー候補をDM送信せずに確認します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('user-memory-status')
+        .setDescription('ユーザーLLMメモリーの保存状況を表示します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('user-memory-show')
+        .setDescription('指定ユーザーのLLMメモリーを表示します。')
+        .addStringOption((option) =>
+          option
+            .setName('user_id')
+            .setDescription('対象ユーザーのID')
+            .setRequired(true)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('user-memory-clear')
+        .setDescription('指定ユーザーのLLMメモリーを全削除します。')
+        .addStringOption((option) =>
+          option
+            .setName('user_id')
+            .setDescription('対象ユーザーのID')
+            .setRequired(true)
+        )
     ),
   async execute(interaction) {
     if (!isAdministrator(interaction.member)) {
@@ -276,6 +304,44 @@ module.exports = {
       return;
     }
 
+    if (subcommand === 'user-memory-status') {
+      const total = interaction.client.db.userMemories.countAll(interaction.guildId);
+      await interaction.reply({
+        content: [
+          'ユーザーLLMメモリーの状態:',
+          `総メモリー件数（このサーバー）: ${total}`
+        ].join('\n'),
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'user-memory-show') {
+      const targetUserId = interaction.options.getString('user_id', true);
+      const memories = getUserMemories(interaction.client, interaction.guildId, targetUserId);
+      await interaction.reply({
+        content: memories.length
+          ? [
+              `ユーザー ${targetUserId} のメモリー (${memories.length}件):`,
+              ...memories.map((m) => `- [${m.memoryKey}] ${m.memoryText} (source: ${m.source})`)
+            ].join('\n')
+          : `ユーザー ${targetUserId} のメモリーはありません。`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'user-memory-clear') {
+      const targetUserId = interaction.options.getString('user_id', true);
+      const countBefore = interaction.client.db.userMemories.countByUser(interaction.guildId, targetUserId);
+      deleteAllUserMemories(interaction.client, interaction.guildId, targetUserId);
+      await interaction.reply({
+        content: `ユーザー ${targetUserId} のメモリーを全削除しました。削除件数: ${countBefore}`,
+        ephemeral: true
+      });
+      return;
+    }
+
     if (subcommand === 'portal') {
       await interaction.reply({
         content: appConfig.ops.developerPortalUrl
@@ -370,6 +436,8 @@ module.exports = {
       lines.push(`参加通知メッセージ数: ${summary.matchedCount}`);
       lines.push(`リアクション適用メッセージ数: ${summary.reactedMessageCount}`);
       lines.push(`失敗リアクション数: ${summary.failedReactionCount}`);
+      lines.push(`削除した古いBotリアクション数: ${summary.removedOutdatedCount ?? 0}`);
+      lines.push(`削除失敗リアクション数: ${summary.failedRemovalCount ?? 0}`);
 
       await interaction.editReply({
         content: lines.join('\n')

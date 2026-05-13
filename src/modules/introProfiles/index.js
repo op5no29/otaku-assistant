@@ -128,6 +128,69 @@ function searchIntroProfiles(client, guildId, query, limit = 3) {
   return client.db.introProfiles.search(guildId, client.appConfig.introChannelId, query, limit).map(normalizeProfile);
 }
 
+function scoreProfileMatch(profile, query) {
+  const q = String(query || '').toLowerCase().trim();
+  if (!q) {
+    return { score: 0, reason: 'empty_query' };
+  }
+
+  const exactFields = [
+    { value: profile.displayName, reason: 'exact_display_name', score: 100 },
+    { value: profile.username, reason: 'exact_username', score: 90 },
+    { value: profile.globalName, reason: 'exact_global_name', score: 90 },
+    { value: profile.nickname, reason: 'exact_nickname', score: 85 }
+  ];
+
+  for (const { value, reason, score } of exactFields) {
+    if (value && value.toLowerCase() === q) {
+      return { score, reason };
+    }
+  }
+
+  const aliases = Array.isArray(profile.searchAliases) ? profile.searchAliases : [];
+  for (const alias of aliases) {
+    if (alias && alias.toLowerCase() === q) {
+      return { score: 80, reason: 'exact_alias' };
+    }
+  }
+
+  for (const { value, reason } of exactFields) {
+    if (value && value.toLowerCase().startsWith(q)) {
+      return { score: 50, reason: `prefix_${reason.replace('exact_', '')}` };
+    }
+  }
+  for (const alias of aliases) {
+    if (alias && alias.toLowerCase().startsWith(q)) {
+      return { score: 45, reason: 'prefix_alias' };
+    }
+  }
+
+  return { score: 10, reason: 'partial_match' };
+}
+
+function searchIntroProfilesScored(client, guildId, query, limit = 3) {
+  const raw = client.db.introProfiles.search(
+    guildId,
+    client.appConfig.introChannelId,
+    query,
+    Math.min(limit * 4, 20)
+  ).map(normalizeProfile);
+
+  const scored = raw.map((profile) => {
+    const { score, reason } = scoreProfileMatch(profile, query);
+    return { ...profile, matchScore: score, matchReason: reason };
+  });
+
+  scored.sort((left, right) => right.matchScore - left.matchScore);
+
+  const topScore = scored[0]?.matchScore ?? 0;
+  if (topScore >= 80) {
+    return scored.filter((profile) => profile.matchScore >= 80).slice(0, limit);
+  }
+
+  return scored.slice(0, limit);
+}
+
 function hasUserIntro(client, guildId, userId) {
   return Boolean(getLatestIntroProfileByUser(client, guildId, userId));
 }
@@ -242,6 +305,7 @@ module.exports = {
   deleteIntroProfileByMessageId,
   getLatestIntroProfileByUser,
   searchIntroProfiles,
+  searchIntroProfilesScored,
   hasUserIntro,
   getMembersWithoutIntroOlderThan,
   backfillIntroProfiles,

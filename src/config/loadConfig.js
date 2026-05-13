@@ -31,6 +31,29 @@ function ensureTagMap(value, label) {
   );
 }
 
+function ensureGlobalHashtagRoutes(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([routeKey, route]) => {
+      if (!route || typeof route !== 'object') {
+        throw new Error(`${label}.${routeKey} must be an object`);
+      }
+
+      return [
+        String(routeKey),
+        {
+          tags: ensureArray(route.tags || [], `${label}.${routeKey}.tags`),
+          channelId: String(route.channelId || ''),
+          alsoTimeline: route.alsoTimeline === true
+        }
+      ];
+    })
+  );
+}
+
 function ensureBotHashtagRoutes(value, label) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {};
@@ -195,7 +218,9 @@ function loadConfig(configPath) {
     introDm: ensureIntroDmConfig(parsed.introDm),
     ops: ensureOpsConfig(parsed.ops),
     questionForumTags: ensureTagMap(parsed.questionForumTags, 'questionForumTags'),
-    botHashtagRoutes: ensureBotHashtagRoutes(parsed.botHashtagRoutes, 'botHashtagRoutes')
+    botHashtagRoutes: ensureBotHashtagRoutes(parsed.botHashtagRoutes, 'botHashtagRoutes'),
+    vcListenOnlyChannelIds: ensureArray(parsed.vcListenOnlyChannelIds || [], 'vcListenOnlyChannelIds'),
+    globalHashtagRoutes: ensureGlobalHashtagRoutes(parsed.globalHashtagRoutes, 'globalHashtagRoutes')
   };
 }
 

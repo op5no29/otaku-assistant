@@ -3,7 +3,8 @@ const {
   getRecentArchivedMessagesByAuthor,
   getThreadStarterArchivedMessage
 } = require('../messageArchive');
-const { getLatestIntroProfileByUser, searchIntroProfiles } = require('../introProfiles');
+const { getLatestIntroProfileByUser, searchIntroProfilesScored } = require('../introProfiles');
+const { getUserMemories, formatUserMemoriesForPrompt } = require('../userMemory');
 
 function summarizeAttachments(attachments) {
   if (!Array.isArray(attachments) || !attachments.length) {
@@ -371,18 +372,49 @@ function formatIntroProfile(profile) {
   const aliases = Array.isArray(profile.searchAliases) ? profile.searchAliases.filter(Boolean).slice(0, 8) : [];
   const lines = [
     `- userId: ${profile.userId}`,
-    `- 表示名: ${profile.displayName || profile.globalName || profile.username || '不明'}`
+    `- introMessageId: ${profile.introMessageId || '不明'}`,
+    `- 表示名 (display_name): ${profile.displayName || '不明'}`,
+    `- ユーザー名 (username): ${profile.username || '不明'}`,
+    `- グローバル名 (global_name): ${profile.globalName || '不明'}`
   ];
-  if (aliases.length) {
-    lines.push(`- 候補名: ${aliases.join(', ')}`);
+  if (profile.nickname) {
+    lines.push(`- ニックネーム (nickname): ${profile.nickname}`);
   }
+
+  if (profile.matchScore !== undefined) {
+    lines.push(`- 一致スコア: ${profile.matchScore} (${profile.matchReason || 'unknown'})`);
+  }
+
+  if (aliases.length) {
+    lines.push(`- 候補名・ハンドル: ${aliases.join(', ')}`);
+  }
+
   if (profile.introText) {
-    lines.push('- 自己紹介:');
+    lines.push('- 自己紹介本文 (これが唯一の事実ソースです):');
     lines.push(profile.introText);
   }
+
   if (Array.isArray(profile.links) && profile.links.length) {
     lines.push(`- リンク: ${profile.links.slice(0, 6).join(', ')}`);
   }
+
+  if (Array.isArray(profile.embeds) && profile.embeds.length) {
+    for (const embed of profile.embeds.slice(0, 3)) {
+      const parts = [];
+      if (embed.title) {
+        parts.push(embed.title);
+      }
+
+      if (embed.description) {
+        parts.push(String(embed.description).slice(0, 120));
+      }
+
+      if (parts.length) {
+        lines.push(`- リンクプレビュー: ${parts.join(' — ')}`);
+      }
+    }
+  }
+
   return lines;
 }
 
@@ -403,56 +435,140 @@ async function getIntroProfileContext(client, message, requestText) {
   const blocks = [];
   const usedUserIds = new Set();
   const mentionedUserIds = [...new Set(extractMentionedUserIds(requestText))];
+  const limit = Number(client.appConfig.llm.introProfileCandidateLimit || 3);
+
+  client.logger.info('LLM intro profile lookup started', {
+    sourceMessageId: message.id,
+    requestText: String(requestText || '').slice(0, 200),
+    mentionedUserCount: mentionedUserIds.length
+  });
 
   for (const userId of mentionedUserIds) {
     const profile = getLatestIntroProfileByUser(client, message.guildId, userId);
     client.logger.info('LLM intro profile lookup by mention', {
       sourceMessageId: message.id,
       targetUserId: userId,
-      hit: Boolean(profile)
+      hit: Boolean(profile),
+      matchReason: 'exact_mention'
     });
     if (!profile) {
       continue;
     }
+
     usedUserIds.add(userId);
+    const enriched = { ...profile, matchScore: 100, matchReason: 'exact_mention' };
     blocks.push({
       matchType: 'mention',
       assumed: true,
-      lines: formatIntroProfile(profile)
+      lines: formatIntroProfile(enriched)
     });
   }
 
   if (shouldIncludeIntroProfiles(requestText)) {
-    const limit = Number(client.appConfig.llm.introProfileCandidateLimit || 3);
-    for (const candidate of extractPossibleProfileNames(requestText)) {
-      const found = searchIntroProfiles(client, message.guildId, candidate, limit)
-        .filter((profile) => !usedUserIds.has(profile.userId))
-        .slice(0, limit);
+    const nameQueries = extractPossibleProfileNames(requestText);
+    client.logger.info('LLM intro profile name queries extracted', {
+      sourceMessageId: message.id,
+      queries: nameQueries
+    });
+
+    for (const candidate of nameQueries) {
+      if (blocks.length >= limit) {
+        break;
+      }
+
+      const found = searchIntroProfilesScored(client, message.guildId, candidate, limit)
+        .filter((profile) => !usedUserIds.has(profile.userId));
+
       client.logger.info('LLM intro profile lookup by name', {
         sourceMessageId: message.id,
         query: candidate,
-        hitCount: found.length
+        candidateCount: found.length,
+        topScore: found[0]?.matchScore ?? null,
+        topReason: found[0]?.matchReason ?? null,
+        candidates: found.map((p) => ({
+          userId: p.userId,
+          displayName: p.displayName,
+          score: p.matchScore,
+          reason: p.matchReason
+        }))
       });
+
       for (const profile of found) {
+        if (usedUserIds.has(profile.userId)) {
+          continue;
+        }
+
         usedUserIds.add(profile.userId);
         blocks.push({
           matchType: 'name',
           assumed: found.length === 1,
           lines: formatIntroProfile(profile)
         });
-      }
-      if (blocks.length >= limit) {
-        break;
+
+        if (blocks.length >= limit) {
+          break;
+        }
       }
     }
   }
 
-  client.logger.info('LLM intro profile candidates included', {
+  client.logger.info('LLM intro profile candidates included in prompt', {
     sourceMessageId: message.id,
-    candidateCount: blocks.length
+    candidateCount: blocks.length,
+    userIds: blocks.map((block) => {
+      const match = block.lines.find((line) => line.startsWith('- userId:'));
+      return match ? match.replace('- userId: ', '') : null;
+    })
   });
 
-  return blocks.slice(0, Number(client.appConfig.llm.introProfileCandidateLimit || 3));
+  return blocks.slice(0, limit);
+}
+
+function getRequesterMemoryContext(client, message) {
+  const guildId = String(message.guildId || '');
+  const userId = String(message.author?.id || '');
+  if (!guildId || !userId) {
+    return null;
+  }
+
+  const memories = getUserMemories(client, guildId, userId);
+  if (!memories.length) {
+    return null;
+  }
+
+  client.logger.info('User memory included in prompt for requester', {
+    sourceMessageId: message.id,
+    userId,
+    memoryCount: memories.length
+  });
+
+  return formatUserMemoriesForPrompt(memories);
+}
+
+function getMentionedUserMemoryContext(client, message, requestText) {
+  const mentionedUserIds = [...new Set(extractMentionedUserIds(requestText))];
+  const guildId = String(message.guildId || '');
+  if (!guildId || !mentionedUserIds.length) {
+    return [];
+  }
+
+  const blocks = [];
+  for (const userId of mentionedUserIds) {
+    const memories = getUserMemories(client, guildId, userId);
+    if (!memories.length) {
+      continue;
+    }
+
+    client.logger.info('User memory included in prompt for mentioned user', {
+      sourceMessageId: message.id,
+      targetUserId: userId,
+      memoryCount: memories.length
+    });
+
+    blocks.push({ userId, lines: formatUserMemoriesForPrompt(memories) });
+  }
+
+  return blocks;
 }
 
 async function collectContextForMessage(client, message, options = {}) {
@@ -484,6 +600,8 @@ async function collectContextForMessage(client, message, options = {}) {
   const requestResolved = await resolveDiscordTokens(client, guild, options.requestText || message.content || '');
   const mentionedUserContext = await getMentionedUserContext(client, message, options.requestText || message.content || '');
   const introProfileContext = await getIntroProfileContext(client, message, options.requestText || message.content || '');
+  const requesterMemoryLines = getRequesterMemoryContext(client, message);
+  const mentionedUserMemoryContext = getMentionedUserMemoryContext(client, message, options.requestText || message.content || '');
 
   client.logger.info('LLM context collected', {
     sourceMessageId: message.id,
@@ -496,7 +614,9 @@ async function collectContextForMessage(client, message, options = {}) {
     channelMentionsResolvedCount,
     threadStarterIncluded: Boolean(threadStarter),
     mentionedUserContextIncluded: mentionedUserContext.length > 0,
-    introProfileContextIncluded: introProfileContext.length > 0
+    introProfileContextIncluded: introProfileContext.length > 0,
+    requesterMemoryIncluded: Boolean(requesterMemoryLines),
+    mentionedUserMemoryIncluded: mentionedUserMemoryContext.length > 0
   });
 
   return {
@@ -508,7 +628,9 @@ async function collectContextForMessage(client, message, options = {}) {
     referencedMessage,
     requestResolvedText: requestResolved.content,
     mentionedUserContext,
-    introProfileContext
+    introProfileContext,
+    requesterMemoryLines,
+    mentionedUserMemoryContext
   };
 }
 

@@ -5,7 +5,111 @@ const PROMPT_TYPES = {
   JOIN_NO_INTRO: 'join_48h_no_intro'
 };
 
-const OPT_OUT_PATTERN = /(やめて|DMしないで|通知しないで|stop|unsubscribe)/iu;
+const INTENT_RULES = {
+  opt_out: [
+    /DMしないで/u,
+    /DMすんな/u,
+    /送らないで/u,
+    /もう送るな/u,
+    /通知しないで/u,
+    /やめて/u,
+    /\bstop\b/i,
+    /\bunsubscribe\b/i,
+    /no\s*dm/i,
+    /don'?t\s*dm/i
+  ],
+  ask_help: [
+    /どんなことを書けばいい/u,
+    /何を書けばいい/u,
+    /何書けばいい/u,
+    /例文/u,
+    /書き方.*教えて/u,
+    /内容.*教えて/u,
+    /書いていい.*こと/u
+  ],
+  thanks: [
+    /ありがとう/u,
+    /助かる/u,
+    /了解/u,
+    /りょうかい/u,
+    /わかった/u,
+    /\bthanks\b/i,
+    /\bthx\b/i
+  ],
+  wrote_intro: [
+    /書いた/u,
+    /投稿した/u,
+    /自己紹介した/u,
+    /書いてみた/u,
+    /投稿してみた/u
+  ]
+};
+
+function classifyIntroDmIntentByRules(content) {
+  const text = String(content || '');
+  for (const [intent, patterns] of Object.entries(INTENT_RULES)) {
+    for (const pattern of patterns) {
+      if (pattern.test(text)) {
+        return { intent, usedLlm: false, matchedPattern: pattern.toString() };
+      }
+    }
+  }
+
+  return { intent: 'unclear', usedLlm: false, matchedPattern: null };
+}
+
+async function classifyIntroDmIntentByLlm(content, client) {
+  try {
+    const response = await requestOllamaChat({
+      baseUrl: process.env.OLLAMA_BASE_URL || client.appConfig.llm.baseUrl,
+      model: process.env.OLLAMA_MODEL || client.appConfig.llm.model,
+      timeoutMs: Math.min(Number(client.appConfig.llm.timeoutMs || 30000), 20000),
+      logger: client.logger,
+      sourceMessageId: 'intro-dm-intent',
+      shortRequestMode: true,
+      numPredict: 20,
+      numCtx: 256,
+      temperature: 0.1,
+      topP: 0.9,
+      keepAlive: '10m',
+      messages: [
+        {
+          role: 'system',
+          content: 'Classify the user\'s intent. Reply ONLY with JSON: {"intent":"opt_out"|"ask_help"|"thanks"|"wrote_intro"|"unclear"}'
+        },
+        {
+          role: 'user',
+          content: String(content || '').slice(0, 200)
+        }
+      ]
+    });
+
+    if (response) {
+      const jsonMatch = String(response).match(/\{[^}]+\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        const valid = ['opt_out', 'ask_help', 'thanks', 'wrote_intro', 'unclear'];
+        if (valid.includes(parsed.intent)) {
+          return parsed.intent;
+        }
+      }
+    }
+  } catch {
+    // intentional: fallback to unclear
+  }
+
+  return 'unclear';
+}
+
+async function classifyIntroDmIntent(content, client) {
+  const ruleResult = classifyIntroDmIntentByRules(content);
+  if (ruleResult.intent !== 'unclear') {
+    return { ...ruleResult };
+  }
+
+  const llmIntent = await classifyIntroDmIntentByLlm(content, client);
+  return { intent: llmIntent, usedLlm: true, matchedPattern: null };
+}
 
 function buildVcReminderMessage(introChannelId) {
   return [
@@ -222,30 +326,35 @@ async function handleIntroDmMessage(message) {
     return true;
   }
 
-  if (OPT_OUT_PATTERN.test(message.content || '')) {
+  const { intent, usedLlm, matchedPattern } = await classifyIntroDmIntent(message.content || '', client);
+
+  client.logger.info('Intro DM intent classified', {
+    guildId,
+    userId: message.author.id,
+    messageId: message.id,
+    intent,
+    usedLlm,
+    matchedPattern
+  });
+
+  if (intent === 'opt_out') {
     client.db.introDm.markOptOutByUser(guildId, message.author.id);
-    client.logger.info('Intro DM opt-out detected', {
+    client.logger.info('Intro DM opt-out detected and applied', {
       guildId,
       userId: message.author.id
     });
     await message.reply({
       content: '了解しました。今後この自己紹介案内のDMは送らないようにします。',
-      allowedMentions: {
-        repliedUser: false,
-        parse: []
-      }
+      allowedMentions: { repliedUser: false, parse: [] }
     }).catch(() => null);
+    client.logger.info('Intro DM opt-out response sent', { guildId, userId: message.author.id });
     return true;
   }
 
   client.db.introDm.incrementReplyCountByUser(guildId, message.author.id);
-  client.logger.info('Intro DM replied_count updated', {
-    guildId,
-    userId: message.author.id
-  });
+  client.logger.info('Intro DM replied_count updated', { guildId, userId: message.author.id });
 
-  const config = getIntroDmConfig(client);
-  if (!config.llmRepliesEnabled) {
+  if (intent === 'ask_help') {
     await message.reply({
       content: [
         '返信ありがとうございます！',
@@ -253,21 +362,39 @@ async function handleIntroDmMessage(message) {
         'よければ自己紹介チャンネルに投稿してみてください。',
         `<#${client.appConfig.introChannelId}>`
       ].join('\n'),
-      allowedMentions: {
-        repliedUser: false,
-        parse: []
-      }
+      allowedMentions: { repliedUser: false, parse: [] }
     }).catch(() => null);
-    client.logger.info('Intro DM static reply sent', {
-      guildId,
-      userId: message.author.id,
-      messageId: message.id
-    });
+    client.logger.info('Intro DM ask_help response sent', { guildId, userId: message.author.id });
     return true;
   }
 
+  if (intent === 'thanks') {
+    await message.reply({
+      content: 'ありがとうございます！自己紹介は短くて大丈夫なので、気が向いたときに投稿してもらえたら嬉しいです。',
+      allowedMentions: { repliedUser: false, parse: [] }
+    }).catch(() => null);
+    client.logger.info('Intro DM thanks response sent', { guildId, userId: message.author.id });
+    return true;
+  }
+
+  if (intent === 'wrote_intro') {
+    await message.reply({
+      content: '投稿ありがとうございます！確認できたらVCプロフィールなどにも反映されます。',
+      allowedMentions: { repliedUser: false, parse: [] }
+    }).catch(() => null);
+    client.logger.info('Intro DM wrote_intro response sent', { guildId, userId: message.author.id });
+    return true;
+  }
+
+  const config = getIntroDmConfig(client);
   const effectiveState = states[0];
-  if (effectiveState.repliedCount >= config.maxLlmReplies) {
+
+  if (!config.llmRepliesEnabled || effectiveState.repliedCount >= config.maxLlmReplies) {
+    await message.reply({
+      content: 'ありがとうございます。自己紹介チャンネルへの投稿もぜひ気軽にどうぞ。',
+      allowedMentions: { repliedUser: false, parse: [] }
+    }).catch(() => null);
+    client.logger.info('Intro DM unclear fallback response sent', { guildId, userId: message.author.id });
     return true;
   }
 
@@ -299,11 +426,9 @@ async function handleIntroDmMessage(message) {
   if (response) {
     await message.reply({
       content: response,
-      allowedMentions: {
-        repliedUser: false,
-        parse: []
-      }
+      allowedMentions: { repliedUser: false, parse: [] }
     }).catch(() => null);
+    client.logger.info('Intro DM LLM response sent', { guildId, userId: message.author.id });
   }
 
   return true;

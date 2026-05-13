@@ -863,7 +863,77 @@ async function extractThreadMessagePost(message, config, logger = null) {
   };
 }
 
+async function extractPlainMessagePost(message, config, logger = null) {
+  const canonicalMessage = await fetchCanonicalMessage(message, logger);
+  const guild = canonicalMessage.guild || message.guild;
+  const guildMember =
+    canonicalMessage.member ||
+    (canonicalMessage.author && guild
+      ? await guild.members.fetch(canonicalMessage.author.id).catch(() => null)
+      : null);
+  const imageAttachments = config.timeline.includeFirstImage
+    ? findImageAttachments(canonicalMessage.attachments)
+    : [];
+  const attachments = normalizeAttachments(canonicalMessage.attachments, {
+    sourceContent: canonicalMessage.content || message.content || '',
+    logger,
+    sourceMessageId: canonicalMessage.id
+  });
+  const firstImage = config.timeline.includeFirstImage
+    ? findFirstImageAttachment(canonicalMessage.attachments)
+    : null;
+  const firstVideo = findFirstVideoAttachment(canonicalMessage.attachments);
+  const socialPreview = logger ? await getSocialPreviewData(canonicalMessage, logger) : null;
+  const restoredContent = restoreCustomEmojiTokens(canonicalMessage.content || message.content || '', guild);
+  const hashtagRouting = parseBotHashtagRoutes(restoredContent, config.botHashtagRoutes);
+  const strippedContent = stripPreviewedGifLinks(hashtagRouting.content, socialPreview);
+  const customEmojiMedia = extractCustomEmojiMedia(strippedContent.content);
+  const displayName =
+    guildMember?.displayName ||
+    canonicalMessage.author?.globalName ||
+    canonicalMessage.author?.username ||
+    '不明なユーザー';
+
+  return {
+    message: canonicalMessage,
+    messageId: canonicalMessage.id,
+    createdAt: canonicalMessage.createdAt || message.createdAt || new Date(),
+    author: canonicalMessage.author || message.author || null,
+    displayName,
+    avatarUrl:
+      guildMember?.displayAvatarURL?.({ extension: 'png', size: 128 }) ||
+      canonicalMessage.author?.displayAvatarURL?.({ extension: 'png', size: 128 }) ||
+      null,
+    timelineHeadline: `${displayName} さんが投稿しました`,
+    referencedSourceMessageId: null,
+    replyContext: null,
+    title: '',
+    rawTitle: '',
+    isResolved: false,
+    content: customEmojiMedia.content,
+    customEmojiMediaItems: customEmojiMedia.mediaItems,
+    matchedBotHashtagRoutes: hashtagRouting.matchedRoutes,
+    displayBotHashtags: hashtagRouting.displayTags,
+    jumpUrl: getMessageJumpUrl({
+      guildId: canonicalMessage.guildId || (guild ? guild.id : ''),
+      channelId: canonicalMessage.channelId,
+      messageId: canonicalMessage.id
+    }),
+    attachments,
+    imageUrls: imageAttachments.map((attachment) => attachment.url),
+    firstImageUrl: firstImage?.url || null,
+    firstVideoUrl: firstVideo?.url || null,
+    firstVideoName: firstVideo?.name || null,
+    socialPreview,
+    threadId: null,
+    parentChannelId: null,
+    forumName: canonicalMessage.channel?.name || 'チャンネル',
+    parentChannelName: null
+  };
+}
+
 module.exports = {
   extractFirstPost,
-  extractThreadMessagePost
+  extractThreadMessagePost,
+  extractPlainMessagePost
 };

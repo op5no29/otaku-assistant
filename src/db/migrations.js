@@ -162,6 +162,21 @@ function runMigrations(database) {
       ON intro_profiles (guild_id, display_name);
     CREATE INDEX IF NOT EXISTS idx_intro_profiles_guild_username
       ON intro_profiles (guild_id, username);
+
+    CREATE TABLE IF NOT EXISTS user_llm_memories (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      memory_key TEXT NOT NULL,
+      memory_text TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'explicit_user_request',
+      confidence INTEGER NOT NULL DEFAULT 100,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id, memory_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_user_llm_memories_guild_user
+      ON user_llm_memories (guild_id, user_id);
   `);
 
   const vcProfileColumns = new Set(

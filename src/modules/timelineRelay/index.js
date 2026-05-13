@@ -1,6 +1,6 @@
 const { ChannelType } = require('discord.js');
 const { buildTimelineMessage } = require('./buildTimelineMessage');
-const { extractFirstPost, extractThreadMessagePost } = require('./extractFirstPost');
+const { extractFirstPost, extractThreadMessagePost, extractPlainMessagePost } = require('./extractFirstPost');
 const { prepareVideoThumbnail } = require('./videoThumbnail');
 const { prepareAttachmentRelay } = require('./attachmentRelay');
 const { enrichPostWithMusicLink } = require('./musicLinks');
@@ -842,9 +842,218 @@ async function updateQuestionTimelineCard(thread, { config, db, logger }) {
   });
 }
 
+function detectGlobalHashtagMatches(content, globalHashtagRoutes) {
+  const lines = String(content || '').split(/\r?\n/);
+  const matched = new Map();
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('##')) {
+      continue;
+    }
+
+    const tag = trimmed.slice(2).trim();
+    if (!tag) {
+      continue;
+    }
+
+    for (const [routeKey, route] of Object.entries(globalHashtagRoutes)) {
+      if (matched.has(routeKey)) {
+        continue;
+      }
+
+      const tags = Array.isArray(route.tags) ? route.tags : [];
+      for (const configTag of tags) {
+        if (tag.toLowerCase() === configTag.toLowerCase()) {
+          matched.set(routeKey, route);
+          break;
+        }
+      }
+    }
+  }
+
+  return matched;
+}
+
+async function relayGlobalHashtagMessage(message, { config, db, logger }) {
+  if (!message.inGuild?.() || message.author?.bot) {
+    return;
+  }
+
+  const sourceChannelId = String(message.channelId || '');
+  const globalHashtagRoutes = config.globalHashtagRoutes || {};
+  const vcListenOnlyChannelIds = config.vcListenOnlyChannelIds || [];
+  const isVcListenOnly = vcListenOnlyChannelIds.includes(sourceChannelId);
+  const content = String(message.content || '');
+
+  const globalMatches = detectGlobalHashtagMatches(content, globalHashtagRoutes);
+
+  let hasAnyRoute = globalMatches.size > 0;
+
+  if (!hasAnyRoute && !isVcListenOnly) {
+    return;
+  }
+
+  if (isVcListenOnly) {
+    const lines = content.split(/\r?\n/);
+    const hasAnyDoublePrefix = lines.some((line) => line.trim().startsWith('##'));
+    if (!hasAnyDoublePrefix) {
+      return;
+    }
+  }
+
+  logger.info('Global hashtag relay evaluation started', {
+    sourceMessageId: message.id,
+    sourceChannelId,
+    isVcListenOnly,
+    globalMatchCount: globalMatches.size,
+    globalMatchKeys: Array.from(globalMatches.keys())
+  });
+
+  const extractedPost = await extractPlainMessagePost(message, config, logger);
+  const post = await enrichPostWithMusicLink(extractedPost, { db, logger });
+
+  const destinationTargets = [];
+  const seenDestinationIds = new Set();
+
+  const addDestination = (destinationChannelId, relayKind) => {
+    const destId = String(destinationChannelId || '');
+    if (!destId || destId === sourceChannelId || seenDestinationIds.has(destId)) {
+      return false;
+    }
+
+    seenDestinationIds.add(destId);
+    destinationTargets.push({ destinationChannelId: destId, relayKind });
+    return true;
+  };
+
+  for (const [routeKey, route] of globalMatches) {
+    if (route.channelId) {
+      const added = addDestination(route.channelId, `global_hashtag:${routeKey}`);
+      logger.info('Global hashtag route matched', {
+        sourceMessageId: message.id,
+        routeKey,
+        destinationChannelId: route.channelId,
+        willRelay: added
+      });
+    }
+
+    if (route.alsoTimeline && config.timelineChannelId) {
+      addDestination(config.timelineChannelId, `global_hashtag:${routeKey}:timeline`);
+    }
+  }
+
+  if (isVcListenOnly) {
+    for (const routeKey of post.matchedBotHashtagRoutes || []) {
+      const route = config.botHashtagRoutes?.[routeKey];
+      if (route?.channelId) {
+        const added = addDestination(route.channelId, `vc_hashtag:${routeKey}`);
+        logger.info('VC listen-only hashtag route matched', {
+          sourceMessageId: message.id,
+          routeKey,
+          destinationChannelId: route.channelId,
+          willRelay: added
+        });
+      }
+    }
+
+    if (config.timelineChannelId && (post.matchedBotHashtagRoutes?.length || globalMatches.size)) {
+      addDestination(config.timelineChannelId, 'vc_hashtag:timeline');
+    }
+  }
+
+  if (!destinationTargets.length) {
+    logger.info('Global hashtag relay skipped: no valid destinations', {
+      sourceMessageId: message.id,
+      sourceChannelId
+    });
+    return;
+  }
+
+  const { payload, cleanup } = await buildTimelinePayload(post, {
+    config,
+    forumType: 'tweet',
+    logger
+  });
+
+  try {
+    for (const target of destinationTargets) {
+      const existingRelay = db.relays.getMessageRelayTarget(message.id, target.destinationChannelId);
+      if (existingRelay?.relayedMessageId) {
+        logger.info('Global hashtag relay skipped: destination already relayed', {
+          sourceMessageId: message.id,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
+          existingRelayedMessageId: existingRelay.relayedMessageId
+        });
+        continue;
+      }
+
+      const relayInFlightKey = buildRelayInFlightKey(message.id, target.destinationChannelId, target.relayKind);
+      if (message.client.timelineRelayMessageInFlight.has(relayInFlightKey)) {
+        logger.warn('Global hashtag relay skipped: in-flight duplicate', {
+          sourceMessageId: message.id,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind
+        });
+        continue;
+      }
+
+      const destinationChannel = await getTextChannel(message.guild, target.destinationChannelId);
+      if (!destinationChannel) {
+        logger.warn('Global hashtag relay skipped: destination channel unavailable', {
+          sourceMessageId: message.id,
+          destinationChannelId: target.destinationChannelId
+        });
+        continue;
+      }
+
+      message.client.timelineRelayMessageInFlight.add(relayInFlightKey);
+      try {
+        const doubleCheck = db.relays.getMessageRelayTarget(message.id, target.destinationChannelId);
+        if (doubleCheck?.relayedMessageId) {
+          continue;
+        }
+
+        const sentMessage = await sendRelayMessage(destinationChannel, payload, logger, {
+          sourceMessageId: message.id,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
+          sendPurpose: 'global_hashtag:relay-send',
+          callsiteLabel: 'global-hashtag:message-create'
+        });
+
+        db.relays.upsertMessageRelayTarget({
+          sourceMessageId: message.id,
+          destinationChannelId: target.destinationChannelId,
+          threadId: sourceChannelId,
+          parentChannelId: '',
+          forumType: isVcListenOnly ? 'vc_hashtag' : 'global_hashtag',
+          relayKind: target.relayKind,
+          relayedMessageId: sentMessage.id,
+          authorId: message.author?.id || null
+        });
+
+        logger.info('Global hashtag relay sent', {
+          sourceMessageId: message.id,
+          sourceChannelId,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
+          relayedMessageId: sentMessage.id
+        });
+      } finally {
+        message.client.timelineRelayMessageInFlight.delete(relayInFlightKey);
+      }
+    }
+  } finally {
+    await cleanup();
+  }
+}
+
 module.exports = {
   relayForumThread,
   relayTweetMessage,
   updateTweetTimelineCard,
-  updateQuestionTimelineCard
+  updateQuestionTimelineCard,
+  relayGlobalHashtagMessage
 };

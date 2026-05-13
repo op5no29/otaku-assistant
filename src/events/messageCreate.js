@@ -1,4 +1,4 @@
-const { relayTweetMessage } = require('../modules/timelineRelay');
+const { relayTweetMessage, relayGlobalHashtagMessage } = require('../modules/timelineRelay');
 const { applyWelcomeReactionsToMessage } = require('../modules/welcomeReactions');
 const { saveMessageToArchive } = require('../modules/messageArchive');
 const { handleLlmMessage } = require('../modules/llm');
@@ -62,28 +62,40 @@ module.exports = {
       });
     }
 
-    if (!message.inGuild() || !message.channel?.isThread?.()) {
-      return;
+    if (message.inGuild() && message.channel?.isThread?.()) {
+      client.logger.info('messageCreate received in thread', {
+        messageId: message.id,
+        channelId: message.channelId,
+        parentId: String(message.channel.parentId || ''),
+        authorId: message.author?.id || null
+      });
+
+      try {
+        await relayTweetMessage(message, {
+          config: client.appConfig,
+          db: client.db,
+          logger: client.logger
+        });
+      } catch (error) {
+        client.logger.error('Failed to handle messageCreate tweet relay', {
+          messageId: message.id,
+          channelId: message.channelId,
+          parentId: String(message.channel.parentId || ''),
+          error: error.message
+        });
+      }
     }
 
-    client.logger.info('messageCreate received in thread', {
-      messageId: message.id,
-      channelId: message.channelId,
-      parentId: String(message.channel.parentId || ''),
-      authorId: message.author?.id || null
-    });
-
     try {
-      await relayTweetMessage(message, {
+      await relayGlobalHashtagMessage(message, {
         config: client.appConfig,
         db: client.db,
         logger: client.logger
       });
     } catch (error) {
-      client.logger.error('Failed to handle messageCreate', {
+      client.logger.error('Failed to handle global hashtag relay', {
         messageId: message.id,
         channelId: message.channelId,
-        parentId: String(message.channel.parentId || ''),
         error: error.message
       });
     }

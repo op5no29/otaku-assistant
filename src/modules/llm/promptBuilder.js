@@ -51,9 +51,20 @@ function buildSystemPrompt() {
     '実際に実行できるDiscord操作は、Botコード側で実装されたものだけです。',
     'リンク先投稿への返信などの操作が必要な場合は、Botコードが渡した対象投稿情報だけを前提に回答してください。',
     'Discord の場所情報、スレッド情報、フォーラムタグ、添付、リンクプレビュー要約を文脈として使ってください。',
-    '自己紹介プロフィール情報が与えられている場合は、それを人の説明やおすすめの文脈として使ってください。',
-    '自己紹介プロフィールの候補が複数ある場合は、どの候補を仮定しているかを短く明示してください。',
-    '自己紹介に書かれていないことを捏造してはいけません。',
+    '',
+    '【自己紹介プロフィールに関する厳格なルール】',
+    '自己紹介プロフィールブロックが与えられた場合は、そのブロックに明示的に書かれている事実だけを使って回答してください。',
+    '自己紹介本文（intro_text）に書かれていないことを推測・創作・補完してはいけません。',
+    '例：プロフィール本文に「DTM、EDM、ボカロ、DJ」と書かれているなら、それだけを述べてください。「アニメ好き」など本文にない情報を付け加えてはいけません。',
+    'リンクプレビュー（embed）の情報も、ブロックに含まれている場合のみ使えます。',
+    'プロフィール候補が複数ある場合は「（〇〇さんと仮定して答えます）」のように、どの候補を使っているかを明示してください。',
+    '信頼できるプロフィールが見つからなかった場合は「プロフィールが見つかりませんでした」と答えてください。',
+    '',
+    '【ユーザーメモリーに関するルール】',
+    'このユーザーや関連ユーザーのメモリーブロックが与えられた場合は、その内容を文脈として使ってください。',
+    'ユーザーが「覚えて」「メモして」などと言った場合は、内容を確認したうえで「覚えました」と短く確認してください。',
+    'ユーザーが「忘れて」「forget」などと言った場合は、削除したことを確認してください。',
+    '',
     '「このスレッド」は現在の Discord スレッドを指します。',
     '「このチャンネル」は現在の Discord チャンネルを指します。',
     '「このユーザー」「この人」は、返信先やメンションされたユーザーを指すことがあります。',
@@ -119,10 +130,32 @@ function buildUserPrompt({ message, context }) {
     for (const block of context.introProfileContext) {
       sections.push(
         '',
-        `## 関連しそうな自己紹介プロフィール${block.assumed ? '' : '候補'}`,
+        `## 自己紹介プロフィール${block.assumed ? '' : '候補'}（このブロックの内容だけを事実として使ってください）`,
         ...block.lines
       );
     }
+  }
+
+  if (context.requesterMemoryLines?.length) {
+    sections.push(
+      '',
+      '## このユーザーについての軽いメモリー（過去に保存済み）',
+      ...context.requesterMemoryLines
+    );
+  }
+
+  if (context.mentionedUserMemoryContext?.length) {
+    for (const block of context.mentionedUserMemoryContext) {
+      sections.push(
+        '',
+        `## メンションされたユーザー (${block.userId}) についての軽いメモリー`,
+        ...block.lines
+      );
+    }
+  }
+
+  if (context.memoryNote) {
+    sections.push('', `[システム: ${context.memoryNote}]`);
   }
 
   sections.push(
@@ -170,6 +203,32 @@ function buildOllamaMessages({ message, context, shortRequestMode = false }) {
   ];
 }
 
+function buildCasualOllamaMessages({ message }) {
+  const requestAuthor = message.member?.displayName || message.author?.globalName || message.author?.username || '不明なユーザー';
+  const requestText = String(message.content || '').trim() || '(本文なし)';
+
+  return [
+    {
+      role: 'system',
+      content: [
+        'あなたは Otaku Assistant です。',
+        '日本語で短く自然に返信してください。1文だけで十分です。',
+        '重要なルール:',
+        '- 「入ってくる」「食べてくる」などは今からすることを表します。完了したとみなしてはいけません。',
+        '- 「好き」「習慣」「性格」などは、明示的に書かれていない限り推測してはいけません。',
+        '- 文脈に書かれていないことを付け加えてはいけません。',
+        '- 長い説明や分析は不要です。短く自然に返すだけでよいです。',
+        '- 状況報告には短い相槌や声かけで十分です。過去の会話を参照しないでください。'
+      ].join('\n')
+    },
+    {
+      role: 'user',
+      content: `${requestAuthor}: ${requestText}`
+    }
+  ];
+}
+
 module.exports = {
-  buildOllamaMessages
+  buildOllamaMessages,
+  buildCasualOllamaMessages
 };

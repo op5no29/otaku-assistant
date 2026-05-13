@@ -317,10 +317,64 @@ async function applyConfiguredWelcomeReactions(message, reactions, logger = mess
   };
 }
 
+async function removeOutdatedBotReactions(message, savedEmojiKeySet, client, logger) {
+  let removedCount = 0;
+  let failedCount = 0;
+
+  logger.info('Welcome backfill cleanup started', {
+    sourceMessageId: message.id,
+    channelId: message.channelId,
+    reactionCacheSize: message.reactions.cache.size,
+    savedEmojiKeyCount: savedEmojiKeySet.size
+  });
+
+  for (const reaction of message.reactions.cache.values()) {
+    if (!reaction.me) {
+      continue;
+    }
+
+    const emojiKey = getEmojiKey(reaction.emoji);
+    if (savedEmojiKeySet.has(emojiKey)) {
+      continue;
+    }
+
+    logger.info('Outdated bot reaction detected', {
+      sourceMessageId: message.id,
+      emojiKey,
+      reactionCount: reaction.count
+    });
+
+    try {
+      await reaction.users.remove(client.user.id);
+      removedCount += 1;
+      logger.info('Outdated bot reaction removed', {
+        sourceMessageId: message.id,
+        emojiKey
+      });
+    } catch (error) {
+      failedCount += 1;
+      logger.warn('Outdated bot reaction removal failed', {
+        sourceMessageId: message.id,
+        emojiKey,
+        error: error.message
+      });
+    }
+  }
+
+  logger.info('Welcome backfill cleanup finished', {
+    sourceMessageId: message.id,
+    removedCount,
+    failedCount
+  });
+
+  return { removedCount, failedCount };
+}
+
 async function backfillWelcomeReactions(client, guildId, limit = 100) {
   const logger = client.logger;
   const configuredChannelId = String(client.appConfig.welcomeChannelId || '');
   const reactions = client.db.welcomeReactions.list(guildId);
+  const savedEmojiKeySet = new Set(reactions.map((r) => r.emojiKey).filter(Boolean));
 
   logger.info('Welcome reaction backfill started', {
     guildId,
@@ -335,17 +389,9 @@ async function backfillWelcomeReactions(client, guildId, limit = 100) {
       matchedCount: 0,
       reactedMessageCount: 0,
       failedReactionCount: 0,
+      removedOutdatedCount: 0,
+      failedRemovalCount: 0,
       skippedReason: 'welcome_channel_not_configured'
-    };
-  }
-
-  if (!reactions.length) {
-    return {
-      scannedCount: 0,
-      matchedCount: 0,
-      reactedMessageCount: 0,
-      failedReactionCount: 0,
-      skippedReason: 'no_configured_reactions'
     };
   }
 
@@ -356,6 +402,8 @@ async function backfillWelcomeReactions(client, guildId, limit = 100) {
       matchedCount: 0,
       reactedMessageCount: 0,
       failedReactionCount: 0,
+      removedOutdatedCount: 0,
+      failedRemovalCount: 0,
       skippedReason: 'welcome_channel_unavailable'
     };
   }
@@ -384,6 +432,8 @@ async function backfillWelcomeReactions(client, guildId, limit = 100) {
   let matchedCount = 0;
   let reactedMessageCount = 0;
   let failedReactionCount = 0;
+  let removedOutdatedCount = 0;
+  let failedRemovalCount = 0;
 
   logger.info('Welcome reaction backfill scanning finished', {
     guildId,
@@ -397,11 +447,19 @@ async function backfillWelcomeReactions(client, guildId, limit = 100) {
     }
 
     matchedCount += 1;
-    const result = await applyConfiguredWelcomeReactions(message, reactions, logger);
-    if (result.appliedCount > 0) {
-      reactedMessageCount += 1;
+
+    if (reactions.length) {
+      const applyResult = await applyConfiguredWelcomeReactions(message, reactions, logger);
+      if (applyResult.appliedCount > 0) {
+        reactedMessageCount += 1;
+      }
+
+      failedReactionCount += applyResult.failedCount;
     }
-    failedReactionCount += result.failedCount;
+
+    const cleanupResult = await removeOutdatedBotReactions(message, savedEmojiKeySet, client, logger);
+    removedOutdatedCount += cleanupResult.removedCount;
+    failedRemovalCount += cleanupResult.failedCount;
   }
 
   logger.info('Welcome reaction backfill finished', {
@@ -410,7 +468,9 @@ async function backfillWelcomeReactions(client, guildId, limit = 100) {
     scannedCount: scannedMessages.length,
     matchedCount,
     reactedMessageCount,
-    failedReactionCount
+    failedReactionCount,
+    removedOutdatedCount,
+    failedRemovalCount
   });
 
   return {
@@ -418,6 +478,8 @@ async function backfillWelcomeReactions(client, guildId, limit = 100) {
     matchedCount,
     reactedMessageCount,
     failedReactionCount,
+    removedOutdatedCount,
+    failedRemovalCount,
     skippedReason: null
   };
 }
