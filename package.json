@@ -1,0 +1,31 @@
+{
+  "name": "otaku-assistant",
+  "version": "1.0.0",
+  "description": "Discord bot for relaying forum activity and managing question resolution in a creator community.",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "dev": "nodemon src/index.js",
+    "start": "node src/index.js",
+    "register-commands": "node src/registerCommands.js",
+    "check": "node scripts/check.js",
+    "backfill-question-tags": "node scripts/backfillQuestionTags.js",
+    "post-entrance-guide": "node scripts/postEntranceGuide.js"
+  },
+  "keywords": [
+    "discord",
+    "discordjs",
+    "sqlite",
+    "forum",
+    "bot"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "discord.js": "14.26.4",
+    "dotenv": "^16.4.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  }
+}

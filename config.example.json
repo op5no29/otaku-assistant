@@ -1,0 +1,66 @@
+{
+  "entranceChannelId": "YOUR_ENTRANCE_CHANNEL_ID",
+  "timelineChannelId": "YOUR_TIMELINE_CHANNEL_ID",
+  "introChannelId": "YOUR_INTRO_CHANNEL_ID",
+  "watchedForums": {
+    "question": [
+      "YOUR_QUESTION_FORUM_ID_1",
+      "YOUR_QUESTION_FORUM_ID_2"
+    ],
+    "tweet": [
+      "YOUR_TWEET_FORUM_ID"
+    ],
+    "knowledge": [
+      "YOUR_KNOWLEDGE_FORUM_ID"
+    ]
+  },
+  "voiceProfileChannels": [
+    {
+      "name": "通話1",
+      "profileChannelId": "YOUR_VOICE_PROFILE_TEXT_CHANNEL_ID"
+    }
+  ],
+  "timeline": {
+    "maxContentLength": 800,
+    "includeFirstImage": true,
+    "ignoreBotPosts": true
+  },
+  "voiceProfile": {
+    "ignoreBots": true
+  },
+  "mediaRelay": {
+    "maxReuploadBytes": 25000000,
+    "tempDir": "./tmp/relay-media"
+  },
+  "questions": {
+    "resolvedPrefix": "[解決済]",
+    "allowResolveBy": [
+      "threadOwner",
+      "administrator"
+    ],
+    "moderatorRoleIds": []
+  },
+  "ops": {
+    "logChannelId": "YOUR_OPS_LOG_CHANNEL_ID",
+    "developerPortalUrl": "https://discord.com/developers/applications/YOUR_APPLICATION_ID/bot",
+    "allowRestartCommand": false
+  },
+  "questionForumTags": {
+    "YOUR_QUESTION_FORUM_ID_1": {
+      "resolved": "YOUR_RESOLVED_TAG_ID",
+      "open": "YOUR_OPEN_TAG_ID"
+    }
+  },
+  "botHashtagRoutes": {
+    "いい映像": {
+      "aliases": ["いい映像", "良い映像"],
+      "display": "#良い映像",
+      "channelId": "YOUR_GOOD_VIDEO_CHANNEL_ID"
+    },
+    "いい音楽": {
+      "aliases": ["いい音楽", "良い音楽"],
+      "display": "#良い音楽",
+      "channelId": "YOUR_GOOD_MUSIC_CHANNEL_ID"
+    }
+  }
+}

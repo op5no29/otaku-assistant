@@ -1,0 +1,17 @@
+[Unit]
+Description=Otaku Assistant Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/otaku-assistant
+EnvironmentFile=/opt/otaku-assistant/.env
+ExecStart=/usr/bin/node --max-old-space-size=256 src/index.js
+Restart=always
+RestartSec=5
+User=otaku
+Group=otaku
+
+[Install]
+WantedBy=multi-user.target

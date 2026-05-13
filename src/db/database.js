@@ -1,0 +1,495 @@
+const fs = require('node:fs');
+const path = require('node:path');
+const Database = require('better-sqlite3');
+const { runMigrations } = require('./migrations');
+
+function createDatabase(databasePath) {
+  const directory = path.dirname(databasePath);
+  fs.mkdirSync(directory, { recursive: true });
+
+  const sqlite = new Database(databasePath);
+  sqlite.pragma('journal_mode = WAL');
+  runMigrations(sqlite);
+
+  const statements = {
+    hasThreadRelay: sqlite.prepare('SELECT 1 FROM relayed_threads WHERE thread_id = ? LIMIT 1'),
+    getThreadRelay: sqlite.prepare(`
+      SELECT
+        thread_id AS threadId,
+        parent_channel_id AS parentChannelId,
+        starter_message_id AS starterMessageId,
+        timeline_message_id AS timelineMessageId,
+        author_id AS authorId,
+        relayed_at AS relayedAt
+      FROM relayed_threads
+      WHERE thread_id = ?
+      LIMIT 1
+    `),
+    insertThreadRelay: sqlite.prepare(`
+      INSERT INTO relayed_threads (
+        thread_id,
+        parent_channel_id,
+        starter_message_id,
+        timeline_message_id,
+        author_id,
+        relayed_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `),
+    hasMessageRelay: sqlite.prepare('SELECT 1 FROM relayed_messages WHERE message_id = ? LIMIT 1'),
+    getMessageRelay: sqlite.prepare(`
+      SELECT
+        message_id AS messageId,
+        thread_id AS threadId,
+        parent_channel_id AS parentChannelId,
+        forum_type AS forumType,
+        timeline_message_id AS timelineMessageId,
+        author_id AS authorId,
+        relayed_at AS relayedAt
+      FROM relayed_messages
+      WHERE message_id = ?
+      LIMIT 1
+    `),
+    listMessageRelayTargets: sqlite.prepare(`
+      SELECT
+        source_message_id AS sourceMessageId,
+        destination_channel_id AS destinationChannelId,
+        thread_id AS threadId,
+        parent_channel_id AS parentChannelId,
+        forum_type AS forumType,
+        relay_kind AS relayKind,
+        relayed_message_id AS relayedMessageId,
+        author_id AS authorId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM relayed_message_targets
+      WHERE source_message_id = ?
+      ORDER BY created_at ASC
+    `),
+    getMessageRelayTarget: sqlite.prepare(`
+      SELECT
+        source_message_id AS sourceMessageId,
+        destination_channel_id AS destinationChannelId,
+        thread_id AS threadId,
+        parent_channel_id AS parentChannelId,
+        forum_type AS forumType,
+        relay_kind AS relayKind,
+        relayed_message_id AS relayedMessageId,
+        author_id AS authorId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM relayed_message_targets
+      WHERE source_message_id = ? AND destination_channel_id = ?
+      LIMIT 1
+    `),
+    upsertMessageRelayTarget: sqlite.prepare(`
+      INSERT INTO relayed_message_targets (
+        source_message_id,
+        destination_channel_id,
+        thread_id,
+        parent_channel_id,
+        forum_type,
+        relay_kind,
+        relayed_message_id,
+        author_id,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source_message_id, destination_channel_id) DO UPDATE SET
+        thread_id = excluded.thread_id,
+        parent_channel_id = excluded.parent_channel_id,
+        forum_type = excluded.forum_type,
+        relay_kind = excluded.relay_kind,
+        relayed_message_id = excluded.relayed_message_id,
+        author_id = excluded.author_id,
+        updated_at = excluded.updated_at
+    `),
+    deleteMessageRelayTarget: sqlite.prepare(`
+      DELETE FROM relayed_message_targets
+      WHERE source_message_id = ? AND destination_channel_id = ?
+    `),
+    insertMessageRelay: sqlite.prepare(`
+      INSERT INTO relayed_messages (
+        message_id,
+        thread_id,
+        parent_channel_id,
+        forum_type,
+        timeline_message_id,
+        author_id,
+        relayed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `),
+    upsertQuestionThread: sqlite.prepare(`
+      INSERT INTO question_threads (
+        thread_id,
+        author_id,
+        created_at
+      ) VALUES (?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET
+        author_id = excluded.author_id
+    `),
+    markResolved: sqlite.prepare(`
+      UPDATE question_threads
+      SET resolved_at = ?
+      WHERE thread_id = ?
+    `),
+    ensureQuestionThread: sqlite.prepare(`
+      INSERT OR IGNORE INTO question_threads (
+        thread_id,
+        author_id,
+        created_at
+      ) VALUES (?, ?, ?)
+    `),
+    getQuestionThread: sqlite.prepare(`
+      SELECT
+        thread_id AS threadId,
+        author_id AS authorId,
+        created_at AS createdAt,
+        resolved_at AS resolvedAt,
+        guide_message_id AS guideMessageId,
+        guide_sent_at AS guideSentAt
+      FROM question_threads
+      WHERE thread_id = ?
+      LIMIT 1
+    `),
+    clearResolved: sqlite.prepare(`
+      UPDATE question_threads
+      SET resolved_at = NULL
+      WHERE thread_id = ?
+    `),
+    setQuestionGuideMessage: sqlite.prepare(`
+      UPDATE question_threads
+      SET guide_message_id = ?,
+          guide_sent_at = ?
+      WHERE thread_id = ?
+    `),
+    getVcProfileMessage: sqlite.prepare(`
+      SELECT
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        user_id AS userId,
+        message_id AS messageId,
+        voice_channel_id AS voiceChannelId,
+        voice_channel_name AS voiceChannelName,
+        created_at AS createdAt
+      FROM vc_profile_messages
+      WHERE category_id = ? AND user_id = ?
+      LIMIT 1
+    `),
+    upsertVcProfileMessage: sqlite.prepare(`
+      INSERT INTO vc_profile_messages (
+        category_id,
+        profile_channel_id,
+        user_id,
+        message_id,
+        voice_channel_id,
+        voice_channel_name,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(category_id, user_id) DO UPDATE SET
+        profile_channel_id = excluded.profile_channel_id,
+        message_id = excluded.message_id,
+        voice_channel_id = excluded.voice_channel_id,
+        voice_channel_name = excluded.voice_channel_name,
+        created_at = excluded.created_at
+    `),
+    deleteVcProfileMessage: sqlite.prepare(`
+      DELETE FROM vc_profile_messages
+      WHERE category_id = ? AND user_id = ?
+    `),
+    getVcChannelProfileMessage: sqlite.prepare(`
+      SELECT
+        category_id AS categoryId,
+        voice_channel_id AS voiceChannelId,
+        profile_channel_id AS profileChannelId,
+        message_id AS messageId,
+        updated_at AS updatedAt
+      FROM vc_channel_profile_messages
+      WHERE voice_channel_id = ?
+      LIMIT 1
+    `),
+    listVcChannelProfileMessagesByCategory: sqlite.prepare(`
+      SELECT
+        category_id AS categoryId,
+        voice_channel_id AS voiceChannelId,
+        profile_channel_id AS profileChannelId,
+        message_id AS messageId,
+        updated_at AS updatedAt
+      FROM vc_channel_profile_messages
+      WHERE category_id = ?
+    `),
+    listLegacyVcProfileMessagesByCategory: sqlite.prepare(`
+      SELECT
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        user_id AS userId,
+        message_id AS messageId,
+        created_at AS createdAt
+      FROM vc_profile_messages
+      WHERE category_id = ?
+    `),
+    upsertVcChannelProfileMessage: sqlite.prepare(`
+      INSERT INTO vc_channel_profile_messages (
+        category_id,
+        voice_channel_id,
+        profile_channel_id,
+        message_id,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(voice_channel_id) DO UPDATE SET
+        category_id = excluded.category_id,
+        profile_channel_id = excluded.profile_channel_id,
+        message_id = excluded.message_id,
+        updated_at = excluded.updated_at
+    `),
+    deleteVcChannelProfileMessage: sqlite.prepare(`
+      DELETE FROM vc_channel_profile_messages
+      WHERE voice_channel_id = ?
+    `),
+    deleteLegacyVcProfileMessagesByCategory: sqlite.prepare(`
+      DELETE FROM vc_profile_messages
+      WHERE category_id = ?
+    `),
+    getGuidePost: sqlite.prepare(`
+      SELECT
+        channel_id AS channelId,
+        guide_key AS guideKey,
+        message_id AS messageId,
+        updated_at AS updatedAt
+      FROM guide_posts
+      WHERE channel_id = ? AND guide_key = ?
+      LIMIT 1
+    `),
+    listGuidePostsByChannel: sqlite.prepare(`
+      SELECT
+        channel_id AS channelId,
+        guide_key AS guideKey,
+        message_id AS messageId,
+        updated_at AS updatedAt
+      FROM guide_posts
+      WHERE channel_id = ?
+      ORDER BY guide_key ASC
+    `),
+    upsertGuidePost: sqlite.prepare(`
+      INSERT INTO guide_posts (
+        channel_id,
+        guide_key,
+        message_id,
+        updated_at
+      ) VALUES (?, ?, ?, ?)
+      ON CONFLICT(channel_id, guide_key) DO UPDATE SET
+        message_id = excluded.message_id,
+        updated_at = excluded.updated_at
+    `),
+    deleteGuidePost: sqlite.prepare(`
+      DELETE FROM guide_posts
+      WHERE channel_id = ? AND guide_key = ?
+    `),
+    getMusicLinkCache: sqlite.prepare(`
+      SELECT
+        source_url AS sourceUrl,
+        universal_url AS universalUrl,
+        title,
+        artist,
+        artwork_url AS artworkUrl,
+        platform_names AS platformNames,
+        platform_links_json AS platformLinksJson,
+        raw_json AS rawJson,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM music_link_cache
+      WHERE source_url = ?
+      LIMIT 1
+    `),
+    upsertMusicLinkCache: sqlite.prepare(`
+      INSERT INTO music_link_cache (
+        source_url,
+        universal_url,
+        title,
+        artist,
+        artwork_url,
+        platform_names,
+        platform_links_json,
+        raw_json,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(source_url) DO UPDATE SET
+        universal_url = excluded.universal_url,
+        title = excluded.title,
+        artist = excluded.artist,
+        artwork_url = excluded.artwork_url,
+        platform_names = excluded.platform_names,
+        platform_links_json = excluded.platform_links_json,
+        raw_json = excluded.raw_json,
+        updated_at = excluded.updated_at
+    `)
+  };
+
+  return {
+    sqlite,
+    relays: {
+      hasThreadRelay(threadId) {
+        return Boolean(statements.hasThreadRelay.get(threadId));
+      },
+      getThreadRelay(threadId) {
+        return statements.getThreadRelay.get(threadId) || null;
+      },
+      insertThreadRelay({ threadId, parentChannelId, starterMessageId, timelineMessageId, authorId }) {
+        statements.insertThreadRelay.run(
+          threadId,
+          parentChannelId,
+          starterMessageId,
+          timelineMessageId,
+          authorId,
+          new Date().toISOString()
+        );
+      },
+      hasMessageRelay(messageId) {
+        return Boolean(statements.hasMessageRelay.get(messageId));
+      },
+      getMessageRelay(messageId) {
+        return statements.getMessageRelay.get(messageId) || null;
+      },
+      listMessageRelayTargets(messageId) {
+        return statements.listMessageRelayTargets.all(messageId);
+      },
+      getMessageRelayTarget(messageId, destinationChannelId) {
+        return statements.getMessageRelayTarget.get(messageId, destinationChannelId) || null;
+      },
+      upsertMessageRelayTarget({
+        sourceMessageId,
+        destinationChannelId,
+        threadId,
+        parentChannelId,
+        forumType,
+        relayKind,
+        relayedMessageId,
+        authorId
+      }) {
+        const now = new Date().toISOString();
+        statements.upsertMessageRelayTarget.run(
+          sourceMessageId,
+          destinationChannelId,
+          threadId,
+          parentChannelId,
+          forumType,
+          relayKind,
+          relayedMessageId,
+          authorId,
+          now,
+          now
+        );
+      },
+      deleteMessageRelayTarget(messageId, destinationChannelId) {
+        statements.deleteMessageRelayTarget.run(messageId, destinationChannelId);
+      },
+      insertMessageRelay({ messageId, threadId, parentChannelId, forumType, timelineMessageId, authorId }) {
+        statements.insertMessageRelay.run(
+          messageId,
+          threadId,
+          parentChannelId,
+          forumType,
+          timelineMessageId,
+          authorId,
+          new Date().toISOString()
+        );
+      }
+    },
+    questions: {
+      upsertQuestionThread({ threadId, authorId }) {
+        statements.upsertQuestionThread.run(threadId, authorId, new Date().toISOString());
+      },
+      ensureQuestionThread(threadId, authorId = null) {
+        statements.ensureQuestionThread.run(threadId, authorId, new Date().toISOString());
+      },
+      getQuestionThread(threadId) {
+        return statements.getQuestionThread.get(threadId) || null;
+      },
+      markResolved(threadId, resolvedAt = new Date()) {
+        statements.markResolved.run(
+          resolvedAt instanceof Date ? resolvedAt.toISOString() : resolvedAt,
+          threadId
+        );
+      },
+      clearResolved(threadId) {
+        statements.clearResolved.run(threadId);
+      },
+      setGuideMessage(threadId, guideMessageId) {
+        statements.setQuestionGuideMessage.run(
+          guideMessageId,
+          new Date().toISOString(),
+          threadId
+        );
+      }
+    },
+    vcProfiles: {
+      getRoomMessage(voiceChannelId) {
+        return statements.getVcChannelProfileMessage.get(voiceChannelId) || null;
+      },
+      listRoomMessagesByCategory(categoryId) {
+        return statements.listVcChannelProfileMessagesByCategory.all(categoryId);
+      },
+      upsertRoomMessage({ categoryId, voiceChannelId, profileChannelId, messageId }) {
+        statements.upsertVcChannelProfileMessage.run(
+          categoryId,
+          voiceChannelId,
+          profileChannelId,
+          messageId,
+          new Date().toISOString()
+        );
+      },
+      deleteRoomMessage(voiceChannelId) {
+        statements.deleteVcChannelProfileMessage.run(voiceChannelId);
+      },
+      listLegacyProfileMessagesByCategory(categoryId) {
+        return statements.listLegacyVcProfileMessagesByCategory.all(categoryId);
+      },
+      deleteLegacyProfileMessagesByCategory(categoryId) {
+        statements.deleteLegacyVcProfileMessagesByCategory.run(categoryId);
+      }
+    },
+    guides: {
+      getGuidePost(channelId, guideKey) {
+        return statements.getGuidePost.get(channelId, guideKey) || null;
+      },
+      listGuidePosts(channelId) {
+        return statements.listGuidePostsByChannel.all(channelId);
+      },
+      upsertGuidePost({ channelId, guideKey, messageId }) {
+        statements.upsertGuidePost.run(
+          channelId,
+          guideKey,
+          messageId,
+          new Date().toISOString()
+        );
+      },
+      deleteGuidePost(channelId, guideKey) {
+        statements.deleteGuidePost.run(channelId, guideKey);
+      }
+    },
+    musicLinks: {
+      get(sourceUrl) {
+        return statements.getMusicLinkCache.get(sourceUrl) || null;
+      },
+      upsert({ sourceUrl, universalUrl, title, artist, artworkUrl, platformNames, platformLinksJson, rawJson }) {
+        const now = new Date().toISOString();
+        statements.upsertMusicLinkCache.run(
+          sourceUrl,
+          universalUrl || null,
+          title || null,
+          artist || null,
+          artworkUrl || null,
+          platformNames || null,
+          platformLinksJson || null,
+          rawJson || null,
+          now,
+          now
+        );
+      }
+    }
+  };
+}
+
+module.exports = {
+  createDatabase
+};

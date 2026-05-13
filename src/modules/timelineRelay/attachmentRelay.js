@@ -1,0 +1,322 @@
+const fs = require('node:fs/promises');
+const path = require('node:path');
+const { createUniqueDisplayFileName } = require('../../utils/text');
+
+const DEFAULT_TEMP_DIR = path.resolve(__dirname, '../../../tmp/relay-media');
+const MAX_DOWNLOAD_BUTTONS = 4;
+const MAX_REUPLOAD_ATTACHMENTS = 3;
+
+function sanitizeTempName(value) {
+  return String(value || 'attachment').replace(/[^a-zA-Z0-9._-]/g, '_');
+}
+
+function getTempDirectory(config) {
+  const configured = config?.mediaRelay?.tempDir;
+  if (!configured) {
+    return DEFAULT_TEMP_DIR;
+  }
+
+  return path.resolve(process.cwd(), configured);
+}
+
+function detectFileKind(attachment) {
+  if (attachment.isVideo) {
+    return 'video';
+  }
+
+  if (attachment.isAudio) {
+    return 'audio';
+  }
+
+  if (attachment.isPdf) {
+    return 'pdf';
+  }
+
+  return 'file';
+}
+
+async function removeFile(filePath, logger = null, context = {}) {
+  if (!filePath) {
+    return;
+  }
+
+  try {
+    await fs.unlink(filePath);
+    logger?.info?.('Temp relay file cleaned up', {
+      ...context,
+      filePath
+    });
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      logger?.warn?.('Temp relay file cleanup failed', {
+        ...context,
+        filePath,
+        error: error.message
+      });
+    }
+  }
+}
+
+async function downloadAttachment(url, outputPath) {
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(30_000)
+  });
+
+  if (!response.ok) {
+    throw new Error(`Attachment download failed with status ${response.status}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const buffer = Buffer.from(arrayBuffer);
+  await fs.mkdir(path.dirname(outputPath), { recursive: true });
+  await fs.writeFile(outputPath, buffer);
+}
+
+function formatDownloadLabel(attachment, index, total) {
+  if (total === 1 && attachment.isVideo) {
+    return '添付動画をダウンロード';
+  }
+
+  if (total === 1) {
+    const label = `${attachment.displayName || attachment.name} をダウンロード`;
+    return label.length <= 80 ? label : '添付ファイルをダウンロード';
+  }
+
+  return `添付ファイル${index + 1}をダウンロード`;
+}
+
+function buildAttachmentDisplayLine(attachment) {
+  if (attachment.reuploadSkippedReason === 'file_too_large' && attachment.isVideo) {
+    return `${attachment.displayName}（データ容量が大きいため、元メッセージから確認してください）`;
+  }
+
+  if (attachment.reuploadSkippedReason === 'video_reupload_failed' && attachment.isVideo) {
+    return `${attachment.displayName}（動画の再アップロードに失敗しました。元メッセージから確認してください）`;
+  }
+
+  return attachment.displayName;
+}
+
+function buildVideoUploadName(index, attachment) {
+  const extension = path.extname(attachment.displayName || attachment.name || '') || '.mp4';
+  return `video-${index + 1}${extension.toLowerCase()}`;
+}
+
+async function prepareAttachmentRelay(post, config, logger) {
+  const attachments = Array.isArray(post.attachments) ? post.attachments : [];
+  const cleanupPaths = [];
+  const componentFiles = [...(post.componentFiles || [])];
+  const fileComponentUrls = [];
+  const mediaGalleryItems = [...(post.mediaGalleryItems || [])];
+  const downloadableAttachments = [];
+  const usedDisplayNames = new Set(
+    componentFiles.map((file) => file?.name).filter(Boolean)
+  );
+  const maxReuploadBytes = Number(config?.mediaRelay?.maxReuploadBytes ?? 25_000_000);
+  const tempDir = getTempDirectory(config);
+  const normalizedAttachments = attachments.map((attachment) => {
+    const displayName = createUniqueDisplayFileName(attachment.originalName || attachment.name, usedDisplayNames);
+    return {
+      ...attachment,
+      displayName,
+      displayLine: displayName,
+      reuploadSucceeded: false,
+      reuploadSkippedReason: null
+    };
+  });
+  const nonImageAttachments = normalizedAttachments.filter((attachment) => !attachment.isImage);
+
+  if (!nonImageAttachments.length) {
+    return {
+      post: {
+        ...post,
+        attachments: normalizedAttachments
+      },
+      cleanup: async () => {}
+    };
+  }
+
+  let reuploadedCount = 0;
+  let hasReuploadedVideo = false;
+
+  for (const [index, attachment] of nonImageAttachments.entries()) {
+    const fileKind = detectFileKind(attachment);
+    const context = {
+      sourceMessageId: post.messageId,
+      attachmentName: attachment.originalName || attachment.name,
+      attachmentSize: attachment.size,
+      fileKind
+    };
+
+    logger.info('Attachment detected for relay', {
+      ...context,
+      previewableUpload: attachment.isPreviewableUpload
+    });
+
+    if (!attachment.isPreviewableUpload) {
+      logger.info('Attachment re-upload skipped; unsupported preview type', {
+        ...context,
+        fallbackReason: 'unsupported_preview_type'
+      });
+      downloadableAttachments.push({
+        name: attachment.displayName,
+        url: attachment.url,
+        label: formatDownloadLabel(attachment, index, nonImageAttachments.length),
+        isVideo: attachment.isVideo
+      });
+      continue;
+    }
+
+    if (attachment.size > maxReuploadBytes) {
+      attachment.reuploadSkippedReason = 'file_too_large';
+      attachment.displayLine = buildAttachmentDisplayLine(attachment);
+      logger.warn('Attachment re-upload skipped; file exceeds size limit', {
+        ...context,
+        maxBytes: maxReuploadBytes,
+        fallbackReason: 'file_too_large'
+      });
+      downloadableAttachments.push({
+        name: attachment.displayName,
+        url: attachment.url,
+        label: formatDownloadLabel(attachment, index, nonImageAttachments.length),
+        isVideo: attachment.isVideo
+      });
+      continue;
+    }
+
+    if (reuploadedCount >= MAX_REUPLOAD_ATTACHMENTS) {
+      attachment.reuploadSkippedReason = 'preview_upload_limit_reached';
+      logger.info('Attachment re-upload skipped; max preview upload count reached', {
+        ...context,
+        maxCount: MAX_REUPLOAD_ATTACHMENTS,
+        fallbackReason: 'preview_upload_limit_reached'
+      });
+      downloadableAttachments.push({
+        name: attachment.displayName,
+        url: attachment.url,
+        label: formatDownloadLabel(attachment, index, nonImageAttachments.length),
+        isVideo: attachment.isVideo
+      });
+      continue;
+    }
+
+    const extension = path.extname(attachment.displayName || attachment.name || '');
+    const tempName = `${sanitizeTempName(post.messageId)}-${sanitizeTempName(attachment.id || `${index}`)}${extension}`;
+    const filePath = path.join(tempDir, tempName);
+
+    try {
+      logger.info('Attachment download started', context);
+      await downloadAttachment(attachment.url, filePath);
+      logger.info('Attachment download finished', context);
+      cleanupPaths.push(filePath);
+
+      logger.info('Attachment re-upload attempted', {
+        ...context,
+        displayFileName: attachment.displayName
+      });
+      attachment.reuploadSucceeded = true;
+      attachment.displayLine = attachment.displayName;
+      reuploadedCount += 1;
+
+      if (attachment.isVideo) {
+        hasReuploadedVideo = true;
+        const uploadName = buildVideoUploadName(index, attachment);
+        const attachmentUrl = `attachment://${uploadName}`;
+        componentFiles.push({
+          attachment: filePath,
+          name: uploadName
+        });
+        mediaGalleryItems.push({
+          url: attachmentUrl,
+          description: attachment.displayName
+        });
+        logger.info('Video reupload mode selected', {
+          ...context,
+          mode: 'media-gallery',
+          displayFileName: attachment.displayName,
+          uploadFileName: uploadName,
+          attachmentUrl
+        });
+        logger.info('FileBuilder skipped for video attachment', {
+          ...context,
+          displayFileName: attachment.displayName
+        });
+      } else {
+        componentFiles.push({
+          attachment: filePath,
+          name: attachment.displayName
+        });
+        fileComponentUrls.push(`attachment://${attachment.displayName}`);
+      }
+
+      logger.info('Attachment re-upload succeeded', {
+        ...context,
+        displayFileName: attachment.displayName
+      });
+    } catch (error) {
+      logger.warn('Attachment re-upload failed; using fallback', {
+        ...context,
+        error: error.message,
+        fallbackReason: 'download_or_upload_failed'
+      });
+      if (attachment.isVideo) {
+        attachment.reuploadSkippedReason = 'video_reupload_failed';
+        attachment.displayLine = buildAttachmentDisplayLine(attachment);
+      }
+      await removeFile(filePath, logger, context);
+      downloadableAttachments.push({
+        name: attachment.displayName,
+        url: attachment.url,
+        label: formatDownloadLabel(attachment, index, nonImageAttachments.length),
+        isVideo: attachment.isVideo
+      });
+    }
+  }
+
+  for (const [index, attachment] of nonImageAttachments.entries()) {
+    if (attachment.reuploadSucceeded && attachment.isVideo) {
+      continue;
+    }
+
+    if (attachment.reuploadSucceeded) {
+      continue;
+    }
+
+    if (downloadableAttachments.some((entry) => entry.name === attachment.displayName && entry.url === attachment.url)) {
+      continue;
+    }
+
+    downloadableAttachments.push({
+      name: attachment.displayName,
+      url: attachment.url,
+      label: formatDownloadLabel(attachment, index, nonImageAttachments.length),
+      isVideo: attachment.isVideo
+    });
+  }
+
+  return {
+    post: {
+      ...post,
+      attachments: normalizedAttachments,
+      componentFiles,
+      fileComponentUrls,
+      downloadableAttachments,
+      hasMoreDownloadableAttachments: downloadableAttachments.length > MAX_DOWNLOAD_BUTTONS,
+      generatedVideoThumbnailUrl: hasReuploadedVideo ? null : post.generatedVideoThumbnailUrl,
+      mediaGalleryItems
+    },
+    cleanup: async () => {
+      await Promise.all(
+        cleanupPaths.map((filePath) =>
+          removeFile(filePath, logger, { sourceMessageId: post.messageId })
+        )
+      );
+    }
+  };
+}
+
+module.exports = {
+  MAX_DOWNLOAD_BUTTONS,
+  MAX_REUPLOAD_ATTACHMENTS,
+  prepareAttachmentRelay
+};
