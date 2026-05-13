@@ -10,6 +10,7 @@ const {
   createWelcomeReactionSetup,
   listWelcomeReactions,
   clearWelcomeReactions,
+  backfillWelcomeReactions,
   formatSavedEmoji
 } = require('../modules/welcomeReactions');
 
@@ -100,6 +101,18 @@ module.exports = {
       subcommand
         .setName('list-welcome-reactions')
         .setDescription('保存済みのWelcome通知リアクションを表示します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('backfill-welcome-reactions')
+        .setDescription('既存のWelcome参加通知へ保存済みリアクションを付与します。')
+        .addIntegerOption((option) =>
+          option
+            .setName('limit')
+            .setDescription('確認する直近メッセージ数（1-500）')
+            .setMinValue(1)
+            .setMaxValue(500)
+        )
     ),
   async execute(interaction) {
     if (!isAdministrator(interaction.member)) {
@@ -193,6 +206,31 @@ module.exports = {
             ].join('\n')
           : '保存済みWelcomeリアクションはありません。',
         ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'backfill-welcome-reactions') {
+      await interaction.deferReply({ ephemeral: true });
+      const limit = interaction.options.getInteger('limit') ?? 100;
+      const summary = await backfillWelcomeReactions(interaction.client, interaction.guildId, limit);
+
+      const lines = ['Welcomeリアクションの既存通知補完を実行しました。'];
+      if (summary.skippedReason === 'no_configured_reactions') {
+        lines.push('保存済みWelcomeリアクションがないため処理をスキップしました。');
+      } else if (summary.skippedReason === 'welcome_channel_not_configured') {
+        lines.push('welcomeChannelId が未設定のため処理をスキップしました。');
+      } else if (summary.skippedReason === 'welcome_channel_unavailable') {
+        lines.push('Welcomeチャンネルを取得できなかったため処理をスキップしました。');
+      }
+
+      lines.push(`走査メッセージ数: ${summary.scannedCount}`);
+      lines.push(`参加通知メッセージ数: ${summary.matchedCount}`);
+      lines.push(`リアクション適用メッセージ数: ${summary.reactedMessageCount}`);
+      lines.push(`失敗リアクション数: ${summary.failedReactionCount}`);
+
+      await interaction.editReply({
+        content: lines.join('\n')
       });
       return;
     }

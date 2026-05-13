@@ -237,6 +237,7 @@ Example:
 - `/maintenance setup-welcome-reactions` - post a setup message in the current channel and save up to 5 welcome reactions by reacting to it (Administrator only)
 - `/maintenance list-welcome-reactions` - show saved welcome reactions (Administrator only)
 - `/maintenance clear-welcome-reactions` - remove all saved welcome reactions (Administrator only)
+- `/maintenance backfill-welcome-reactions [limit]` - apply saved welcome reactions to recent Discord join notifications in the welcome channel (Administrator only)
 
 ## Local Run Commands
 

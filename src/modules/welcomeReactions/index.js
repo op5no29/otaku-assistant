@@ -195,11 +195,19 @@ async function applyWelcomeReactionsToMessage(message) {
     messageType: message.type
   });
 
+  return applyConfiguredWelcomeReactions(message, reactions, logger);
+}
+
+async function applyConfiguredWelcomeReactions(message, reactions, logger = message.client?.logger) {
+  let appliedCount = 0;
+  let failedCount = 0;
+
   for (const reaction of reactions) {
     const reactionTarget = reaction.emojiId || reaction.emojiName;
 
     try {
       await message.react(reactionTarget);
+      appliedCount += 1;
       logger.info('Welcome reaction applied', {
         sourceMessageId: message.id,
         channelId: message.channelId,
@@ -207,6 +215,7 @@ async function applyWelcomeReactionsToMessage(message) {
         emojiDisplay: formatSavedEmoji(reaction)
       });
     } catch (error) {
+      failedCount += 1;
       logger.warn('Welcome reaction failed', {
         sourceMessageId: message.id,
         channelId: message.channelId,
@@ -215,6 +224,116 @@ async function applyWelcomeReactionsToMessage(message) {
       });
     }
   }
+
+  return {
+    appliedCount,
+    failedCount
+  };
+}
+
+async function backfillWelcomeReactions(client, guildId, limit = 100) {
+  const logger = client.logger;
+  const configuredChannelId = String(client.appConfig.welcomeChannelId || '');
+  const reactions = client.db.welcomeReactions.list(guildId);
+
+  logger.info('Welcome reaction backfill started', {
+    guildId,
+    configuredChannelId,
+    requestedLimit: limit,
+    configuredReactionCount: reactions.length
+  });
+
+  if (!configuredChannelId) {
+    return {
+      scannedCount: 0,
+      matchedCount: 0,
+      reactedMessageCount: 0,
+      failedReactionCount: 0,
+      skippedReason: 'welcome_channel_not_configured'
+    };
+  }
+
+  if (!reactions.length) {
+    return {
+      scannedCount: 0,
+      matchedCount: 0,
+      reactedMessageCount: 0,
+      failedReactionCount: 0,
+      skippedReason: 'no_configured_reactions'
+    };
+  }
+
+  const channel = await client.channels.fetch(configuredChannelId).catch(() => null);
+  if (!channel?.isTextBased?.()) {
+    return {
+      scannedCount: 0,
+      matchedCount: 0,
+      reactedMessageCount: 0,
+      failedReactionCount: 0,
+      skippedReason: 'welcome_channel_unavailable'
+    };
+  }
+
+  const targetLimit = Math.max(1, Math.min(Number(limit) || 100, 500));
+  const collectedMessages = [];
+  let before;
+
+  while (collectedMessages.length < targetLimit) {
+    const batchSize = Math.min(100, targetLimit - collectedMessages.length);
+    const batch = await channel.messages.fetch(before ? { limit: batchSize, before } : { limit: batchSize });
+    if (!batch.size) {
+      break;
+    }
+
+    const ordered = Array.from(batch.values());
+    collectedMessages.push(...ordered);
+    before = ordered[ordered.length - 1]?.id;
+
+    if (batch.size < batchSize) {
+      break;
+    }
+  }
+
+  const scannedMessages = collectedMessages.slice(0, targetLimit);
+  let matchedCount = 0;
+  let reactedMessageCount = 0;
+  let failedReactionCount = 0;
+
+  logger.info('Welcome reaction backfill scanning finished', {
+    guildId,
+    configuredChannelId,
+    scannedCount: scannedMessages.length
+  });
+
+  for (const message of scannedMessages) {
+    if (!hasWelcomeJoinMessageType(message)) {
+      continue;
+    }
+
+    matchedCount += 1;
+    const result = await applyConfiguredWelcomeReactions(message, reactions, logger);
+    if (result.appliedCount > 0) {
+      reactedMessageCount += 1;
+    }
+    failedReactionCount += result.failedCount;
+  }
+
+  logger.info('Welcome reaction backfill finished', {
+    guildId,
+    configuredChannelId,
+    scannedCount: scannedMessages.length,
+    matchedCount,
+    reactedMessageCount,
+    failedReactionCount
+  });
+
+  return {
+    scannedCount: scannedMessages.length,
+    matchedCount,
+    reactedMessageCount,
+    failedReactionCount,
+    skippedReason: null
+  };
 }
 
 module.exports = {
@@ -223,5 +342,6 @@ module.exports = {
   clearWelcomeReactions,
   handleWelcomeReactionSetup,
   applyWelcomeReactionsToMessage,
+  backfillWelcomeReactions,
   formatSavedEmoji
 };
