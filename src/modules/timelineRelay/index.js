@@ -255,6 +255,10 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
     message.author?.id || '',
     target.destinationChannelId
   );
+  const latestDestinationState = db.timelineDestination.get(
+    message.guildId,
+    target.destinationChannelId
+  );
 
   logShortMergeEvaluation(logger, {
     sourceMessageId: message.id,
@@ -283,7 +287,8 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
     previousSourceMessageId: previousEntry?.messageId || null,
     previousSourceAuthorId: previousEntry?.authorId || null,
     previousRelayDbRecordFound: Boolean(mergeState?.relayedMessageId),
-    previousRelayedTimelineMessageId: mergeState?.relayedMessageId || null
+    previousRelayedTimelineMessageId: mergeState?.relayedMessageId || null,
+    latestRelayedMessageId: latestDestinationState?.relayedMessageId || null
   });
 
   if (!isMergeableShortTweetPost(post, config)) {
@@ -327,6 +332,26 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
       sourceMessageId: message.id,
       destinationChannelId: target.destinationChannelId,
       reason: !mergeState?.relayedMessageId ? 'merge_state_missing' : 'merge_state_not_immediately_previous'
+    });
+    return null;
+  }
+
+  const destinationIntervened = Boolean(
+    latestDestinationState?.relayedMessageId &&
+    String(latestDestinationState.relayedMessageId) !== String(mergeState.relayedMessageId)
+  );
+  logger.info('destination latest relay checked', {
+    sourceMessageId: message.id,
+    destinationChannelId: target.destinationChannelId,
+    latestRelayedMessageId: latestDestinationState?.relayedMessageId || null,
+    candidateMergeRelayedMessageId: mergeState.relayedMessageId,
+    destinationIntervened
+  });
+  if (destinationIntervened) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      destinationChannelId: target.destinationChannelId,
+      reason: 'destination_intervened'
     });
     return null;
   }
@@ -433,6 +458,14 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
       mergedTextJson: JSON.stringify(nextMergedParts),
       mergedCount: nextMergedParts.length,
       lastMessageAt: new Date(message.createdAt || Date.now()).toISOString()
+    });
+    updateTimelineDestinationState(db, {
+      guildId: message.guildId,
+      destinationChannelId: target.destinationChannelId,
+      relayedMessageId: timelineMessage.id,
+      sourceMessageId: message.id,
+      sourceThreadId,
+      authorId: message.author?.id || null
     });
     logger.info('timeline short merge edit success', {
       sourceMessageId: message.id,
@@ -608,6 +641,28 @@ async function sendRelayMessage(destinationChannel, payload, logger, meta) {
 
 function buildRelayInFlightKey(sourceMessageId, destinationChannelId, relayKind) {
   return `${sourceMessageId}:${destinationChannelId}:${relayKind}`;
+}
+
+function updateTimelineDestinationState(db, {
+  guildId,
+  destinationChannelId,
+  relayedMessageId,
+  sourceMessageId,
+  sourceThreadId,
+  authorId
+}) {
+  if (!guildId || !destinationChannelId || !relayedMessageId) {
+    return;
+  }
+
+  db.timelineDestination.upsert({
+    guildId,
+    destinationChannelId,
+    relayedMessageId,
+    sourceMessageId,
+    sourceThreadId,
+    authorId
+  });
 }
 
 async function getTextChannel(guild, channelId) {
@@ -787,6 +842,14 @@ async function relayForumThread(thread, { config, db, logger }) {
       parentChannelId: String(thread.parentId || ''),
       starterMessageId: post.messageId,
       timelineMessageId: sentMessage.id,
+      authorId: post.author?.id || null
+    });
+    updateTimelineDestinationState(db, {
+      guildId: thread.guildId,
+      destinationChannelId: String(config.timelineChannelId || ''),
+      relayedMessageId: sentMessage.id,
+      sourceMessageId: post.messageId,
+      sourceThreadId: thread.id,
       authorId: post.author?.id || null
     });
 
@@ -1002,6 +1065,14 @@ async function relayTweetMessage(message, { config, db, logger }) {
           relayedMessageId: sentMessage.id,
           authorId: message.author?.id || null
         });
+        updateTimelineDestinationState(db, {
+          guildId: message.guildId,
+          destinationChannelId: target.destinationChannelId,
+          relayedMessageId: sentMessage.id,
+          sourceMessageId: message.id,
+          sourceThreadId: String(message.channel.id || ''),
+          authorId: message.author?.id || null
+        });
 
         if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
           if (isMergeableShortTweetPost(post, config)) {
@@ -1035,6 +1106,13 @@ async function relayTweetMessage(message, { config, db, logger }) {
           relayKind: target.relayKind,
           relayedMessageId: sentMessage.id
         });
+        if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
+          logger.info('new card sent after interruption', {
+            sourceMessageId: message.id,
+            destinationChannelId: target.destinationChannelId,
+            relayedMessageId: sentMessage.id
+          });
+        }
       } finally {
         message.client.timelineRelayMessageInFlight.delete(relayInFlightKey);
       }
@@ -1551,6 +1629,14 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
           forumType: isVcListenOnly ? 'vc_hashtag' : 'global_hashtag',
           relayKind: target.relayKind,
           relayedMessageId: sentMessage.id,
+          authorId: message.author?.id || null
+        });
+        updateTimelineDestinationState(db, {
+          guildId: message.guildId,
+          destinationChannelId: target.destinationChannelId,
+          relayedMessageId: sentMessage.id,
+          sourceMessageId: message.id,
+          sourceThreadId: sourceChannelId,
           authorId: message.author?.id || null
         });
 

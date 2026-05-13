@@ -191,6 +191,17 @@ function runMigrations(database) {
       last_message_at TEXT NOT NULL,
       PRIMARY KEY (guild_id, source_channel_id, author_id, destination_channel_id)
     );
+
+    CREATE TABLE IF NOT EXISTS timeline_destination_state (
+      guild_id TEXT NOT NULL,
+      destination_channel_id TEXT NOT NULL,
+      relayed_message_id TEXT NOT NULL,
+      source_message_id TEXT,
+      source_thread_id TEXT,
+      author_id TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, destination_channel_id)
+    );
   `);
 
   const vcProfileColumns = new Set(

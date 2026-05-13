@@ -791,6 +791,36 @@ function createDatabase(databasePath) {
       DELETE FROM timeline_merge_state
       WHERE guild_id = ? AND source_channel_id = ? AND author_id = ? AND destination_channel_id = ?
     `),
+    getTimelineDestinationState: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        destination_channel_id AS destinationChannelId,
+        relayed_message_id AS relayedMessageId,
+        source_message_id AS sourceMessageId,
+        source_thread_id AS sourceThreadId,
+        author_id AS authorId,
+        updated_at AS updatedAt
+      FROM timeline_destination_state
+      WHERE guild_id = ? AND destination_channel_id = ?
+      LIMIT 1
+    `),
+    upsertTimelineDestinationState: sqlite.prepare(`
+      INSERT INTO timeline_destination_state (
+        guild_id,
+        destination_channel_id,
+        relayed_message_id,
+        source_message_id,
+        source_thread_id,
+        author_id,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, destination_channel_id) DO UPDATE SET
+        relayed_message_id = excluded.relayed_message_id,
+        source_message_id = excluded.source_message_id,
+        source_thread_id = excluded.source_thread_id,
+        author_id = excluded.author_id,
+        updated_at = excluded.updated_at
+    `),
     upsertUserLlmMemory: sqlite.prepare(`
       INSERT INTO user_llm_memories (
         guild_id, user_id, memory_key, memory_text, source, confidence, created_at, updated_at
@@ -1207,6 +1237,29 @@ function createDatabase(databasePath) {
       },
       delete(guildId, sourceChannelId, authorId, destinationChannelId) {
         statements.deleteTimelineMergeState.run(guildId, sourceChannelId, authorId, destinationChannelId);
+      }
+    },
+    timelineDestination: {
+      get(guildId, destinationChannelId) {
+        return statements.getTimelineDestinationState.get(guildId, destinationChannelId) || null;
+      },
+      upsert({
+        guildId,
+        destinationChannelId,
+        relayedMessageId,
+        sourceMessageId,
+        sourceThreadId,
+        authorId
+      }) {
+        statements.upsertTimelineDestinationState.run(
+          guildId,
+          destinationChannelId,
+          relayedMessageId,
+          sourceMessageId,
+          sourceThreadId,
+          authorId,
+          new Date().toISOString()
+        );
       }
     },
     userMemories: {
