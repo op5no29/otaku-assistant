@@ -852,11 +852,6 @@ function detectGlobalHashtagMatches(content, globalHashtagRoutes) {
       continue;
     }
 
-    const tag = trimmed.slice(2).trim();
-    if (!tag) {
-      continue;
-    }
-
     for (const [routeKey, route] of Object.entries(globalHashtagRoutes)) {
       if (matched.has(routeKey)) {
         continue;
@@ -864,7 +859,14 @@ function detectGlobalHashtagMatches(content, globalHashtagRoutes) {
 
       const tags = Array.isArray(route.tags) ? route.tags : [];
       for (const configTag of tags) {
-        if (tag.toLowerCase() === configTag.toLowerCase()) {
+        const normalizedPrefix = `##${String(configTag || '').trim()}`;
+        const normalizedLine = trimmed.toLowerCase();
+        const normalizedPrefixLower = normalizedPrefix.toLowerCase();
+        if (
+          normalizedLine === normalizedPrefixLower ||
+          normalizedLine.startsWith(`${normalizedPrefixLower} `) ||
+          normalizedLine.startsWith(`${normalizedPrefixLower}\t`)
+        ) {
           matched.set(routeKey, route);
           break;
         }

@@ -2,7 +2,7 @@ const { requestOllamaChat } = require('../ollamaClient');
 const { splitResponseIntoChunks } = require('../responseFormatter');
 
 const MESSAGE_LINK_PATTERN = /https?:\/\/(?:discord(?:app)?\.com)\/channels\/(\d+)\/(\d+)\/(\d+)/iu;
-const ACTION_REQUEST_PATTERN = /(質問して|質問をして|返信して|コメントして|リンク先|この投稿に|このメッセージに)/u;
+const ACTION_REQUEST_PATTERN = /(リプして|返信して|コメントして|質問して|質問をして|このリンクの投稿に|この投稿に|このメッセージに|リンク先)/u;
 
 function parseMessageLinkTarget(message) {
   const content = String(message.content || '');
@@ -25,6 +25,15 @@ function parseMessageLinkTarget(message) {
     };
   }
 
+  if (message.reference?.messageId) {
+    return {
+      guildId: message.guildId,
+      channelId: message.channelId,
+      messageId: message.reference.messageId,
+      source: 'message_reference'
+    };
+  }
+
   return null;
 }
 
@@ -38,6 +47,39 @@ function shouldHandleMessageLinkAction(message, client) {
   }
 
   return ACTION_REQUEST_PATTERN.test(String(message.content || '')) && Boolean(parseMessageLinkTarget(message));
+}
+
+function stripBotMentions(content, clientUserId) {
+  return String(content || '')
+    .replace(new RegExp(`<@!?${clientUserId}>`, 'g'), ' ')
+    .replace(MESSAGE_LINK_PATTERN, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractRequestedReplyText(message, client) {
+  const content = stripBotMentions(message.content || '', client.user.id);
+  const patterns = [
+    /(?:このリンクの投稿|この投稿|このメッセージ|リンク先)(?:に対して|に)?[、,:：]?\s*([\s\S]{1,500}?)\s*と(?:リプ|返信|コメント|質問)(?:して|をして)$/u,
+    /(?:に対して|に)[、,:：]?\s*([\s\S]{1,500}?)\s*と(?:リプ|返信|コメント|質問)(?:して|をして)$/u,
+    /^([\s\S]{1,500}?)\s*と(?:リプ|返信|コメント|質問)(?:して|をして)$/u
+  ];
+
+  for (const pattern of patterns) {
+    const match = content.match(pattern);
+    const extracted = match?.[1]?.trim();
+    if (extracted) {
+      return extracted.replace(/^["「『]|["」』]$/g, '').trim();
+    }
+  }
+
+  return null;
+}
+
+function isPermissionError(error) {
+  const code = String(error?.code || '');
+  const message = String(error?.message || '');
+  return code === '50013' || code === '50001' || /Missing Permissions|Missing Access/i.test(message);
 }
 
 function summarizeAttachments(attachments) {
@@ -123,7 +165,20 @@ async function handleMessageLinkReplyAction(message, client) {
 
   let tempReply = null;
   try {
+    logger.info('LLM target identifiers resolved', {
+      sourceMessageId: message.id,
+      targetGuildId: target.guildId,
+      targetChannelId: target.channelId,
+      targetMessageId: target.messageId,
+      targetSource: target.source
+    });
+
     const targetChannel = await client.channels.fetch(target.channelId).catch(() => null);
+    logger.info('LLM target channel fetched', {
+      sourceMessageId: message.id,
+      targetChannelId: target.channelId,
+      fetched: Boolean(targetChannel)
+    });
     if (!targetChannel?.isTextBased?.()) {
       await message.reply({
         content: 'リンク先のチャンネルを開けませんでした。',
@@ -148,58 +203,86 @@ async function handleMessageLinkReplyAction(message, client) {
       return true;
     }
 
-    const chosenThinkingMessage =
-      client.appConfig.llm.thinkingMessages?.[Math.floor(Math.random() * client.appConfig.llm.thinkingMessages.length)] ||
-      client.appConfig.llm.thinkingMessage;
-
-    tempReply = await message.reply({
-      content: chosenThinkingMessage,
-      allowedMentions: { repliedUser: false, parse: [] }
+    const extractedReplyText = extractRequestedReplyText(message, client);
+    logger.info('LLM target reply text extracted', {
+      sourceMessageId: message.id,
+      extracted: Boolean(extractedReplyText),
+      replyText: extractedReplyText || null
     });
 
-    logger.info('LLM target reply generation started', {
+    let firstChunk = extractedReplyText;
+    let chunks = [];
+
+    if (!firstChunk) {
+      const chosenThinkingMessage =
+        client.appConfig.llm.thinkingMessages?.[Math.floor(Math.random() * client.appConfig.llm.thinkingMessages.length)] ||
+        client.appConfig.llm.thinkingMessage;
+
+      tempReply = await message.reply({
+        content: chosenThinkingMessage,
+        allowedMentions: { repliedUser: false, parse: [] }
+      });
+
+      logger.info('LLM target reply generation started', {
+        sourceMessageId: message.id,
+        targetChannelId: target.channelId,
+        targetMessageId: target.messageId
+      });
+
+      const requesterName =
+        message.member?.displayName ||
+        message.author?.globalName ||
+        message.author?.username ||
+        '不明なユーザー';
+      const requestText = stripBotMentions(message.content || '', client.user.id);
+      const prompt = buildTargetPrompt({ requesterName, requestText, targetMessage, targetChannel });
+      const finalText = await requestOllamaChat({
+        baseUrl: process.env.OLLAMA_BASE_URL || client.appConfig.llm.baseUrl,
+        model: process.env.OLLAMA_MODEL || client.appConfig.llm.model,
+        timeoutMs: client.appConfig.llm.timeoutMs,
+        logger,
+        sourceMessageId: message.id,
+        shortRequestMode: false,
+        numPredict: Number(client.appConfig.llm.numPredict || 160),
+        numCtx: Number(client.appConfig.llm.numCtx || 1024),
+        temperature: Number(client.appConfig.llm.temperature ?? 0.3),
+        topP: Number(client.appConfig.llm.topP ?? 0.9),
+        keepAlive: String(client.appConfig.llm.keepAlive || '30m'),
+        messages: [
+          {
+            role: 'system',
+            content: 'あなたは Otaku Assistant です。Botコードが指定したリンク先投稿への返信本文だけを作成してください。リンクを実際に開いたふりはせず、与えられた対象投稿情報だけを使ってください。'
+          },
+          {
+            role: 'user',
+            content: prompt
+          }
+        ]
+      });
+
+      const generatedChunks = splitResponseIntoChunks(finalText, client.appConfig.llm.maxReplyChars);
+      firstChunk = generatedChunks.shift() || '気になったので、もう少し詳しく教えてもらえますか？';
+      chunks = generatedChunks;
+    }
+
+    if (!firstChunk) {
+      firstChunk = '気になったので、もう少し詳しく教えてもらえますか？';
+    }
+
+    logger.info('LLM target reply send started', {
       sourceMessageId: message.id,
       targetChannelId: target.channelId,
       targetMessageId: target.messageId
     });
-
-    const requesterName =
-      message.member?.displayName ||
-      message.author?.globalName ||
-      message.author?.username ||
-      '不明なユーザー';
-    const requestText = String(message.content || '').replace(/<@!?\d+>/g, ' ').trim();
-    const prompt = buildTargetPrompt({ requesterName, requestText, targetMessage, targetChannel });
-    const finalText = await requestOllamaChat({
-      baseUrl: process.env.OLLAMA_BASE_URL || client.appConfig.llm.baseUrl,
-      model: process.env.OLLAMA_MODEL || client.appConfig.llm.model,
-      timeoutMs: client.appConfig.llm.timeoutMs,
-      logger,
-      sourceMessageId: message.id,
-      shortRequestMode: false,
-      numPredict: Number(client.appConfig.llm.numPredict || 160),
-      numCtx: Number(client.appConfig.llm.numCtx || 1024),
-      temperature: Number(client.appConfig.llm.temperature ?? 0.3),
-      topP: Number(client.appConfig.llm.topP ?? 0.9),
-      keepAlive: String(client.appConfig.llm.keepAlive || '30m'),
-      messages: [
-        {
-          role: 'system',
-          content: 'あなたは Otaku Assistant です。Botコードが指定したリンク先投稿への返信本文だけを作成してください。リンクを実際に開いたふりはせず、与えられた対象投稿情報だけを使ってください。'
-        },
-        {
-          role: 'user',
-          content: prompt
-        }
-      ]
-    });
-
-    const chunks = splitResponseIntoChunks(finalText, client.appConfig.llm.maxReplyChars);
-    const firstChunk = chunks.shift() || '気になったので、もう少し詳しく教えてもらえますか？';
-
     const posted = await targetMessage.reply({
       content: firstChunk,
       allowedMentions: { repliedUser: false, parse: [] }
+    });
+    logger.info('LLM target reply send finished', {
+      sourceMessageId: message.id,
+      targetChannelId: target.channelId,
+      targetMessageId: target.messageId,
+      returnedMessageId: posted.id
     });
     const responseMessages = [posted];
 
@@ -224,10 +307,30 @@ async function handleMessageLinkReplyAction(message, client) {
       });
     }
 
-    await tempReply.edit({
-      content: 'リンク先の投稿に返信しました。',
-      allowedMentions: { parse: [] }
-    }).catch(() => null);
+    if (tempReply) {
+      await tempReply.edit({
+        content: 'リンク先の投稿に返信しました。',
+        allowedMentions: { parse: [] }
+      }).catch(() => null);
+      logger.info('LLM target reply confirmation sent', {
+        sourceMessageId: message.id,
+        confirmationMessageId: tempReply.id
+      });
+    } else if (String(message.channelId) !== String(target.channelId)) {
+      await message.reply({
+        content: 'リンク先の投稿に返信しました。',
+        allowedMentions: { repliedUser: false, parse: [] }
+      }).catch(() => null);
+      logger.info('LLM target reply confirmation sent', {
+        sourceMessageId: message.id,
+        confirmationMessageId: null
+      });
+    } else {
+      logger.info('LLM target reply confirmation skipped', {
+        sourceMessageId: message.id,
+        reason: 'same_channel_target'
+      });
+    }
 
     logger.info('LLM target reply posted', {
       sourceMessageId: message.id,
@@ -237,10 +340,18 @@ async function handleMessageLinkReplyAction(message, client) {
     });
     return true;
   } catch (error) {
+    const failureMessage = isPermissionError(error)
+      ? 'リンク先に返信する権限がありません。'
+      : 'リンク先の投稿を取得できませんでした。';
     if (tempReply) {
       await tempReply.edit({
-        content: 'リンク先投稿への返信生成に失敗しました。',
+        content: failureMessage,
         allowedMentions: { parse: [] }
+      }).catch(() => null);
+    } else {
+      await message.reply({
+        content: failureMessage,
+        allowedMentions: { repliedUser: false, parse: [] }
       }).catch(() => null);
     }
     logger.error('LLM target reply failed', {

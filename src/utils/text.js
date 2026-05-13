@@ -36,7 +36,26 @@ function parseBotHashtagRoutes(content, routeConfig = {}) {
   const seenDisplays = new Set();
 
   for (const line of rawContent.split(/\r?\n/)) {
-    const matchedRoute = aliasMap.get(line.trim());
+    const trimmedLine = line.trim();
+    let matchedRoute = null;
+    let remainingContent = '';
+
+    for (const [prefix, route] of aliasMap.entries()) {
+      const normalizedPrefix = prefix.trim();
+      const normalizedLine = trimmedLine.toLowerCase();
+      const normalizedPrefixLower = normalizedPrefix.toLowerCase();
+      if (normalizedLine === normalizedPrefixLower) {
+        matchedRoute = route;
+        remainingContent = '';
+        break;
+      }
+
+      if (normalizedLine.startsWith(`${normalizedPrefixLower} `) || normalizedLine.startsWith(`${normalizedPrefixLower}\t`)) {
+        matchedRoute = route;
+        remainingContent = trimmedLine.slice(normalizedPrefix.length).trimStart();
+        break;
+      }
+    }
 
     if (!matchedRoute) {
       remainingLines.push(line);
@@ -51,6 +70,10 @@ function parseBotHashtagRoutes(content, routeConfig = {}) {
     if (!seenDisplays.has(matchedRoute.display)) {
       displayTags.push(matchedRoute.display);
       seenDisplays.add(matchedRoute.display);
+    }
+
+    if (remainingContent) {
+      remainingLines.push(remainingContent);
     }
   }
 

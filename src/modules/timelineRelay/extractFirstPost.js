@@ -66,6 +66,53 @@ function getKnowledgeTagLabels(thread) {
     .filter(Boolean);
 }
 
+function stripGlobalHashtagPrefixes(content, globalHashtagRoutes = {}) {
+  const lines = String(content || '').split(/\r?\n/);
+  const remainingLines = [];
+
+  for (const line of lines) {
+    const trimmedLine = line.trim();
+    let matched = false;
+    let remainingContent = '';
+
+    for (const route of Object.values(globalHashtagRoutes)) {
+      const tags = Array.isArray(route?.tags) ? route.tags : [];
+      for (const tag of tags) {
+        const normalizedPrefix = `##${String(tag || '').trim()}`;
+        const normalizedLine = trimmedLine.toLowerCase();
+        const normalizedPrefixLower = normalizedPrefix.toLowerCase();
+
+        if (normalizedLine === normalizedPrefixLower) {
+          matched = true;
+          remainingContent = '';
+          break;
+        }
+
+        if (normalizedLine.startsWith(`${normalizedPrefixLower} `) || normalizedLine.startsWith(`${normalizedPrefixLower}\t`)) {
+          matched = true;
+          remainingContent = trimmedLine.slice(normalizedPrefix.length).trimStart();
+          break;
+        }
+      }
+
+      if (matched) {
+        break;
+      }
+    }
+
+    if (!matched) {
+      remainingLines.push(line);
+      continue;
+    }
+
+    if (remainingContent) {
+      remainingLines.push(remainingContent);
+    }
+  }
+
+  return remainingLines.join('\n');
+}
+
 function detectSocialLink(content) {
   if (!content) {
     return null;
@@ -885,7 +932,8 @@ async function extractPlainMessagePost(message, config, logger = null) {
   const firstVideo = findFirstVideoAttachment(canonicalMessage.attachments);
   const socialPreview = logger ? await getSocialPreviewData(canonicalMessage, logger) : null;
   const restoredContent = restoreCustomEmojiTokens(canonicalMessage.content || message.content || '', guild);
-  const hashtagRouting = parseBotHashtagRoutes(restoredContent, config.botHashtagRoutes);
+  const globalPrefixStrippedContent = stripGlobalHashtagPrefixes(restoredContent, config.globalHashtagRoutes);
+  const hashtagRouting = parseBotHashtagRoutes(globalPrefixStrippedContent, config.botHashtagRoutes);
   const strippedContent = stripPreviewedGifLinks(hashtagRouting.content, socialPreview);
   const customEmojiMedia = extractCustomEmojiMedia(strippedContent.content);
   const displayName =
