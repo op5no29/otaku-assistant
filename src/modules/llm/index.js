@@ -2,6 +2,7 @@ const { collectContextForMessage } = require('./contextCollector');
 const { buildOllamaMessages } = require('./promptBuilder');
 const { requestOllamaChat } = require('./ollamaClient');
 const { splitResponseIntoChunks } = require('./responseFormatter');
+const { handleMessageLinkReplyAction } = require('./actions/messageLinkReply');
 
 function pickRandomMessage(candidates, fallback) {
   const list = Array.isArray(candidates) ? candidates.filter(Boolean) : [];
@@ -162,6 +163,11 @@ async function handleLlmMessage(message) {
   let tempReply = null;
 
   try {
+    const handledAction = await handleMessageLinkReplyAction(message, client);
+    if (handledAction) {
+      return true;
+    }
+
     const requestText = stripBotMentions(message.content || '', client.user.id);
     const shortRequestMode = isShortRequestText(requestText);
     const shortModeDisabledReason = shortRequestMode ? null : getShortModeDisabledReason(requestText);

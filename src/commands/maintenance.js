@@ -8,6 +8,11 @@ const { getBotHealth } = require('../modules/ops/health');
 const { notifyOpsChannel } = require('../modules/ops/notify');
 const { sendIntroDm, getIntroDmStatus, PROMPT_TYPES } = require('../modules/introDm');
 const {
+  backfillIntroProfiles,
+  getIntroProfileStatus,
+  getMembersWithoutIntroOlderThan
+} = require('../modules/introProfiles');
+const {
   createWelcomeReactionSetup,
   listWelcomeReactions,
   clearWelcomeReactions,
@@ -130,6 +135,33 @@ module.exports = {
       subcommand
         .setName('intro-dm-status')
         .setDescription('intro DM テスト設定と保存状態を表示します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('intro-dm-test-join48h')
+        .setDescription('開発者限定の48時間経過自己紹介DMテストを送信します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('backfill-intro-profiles')
+        .setDescription('自己紹介チャンネルを走査してプロフィールDBを補完します。')
+        .addIntegerOption((option) =>
+          option
+            .setName('limit')
+            .setDescription('確認する直近メッセージ数（1-1000）')
+            .setMinValue(1)
+            .setMaxValue(1000)
+        )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('intro-profile-status')
+        .setDescription('自己紹介プロフィールDBの状態を表示します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('intro-dm-scan-dry-run')
+        .setDescription('自己紹介なしメンバー候補をDM送信せずに確認します。')
     ),
   async execute(interaction) {
     if (!isAdministrator(interaction.member)) {
@@ -170,12 +202,16 @@ module.exports = {
 
     if (subcommand === 'intro-dm-status') {
       const status = getIntroDmStatus(interaction.client);
+      const promptCounts = interaction.client.db.introDm.countStatesByPromptType();
       await interaction.reply({
         content: [
           `introDmEnabled: ${status.enabled}`,
           `introDmDevTestMode: ${status.devTestMode}`,
           `introDmDevUserId: ${status.devUserId}`,
-          `introDmStateCount: ${status.stateCount}`
+          `introDmStateCount: ${status.stateCount}`,
+          `vc_no_intro count: ${promptCounts.find((entry) => entry.promptType === PROMPT_TYPES.VC_NO_INTRO)?.count || 0}`,
+          `join_48h_no_intro count: ${promptCounts.find((entry) => entry.promptType === PROMPT_TYPES.JOIN_NO_INTRO)?.count || 0}`,
+          `opt_out count: ${interaction.client.db.introDm.countOptOutStates()}`
         ].join('\n'),
         ephemeral: true
       });
@@ -193,6 +229,48 @@ module.exports = {
         content: result.ok
           ? `intro DM テストを送信しました。\n対象ユーザー: ${targetUserId}`
           : `intro DM テストを送信できませんでした。\n理由: ${result.skippedReason || result.error?.message || 'unknown'}`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'intro-dm-test-join48h') {
+      const targetUserId = interaction.client.appConfig.introDm.devUserId;
+      const result = await sendIntroDm(interaction.client, {
+        userId: targetUserId,
+        promptType: PROMPT_TYPES.JOIN_NO_INTRO
+      });
+
+      await interaction.reply({
+        content: result.ok
+          ? `join48h intro DM テストを送信しました。\n対象ユーザー: ${targetUserId}`
+          : `join48h intro DM テストを送信できませんでした。\n理由: ${result.skippedReason || result.error?.message || 'unknown'}`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'intro-profile-status') {
+      const status = getIntroProfileStatus(interaction.client, interaction.guildId);
+      await interaction.reply({
+        content: [
+          `introChannelId: ${status.introChannelId || 'not set'}`,
+          `savedProfileCount: ${status.savedProfileCount}`,
+          `latestArchivedProfileDate: ${status.latestArchivedProfileDate || 'none'}`
+        ].join('\n'),
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'intro-dm-scan-dry-run') {
+      const members = await getMembersWithoutIntroOlderThan(interaction.guild, interaction.client.appConfig.introDm.joinReminderHours, interaction.client);
+      await interaction.reply({
+        content: [
+          'intro DM scan dry-run を実行しました。',
+          `候補数: ${members.length}`,
+          ...members.slice(0, 20).map((member) => `- ${member.displayName || member.user?.username || member.id} (${member.id})`)
+        ].join('\n'),
         ephemeral: true
       });
       return;
@@ -295,6 +373,22 @@ module.exports = {
 
       await interaction.editReply({
         content: lines.join('\n')
+      });
+      return;
+    }
+
+    if (subcommand === 'backfill-intro-profiles') {
+      await interaction.deferReply({ ephemeral: true });
+      const limit = interaction.options.getInteger('limit') ?? 500;
+      const summary = await backfillIntroProfiles(interaction.client, interaction.guildId, limit);
+      await interaction.editReply({
+        content: [
+          '自己紹介プロフィールの補完を実行しました。',
+          `走査件数: ${summary.scannedCount}`,
+          `保存件数: ${summary.savedCount}`,
+          `Bot投稿スキップ数: ${summary.skippedBotCount}`,
+          `失敗数: ${summary.failedCount}${summary.skippedReason ? `\nスキップ理由: ${summary.skippedReason}` : ''}`
+        ].join('\n')
       });
       return;
     }

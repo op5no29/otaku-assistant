@@ -189,9 +189,37 @@ async function handleIntroDmMessage(message) {
 
   const client = message.client;
   const guildId = getIntroDmGuildId(client);
+  if (!isAllowedTargetUser(client, message.author.id)) {
+    client.logger.info('Intro DM reply skipped non-dev', {
+      guildId,
+      userId: message.author.id
+    });
+    return false;
+  }
+
+  client.logger.info('Intro DM reply received', {
+    guildId,
+    userId: message.author.id,
+    messageId: message.id
+  });
+
   const states = client.db.introDm.listStatesByUser(guildId, message.author.id);
   if (!states.length) {
+    client.logger.info('Intro DM reply ignored no state', {
+      guildId,
+      userId: message.author.id,
+      messageId: message.id
+    });
     return false;
+  }
+
+  if (states.some((state) => state.optOut)) {
+    client.logger.info('Intro DM reply ignored due to opt-out', {
+      guildId,
+      userId: message.author.id,
+      messageId: message.id
+    });
+    return true;
   }
 
   if (OPT_OUT_PATTERN.test(message.content || '')) {
@@ -201,7 +229,7 @@ async function handleIntroDmMessage(message) {
       userId: message.author.id
     });
     await message.reply({
-      content: '了解しました。今後この案内DMは送りません。',
+      content: '了解しました。今後この自己紹介案内のDMは送らないようにします。',
       allowedMentions: {
         repliedUser: false,
         parse: []
@@ -211,9 +239,30 @@ async function handleIntroDmMessage(message) {
   }
 
   client.db.introDm.incrementReplyCountByUser(guildId, message.author.id);
+  client.logger.info('Intro DM replied_count updated', {
+    guildId,
+    userId: message.author.id
+  });
 
   const config = getIntroDmConfig(client);
   if (!config.llmRepliesEnabled) {
+    await message.reply({
+      content: [
+        '返信ありがとうございます！',
+        '自己紹介は短くて大丈夫です。たとえば「呼び方 / 興味のある分野 / 最近やっていること」を一言ずつ書いてもらえれば十分です。',
+        'よければ自己紹介チャンネルに投稿してみてください。',
+        `<#${client.appConfig.introChannelId}>`
+      ].join('\n'),
+      allowedMentions: {
+        repliedUser: false,
+        parse: []
+      }
+    }).catch(() => null);
+    client.logger.info('Intro DM static reply sent', {
+      guildId,
+      userId: message.author.id,
+      messageId: message.id
+    });
     return true;
   }
 

@@ -1,5 +1,6 @@
 const { updateTweetTimelineCard } = require('../modules/timelineRelay');
 const { saveMessageToArchive } = require('../modules/messageArchive');
+const { saveIntroProfileFromMessage } = require('../modules/introProfiles');
 
 module.exports = {
   async execute(oldMessage, newMessage) {
@@ -8,6 +9,7 @@ module.exports = {
     try {
       const resolvedMessage = newMessage.partial ? await newMessage.fetch() : newMessage;
       await saveMessageToArchive(client, resolvedMessage);
+      await saveIntroProfileFromMessage(client, resolvedMessage);
     } catch (error) {
       client.logger.error('Archive update failed', {
         messageId: newMessage.id,

@@ -156,6 +156,8 @@ function loadConfig(configPath) {
       contextMessageLimit: Number(parsed.llmContextMessageLimit ?? 50),
       shortRequestContextLimit: Number(parsed.llmShortRequestContextLimit ?? 2),
       mentionedUserMessageLimit: Number(parsed.llmMentionedUserMessageLimit ?? 30),
+      introProfileCandidateLimit: Number(parsed.llmIntroProfileCandidateLimit ?? 3),
+      includeIntroProfiles: parsed.llmIncludeIntroProfiles !== false,
       thinkingMessage: String(parsed.llmThinkingMessage || '少女祈祷中...'),
       thinkingMessages: ensureStringArray(parsed.llmThinkingMessages, [
         '少女祈祷中...',

@@ -4,6 +4,8 @@ const readyEvent = require('./events/ready');
 const threadCreateEvent = require('./events/threadCreate');
 const messageCreateEvent = require('./events/messageCreate');
 const messageUpdateEvent = require('./events/messageUpdate');
+const messageDeleteEvent = require('./events/messageDelete');
+const messageBulkDeleteEvent = require('./events/messageBulkDelete');
 const messageReactionAddEvent = require('./events/messageReactionAdd');
 const messageReactionRemoveEvent = require('./events/messageReactionRemove');
 const interactionCreateEvent = require('./events/interactionCreate');
@@ -47,6 +49,8 @@ function createBotClient({ appConfig, database, logger }) {
   client.on('threadCreate', (...args) => threadCreateEvent.execute(...args));
   client.on('messageCreate', (...args) => messageCreateEvent.execute(...args));
   client.on('messageUpdate', (...args) => messageUpdateEvent.execute(...args));
+  client.on('messageDelete', (...args) => messageDeleteEvent.execute(...args));
+  client.on('messageBulkDelete', (...args) => messageBulkDeleteEvent.execute(...args));
   client.on('messageReactionAdd', (...args) => messageReactionAddEvent.execute(...args));
   client.on('messageReactionRemove', (...args) => messageReactionRemoveEvent.execute(...args));
   client.on('interactionCreate', (...args) => interactionCreateEvent.execute(...args));

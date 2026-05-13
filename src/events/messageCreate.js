@@ -3,6 +3,7 @@ const { applyWelcomeReactionsToMessage } = require('../modules/welcomeReactions'
 const { saveMessageToArchive } = require('../modules/messageArchive');
 const { handleLlmMessage } = require('../modules/llm');
 const { handleIntroDmMessage } = require('../modules/introDm');
+const { saveIntroProfileFromMessage } = require('../modules/introProfiles');
 
 module.exports = {
   async execute(message) {
@@ -25,6 +26,16 @@ module.exports = {
       await saveMessageToArchive(client, message);
     } catch (error) {
       client.logger.error('Archive save failed', {
+        messageId: message.id,
+        channelId: message.channelId,
+        error: error.message
+      });
+    }
+
+    try {
+      await saveIntroProfileFromMessage(client, message);
+    } catch (error) {
+      client.logger.error('Intro profile save failed', {
         messageId: message.id,
         channelId: message.channelId,
         error: error.message

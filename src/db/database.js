@@ -506,6 +506,14 @@ function createDatabase(databasePath) {
       SELECT COUNT(*) AS count
       FROM archived_messages
     `),
+    deleteArchivedMessage: sqlite.prepare(`
+      DELETE FROM archived_messages
+      WHERE message_id = ?
+    `),
+    deleteArchivedMessages: sqlite.prepare(`
+      DELETE FROM archived_messages
+      WHERE message_id = ?
+    `),
     insertLlmResponse: sqlite.prepare(`
       INSERT OR REPLACE INTO llm_responses (
         response_message_id,
@@ -529,6 +537,14 @@ function createDatabase(databasePath) {
     countLlmResponses: sqlite.prepare(`
       SELECT COUNT(*) AS count
       FROM llm_responses
+    `),
+    deleteLlmResponseByMessageId: sqlite.prepare(`
+      DELETE FROM llm_responses
+      WHERE response_message_id = ? OR request_message_id = ?
+    `),
+    deleteLlmResponsesByMessageId: sqlite.prepare(`
+      DELETE FROM llm_responses
+      WHERE response_message_id = ? OR request_message_id = ?
     `),
     upsertIntroDmState: sqlite.prepare(`
       INSERT INTO intro_dm_state (
@@ -592,6 +608,147 @@ function createDatabase(databasePath) {
     countIntroDmStates: sqlite.prepare(`
       SELECT COUNT(*) AS count
       FROM intro_dm_state
+    `),
+    countIntroDmStatesByPromptType: sqlite.prepare(`
+      SELECT
+        prompt_type AS promptType,
+        COUNT(*) AS count
+      FROM intro_dm_state
+      GROUP BY prompt_type
+    `),
+    countIntroDmOptOutStates: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM intro_dm_state
+      WHERE opt_out = 1
+    `),
+    upsertIntroProfile: sqlite.prepare(`
+      INSERT INTO intro_profiles (
+        guild_id,
+        user_id,
+        intro_channel_id,
+        intro_message_id,
+        display_name,
+        username,
+        global_name,
+        nickname,
+        intro_text,
+        links_json,
+        embeds_json,
+        attachments_json,
+        search_aliases_json,
+        posted_at,
+        updated_at,
+        archived_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(intro_message_id) DO UPDATE SET
+        guild_id = excluded.guild_id,
+        user_id = excluded.user_id,
+        intro_channel_id = excluded.intro_channel_id,
+        display_name = excluded.display_name,
+        username = excluded.username,
+        global_name = excluded.global_name,
+        nickname = excluded.nickname,
+        intro_text = excluded.intro_text,
+        links_json = excluded.links_json,
+        embeds_json = excluded.embeds_json,
+        attachments_json = excluded.attachments_json,
+        search_aliases_json = excluded.search_aliases_json,
+        posted_at = excluded.posted_at,
+        updated_at = excluded.updated_at,
+        archived_at = excluded.archived_at
+    `),
+    deleteIntroProfileByMessageId: sqlite.prepare(`
+      DELETE FROM intro_profiles
+      WHERE intro_message_id = ?
+    `),
+    deleteIntroProfileByUserInChannel: sqlite.prepare(`
+      DELETE FROM intro_profiles
+      WHERE guild_id = ? AND user_id = ? AND intro_channel_id = ?
+    `),
+    getLatestIntroProfileByUser: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        intro_channel_id AS introChannelId,
+        intro_message_id AS introMessageId,
+        display_name AS displayName,
+        username,
+        global_name AS globalName,
+        nickname,
+        intro_text AS introText,
+        links_json AS linksJson,
+        embeds_json AS embedsJson,
+        attachments_json AS attachmentsJson,
+        search_aliases_json AS searchAliasesJson,
+        posted_at AS postedAt,
+        updated_at AS updatedAt,
+        archived_at AS archivedAt
+      FROM intro_profiles
+      WHERE guild_id = ? AND user_id = ? AND intro_channel_id = ?
+      ORDER BY datetime(COALESCE(updated_at, posted_at)) DESC, intro_message_id DESC
+      LIMIT 1
+    `),
+    listIntroProfilesByUser: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        intro_channel_id AS introChannelId,
+        intro_message_id AS introMessageId,
+        display_name AS displayName,
+        username,
+        global_name AS globalName,
+        nickname,
+        intro_text AS introText,
+        links_json AS linksJson,
+        embeds_json AS embedsJson,
+        attachments_json AS attachmentsJson,
+        search_aliases_json AS searchAliasesJson,
+        posted_at AS postedAt,
+        updated_at AS updatedAt,
+        archived_at AS archivedAt
+      FROM intro_profiles
+      WHERE guild_id = ? AND user_id = ? AND intro_channel_id = ?
+      ORDER BY datetime(COALESCE(updated_at, posted_at)) DESC, intro_message_id DESC
+    `),
+    searchIntroProfiles: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        intro_channel_id AS introChannelId,
+        intro_message_id AS introMessageId,
+        display_name AS displayName,
+        username,
+        global_name AS globalName,
+        nickname,
+        intro_text AS introText,
+        links_json AS linksJson,
+        embeds_json AS embedsJson,
+        attachments_json AS attachmentsJson,
+        search_aliases_json AS searchAliasesJson,
+        posted_at AS postedAt,
+        updated_at AS updatedAt,
+        archived_at AS archivedAt
+      FROM intro_profiles
+      WHERE guild_id = ? AND intro_channel_id = ?
+        AND (
+          LOWER(COALESCE(display_name, '')) LIKE ?
+          OR LOWER(COALESCE(username, '')) LIKE ?
+          OR LOWER(COALESCE(global_name, '')) LIKE ?
+          OR LOWER(COALESCE(nickname, '')) LIKE ?
+          OR LOWER(COALESCE(search_aliases_json, '')) LIKE ?
+        )
+      ORDER BY datetime(COALESCE(updated_at, posted_at)) DESC, intro_message_id DESC
+      LIMIT ?
+    `),
+    countIntroProfiles: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM intro_profiles
+      WHERE guild_id = ? AND intro_channel_id = ?
+    `),
+    getLatestIntroProfileDate: sqlite.prepare(`
+      SELECT MAX(COALESCE(updated_at, posted_at)) AS latestDate
+      FROM intro_profiles
+      WHERE guild_id = ? AND intro_channel_id = ?
     `)
   };
 
@@ -818,6 +975,17 @@ function createDatabase(databasePath) {
       },
       countMessages() {
         return Number(statements.countArchivedMessages.get()?.count || 0);
+      },
+      deleteMessage(messageId) {
+        statements.deleteArchivedMessage.run(messageId);
+      },
+      deleteMessages(messageIds = []) {
+        const transaction = sqlite.transaction((ids) => {
+          for (const messageId of ids) {
+            statements.deleteArchivedMessages.run(messageId);
+          }
+        });
+        transaction(messageIds);
       }
     },
     llmResponses: {
@@ -835,6 +1003,17 @@ function createDatabase(databasePath) {
       },
       count() {
         return Number(statements.countLlmResponses.get()?.count || 0);
+      },
+      deleteByMessageId(messageId) {
+        statements.deleteLlmResponseByMessageId.run(messageId, messageId);
+      },
+      deleteByMessageIds(messageIds = []) {
+        const transaction = sqlite.transaction((ids) => {
+          for (const messageId of ids) {
+            statements.deleteLlmResponsesByMessageId.run(messageId, messageId);
+          }
+        });
+        transaction(messageIds);
       }
     },
     introDm: {
@@ -864,6 +1043,56 @@ function createDatabase(databasePath) {
       },
       countStates() {
         return Number(statements.countIntroDmStates.get()?.count || 0);
+      },
+      countStatesByPromptType() {
+        return statements.countIntroDmStatesByPromptType.all();
+      },
+      countOptOutStates() {
+        return Number(statements.countIntroDmOptOutStates.get()?.count || 0);
+      }
+    },
+    introProfiles: {
+      upsert(record) {
+        statements.upsertIntroProfile.run(
+          record.guildId,
+          record.userId,
+          record.introChannelId,
+          record.introMessageId,
+          record.displayName,
+          record.username,
+          record.globalName,
+          record.nickname,
+          record.introText,
+          record.linksJson,
+          record.embedsJson,
+          record.attachmentsJson,
+          record.searchAliasesJson,
+          record.postedAt,
+          record.updatedAt,
+          new Date().toISOString()
+        );
+      },
+      deleteByMessageId(messageId) {
+        statements.deleteIntroProfileByMessageId.run(messageId);
+      },
+      deleteByUserInChannel(guildId, userId, introChannelId) {
+        statements.deleteIntroProfileByUserInChannel.run(guildId, userId, introChannelId);
+      },
+      getLatestByUser(guildId, userId, introChannelId) {
+        return statements.getLatestIntroProfileByUser.get(guildId, userId, introChannelId) || null;
+      },
+      listByUser(guildId, userId, introChannelId) {
+        return statements.listIntroProfilesByUser.all(guildId, userId, introChannelId);
+      },
+      search(guildId, introChannelId, query, limit) {
+        const like = `%${String(query || '').toLowerCase()}%`;
+        return statements.searchIntroProfiles.all(guildId, introChannelId, like, like, like, like, like, limit);
+      },
+      count(guildId, introChannelId) {
+        return Number(statements.countIntroProfiles.get(guildId, introChannelId)?.count || 0);
+      },
+      getLatestDate(guildId, introChannelId) {
+        return statements.getLatestIntroProfileDate.get(guildId, introChannelId)?.latestDate || null;
       }
     }
   };

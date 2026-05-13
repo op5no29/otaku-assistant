@@ -134,6 +134,34 @@ function runMigrations(database) {
       updated_at TEXT NOT NULL,
       PRIMARY KEY (guild_id, user_id, prompt_type)
     );
+
+    CREATE TABLE IF NOT EXISTS intro_profiles (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      intro_channel_id TEXT NOT NULL,
+      intro_message_id TEXT PRIMARY KEY,
+      display_name TEXT,
+      username TEXT,
+      global_name TEXT,
+      nickname TEXT,
+      intro_text TEXT,
+      links_json TEXT,
+      embeds_json TEXT,
+      attachments_json TEXT,
+      search_aliases_json TEXT,
+      posted_at TEXT,
+      updated_at TEXT,
+      archived_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_intro_profiles_guild_user
+      ON intro_profiles (guild_id, user_id);
+    CREATE INDEX IF NOT EXISTS idx_intro_profiles_guild_channel
+      ON intro_profiles (guild_id, intro_channel_id);
+    CREATE INDEX IF NOT EXISTS idx_intro_profiles_guild_display_name
+      ON intro_profiles (guild_id, display_name);
+    CREATE INDEX IF NOT EXISTS idx_intro_profiles_guild_username
+      ON intro_profiles (guild_id, username);
   `);
 
   const vcProfileColumns = new Set(

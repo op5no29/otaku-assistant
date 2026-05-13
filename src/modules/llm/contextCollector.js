@@ -3,6 +3,7 @@ const {
   getRecentArchivedMessagesByAuthor,
   getThreadStarterArchivedMessage
 } = require('../messageArchive');
+const { getLatestIntroProfileByUser, searchIntroProfiles } = require('../introProfiles');
 
 function summarizeAttachments(attachments) {
   if (!Array.isArray(attachments) || !attachments.length) {
@@ -315,6 +316,10 @@ function shouldIncludeMentionedUserContext(content) {
   return /(このユーザー|この人|過去の発言|発言から|どんな人|レベル|推測)/u.test(String(content || ''));
 }
 
+function shouldIncludeIntroProfiles(content) {
+  return /(このユーザー|この人|過去の発言|発言から|どんな人|レベル|推測|おすすめ|関連|書籍|本|資料|参考|教えて|さん|君|氏)/u.test(String(content || ''));
+}
+
 function extractMentionedUserIds(content) {
   return Array.from(String(content || '').matchAll(/<@!?(\d+)>/g)).map((match) => match[1]);
 }
@@ -362,6 +367,94 @@ async function getMentionedUserContext(client, message, requestText) {
   return blocks;
 }
 
+function formatIntroProfile(profile) {
+  const aliases = Array.isArray(profile.searchAliases) ? profile.searchAliases.filter(Boolean).slice(0, 8) : [];
+  const lines = [
+    `- userId: ${profile.userId}`,
+    `- 表示名: ${profile.displayName || profile.globalName || profile.username || '不明'}`
+  ];
+  if (aliases.length) {
+    lines.push(`- 候補名: ${aliases.join(', ')}`);
+  }
+  if (profile.introText) {
+    lines.push('- 自己紹介:');
+    lines.push(profile.introText);
+  }
+  if (Array.isArray(profile.links) && profile.links.length) {
+    lines.push(`- リンク: ${profile.links.slice(0, 6).join(', ')}`);
+  }
+  return lines;
+}
+
+function extractPossibleProfileNames(requestText) {
+  const raw = String(requestText || '');
+  const matches = [
+    ...Array.from(raw.matchAll(/([^\s\n、。,.!！?？()（）]{2,20})(?:さん|君|氏)/gu)).map((match) => match[1]),
+    ...Array.from(raw.matchAll(/\b([A-Za-z][A-Za-z0-9_.-]{1,30})\b/g)).map((match) => match[1])
+  ];
+  return [...new Set(matches.filter(Boolean))];
+}
+
+async function getIntroProfileContext(client, message, requestText) {
+  if (!client.appConfig.llm.includeIntroProfiles) {
+    return [];
+  }
+
+  const blocks = [];
+  const usedUserIds = new Set();
+  const mentionedUserIds = [...new Set(extractMentionedUserIds(requestText))];
+
+  for (const userId of mentionedUserIds) {
+    const profile = getLatestIntroProfileByUser(client, message.guildId, userId);
+    client.logger.info('LLM intro profile lookup by mention', {
+      sourceMessageId: message.id,
+      targetUserId: userId,
+      hit: Boolean(profile)
+    });
+    if (!profile) {
+      continue;
+    }
+    usedUserIds.add(userId);
+    blocks.push({
+      matchType: 'mention',
+      assumed: true,
+      lines: formatIntroProfile(profile)
+    });
+  }
+
+  if (shouldIncludeIntroProfiles(requestText)) {
+    const limit = Number(client.appConfig.llm.introProfileCandidateLimit || 3);
+    for (const candidate of extractPossibleProfileNames(requestText)) {
+      const found = searchIntroProfiles(client, message.guildId, candidate, limit)
+        .filter((profile) => !usedUserIds.has(profile.userId))
+        .slice(0, limit);
+      client.logger.info('LLM intro profile lookup by name', {
+        sourceMessageId: message.id,
+        query: candidate,
+        hitCount: found.length
+      });
+      for (const profile of found) {
+        usedUserIds.add(profile.userId);
+        blocks.push({
+          matchType: 'name',
+          assumed: found.length === 1,
+          lines: formatIntroProfile(profile)
+        });
+      }
+      if (blocks.length >= limit) {
+        break;
+      }
+    }
+  }
+
+  client.logger.info('LLM intro profile candidates included', {
+    sourceMessageId: message.id,
+    candidateCount: blocks.length
+  });
+
+  return blocks.slice(0, Number(client.appConfig.llm.introProfileCandidateLimit || 3));
+}
+
 async function collectContextForMessage(client, message, options = {}) {
   const channelId = message.channelId;
   const guild = message.guild;
@@ -390,6 +483,7 @@ async function collectContextForMessage(client, message, options = {}) {
   const referencedMessage = await getReferencedContext(client, message);
   const requestResolved = await resolveDiscordTokens(client, guild, options.requestText || message.content || '');
   const mentionedUserContext = await getMentionedUserContext(client, message, options.requestText || message.content || '');
+  const introProfileContext = await getIntroProfileContext(client, message, options.requestText || message.content || '');
 
   client.logger.info('LLM context collected', {
     sourceMessageId: message.id,
@@ -401,7 +495,8 @@ async function collectContextForMessage(client, message, options = {}) {
     mentionsResolvedCount,
     channelMentionsResolvedCount,
     threadStarterIncluded: Boolean(threadStarter),
-    mentionedUserContextIncluded: mentionedUserContext.length > 0
+    mentionedUserContextIncluded: mentionedUserContext.length > 0,
+    introProfileContextIncluded: introProfileContext.length > 0
   });
 
   return {
@@ -412,7 +507,8 @@ async function collectContextForMessage(client, message, options = {}) {
     threadStarter,
     referencedMessage,
     requestResolvedText: requestResolved.content,
-    mentionedUserContext
+    mentionedUserContext,
+    introProfileContext
   };
 }
 

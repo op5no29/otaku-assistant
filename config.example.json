@@ -38,6 +38,8 @@
   "llmContextMessageLimit": 50,
   "llmShortRequestContextLimit": 2,
   "llmMentionedUserMessageLimit": 30,
+  "llmIntroProfileCandidateLimit": 3,
+  "llmIncludeIntroProfiles": true,
   "llmThinkingMessage": "少女祈祷中...",
   "llmThinkingMessages": [
     "少女祈祷中...",
