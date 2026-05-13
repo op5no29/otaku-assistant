@@ -94,6 +94,8 @@ function loadConfig(configPath) {
     entranceChannelId: String(parsed.entranceChannelId || ''),
     timelineChannelId: String(parsed.timelineChannelId || ''),
     introChannelId: String(parsed.introChannelId || ''),
+    welcomeChannelId: String(parsed.welcomeChannelId || ''),
+    welcomeReactionsMax: Number(parsed.welcomeReactionsMax ?? 5),
     watchedForums: {
       question: ensureArray(parsed.watchedForums?.question || [], 'watchedForums.question'),
       tweet: ensureArray(parsed.watchedForums?.tweet || [], 'watchedForums.tweet'),

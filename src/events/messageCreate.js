@@ -1,8 +1,19 @@
 const { relayTweetMessage } = require('../modules/timelineRelay');
+const { applyWelcomeReactionsToMessage } = require('../modules/welcomeReactions');
 
 module.exports = {
   async execute(message) {
     const client = message.client;
+
+    try {
+      await applyWelcomeReactionsToMessage(message);
+    } catch (error) {
+      client.logger.error('Failed to apply welcome reactions', {
+        messageId: message.id,
+        channelId: message.channelId,
+        error: error.message
+      });
+    }
 
     if (!message.inGuild() || !message.channel?.isThread?.()) {
       return;

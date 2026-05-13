@@ -176,6 +176,8 @@ Example:
   "entranceChannelId": "123456789012345678",
   "timelineChannelId": "123456789012345678",
   "introChannelId": "234567890123456789",
+  "welcomeChannelId": "345678901234567890",
+  "welcomeReactionsMax": 5,
   "watchedForums": {
     "question": ["345678901234567890"],
     "tweet": ["456789012345678901"],
@@ -232,6 +234,9 @@ Example:
 - `/maintenance status` - show a safe operational summary (Administrator only)
 - `/maintenance portal` - show the Discord Developer Portal link ephemerally (Administrator only)
 - `/maintenance restart` - acknowledge, log, and exit cleanly for systemd/pm2 restart (Administrator only)
+- `/maintenance setup-welcome-reactions` - post a setup message in the current channel and save up to 5 welcome reactions by reacting to it (Administrator only)
+- `/maintenance list-welcome-reactions` - show saved welcome reactions (Administrator only)
+- `/maintenance clear-welcome-reactions` - remove all saved welcome reactions (Administrator only)
 
 ## Local Run Commands
 

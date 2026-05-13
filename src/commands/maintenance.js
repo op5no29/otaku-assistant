@@ -6,6 +6,12 @@ const { backfillQuestionTags } = require('../modules/questionResolver/backfillQu
 const { applyQuestionStatusTag } = require('../modules/questionResolver/threadTags');
 const { getBotHealth } = require('../modules/ops/health');
 const { notifyOpsChannel } = require('../modules/ops/notify');
+const {
+  createWelcomeReactionSetup,
+  listWelcomeReactions,
+  clearWelcomeReactions,
+  formatSavedEmoji
+} = require('../modules/welcomeReactions');
 
 function buildStatusLines(interaction) {
   const { client } = interaction;
@@ -31,11 +37,13 @@ function buildStatusLines(interaction) {
     `- VC profiles: ${appConfig.voiceProfileChannels.length > 0 ? 'enabled' : 'disabled'}`,
     `- media relay: ${appConfig.mediaRelay.maxReuploadBytes > 0 ? 'enabled' : 'disabled'}`,
     `- Odesli/music: ${musicRouteEnabled ? 'enabled' : 'disabled'}`,
+    `- welcome auto-reactions: ${appConfig.welcomeChannelId ? 'enabled' : 'disabled'}`,
     '設定:',
     `- timeline channel: ${appConfig.timelineChannelId || 'not set'}`,
     `- tweet forum: ${appConfig.watchedForums.tweet[0] || 'not set'}`,
     `- question forums: ${appConfig.watchedForums.question.length}`,
-    `- ops log channel: ${appConfig.ops.logChannelId || 'console only'}`
+    `- ops log channel: ${appConfig.ops.logChannelId || 'console only'}`,
+    `- welcome channel: ${appConfig.welcomeChannelId || 'not set'}`
   ];
 }
 
@@ -77,6 +85,21 @@ module.exports = {
       subcommand
         .setName('restart')
         .setDescription('Bot を終了し、プロセスマネージャに再起動させます。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('setup-welcome-reactions')
+        .setDescription('Welcome通知用リアクションの保存対象メッセージを作成します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('clear-welcome-reactions')
+        .setDescription('保存済みのWelcome通知リアクションを全削除します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('list-welcome-reactions')
+        .setDescription('保存済みのWelcome通知リアクションを表示します。')
     ),
   async execute(interaction) {
     if (!isAdministrator(interaction.member)) {
@@ -137,6 +160,38 @@ module.exports = {
     if (subcommand === 'reload-config') {
       await interaction.reply({
         content: '設定の再読み込みにはBotの再起動が必要です。',
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'setup-welcome-reactions') {
+      const setupMessage = await createWelcomeReactionSetup(interaction);
+      await interaction.reply({
+        content: `Welcomeリアクション設定メッセージを作成しました。\n${setupMessage.url}`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'clear-welcome-reactions') {
+      const clearedCount = clearWelcomeReactions(interaction.client, interaction.guildId);
+      await interaction.reply({
+        content: `Welcomeリアクションを削除しました。削除数: ${clearedCount}`,
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'list-welcome-reactions') {
+      const reactions = listWelcomeReactions(interaction.client, interaction.guildId);
+      await interaction.reply({
+        content: reactions.length
+          ? [
+              '保存済みWelcomeリアクション:',
+              ...reactions.map((reaction, index) => `${index + 1}. ${formatSavedEmoji(reaction)}`)
+            ].join('\n')
+          : '保存済みWelcomeリアクションはありません。',
         ephemeral: true
       });
       return;

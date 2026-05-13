@@ -4,6 +4,7 @@ const readyEvent = require('./events/ready');
 const threadCreateEvent = require('./events/threadCreate');
 const messageCreateEvent = require('./events/messageCreate');
 const messageUpdateEvent = require('./events/messageUpdate');
+const messageReactionAddEvent = require('./events/messageReactionAdd');
 const interactionCreateEvent = require('./events/interactionCreate');
 const voiceStateUpdateEvent = require('./events/voiceStateUpdate');
 
@@ -12,10 +13,11 @@ function createBotClient({ appConfig, database, logger }) {
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.GuildMessageReactions,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.GuildVoiceStates
     ],
-    partials: [Partials.Channel, Partials.Message]
+    partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User]
   });
 
   client.commands = new Collection();
@@ -35,11 +37,13 @@ function createBotClient({ appConfig, database, logger }) {
   client.timelineRelayInFlight = new Set();
   client.timelineRelayMessageInFlight = new Set();
   client.recentInteractionExecutions = new Map();
+  client.activeWelcomeReactionSetups = new Map();
 
   client.once('clientReady', (...args) => readyEvent.execute(...args));
   client.on('threadCreate', (...args) => threadCreateEvent.execute(...args));
   client.on('messageCreate', (...args) => messageCreateEvent.execute(...args));
   client.on('messageUpdate', (...args) => messageUpdateEvent.execute(...args));
+  client.on('messageReactionAdd', (...args) => messageReactionAddEvent.execute(...args));
   client.on('interactionCreate', (...args) => interactionCreateEvent.execute(...args));
   client.on('voiceStateUpdate', (...args) => voiceStateUpdateEvent.execute(...args));
 

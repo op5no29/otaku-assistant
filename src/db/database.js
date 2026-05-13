@@ -322,6 +322,52 @@ function createDatabase(databasePath) {
         platform_links_json = excluded.platform_links_json,
         raw_json = excluded.raw_json,
         updated_at = excluded.updated_at
+    `),
+    listWelcomeReactions: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        emoji_key AS emojiKey,
+        emoji_name AS emojiName,
+        emoji_id AS emojiId,
+        animated,
+        sort_order AS sortOrder,
+        created_at AS createdAt
+      FROM welcome_reactions
+      WHERE guild_id = ?
+      ORDER BY sort_order ASC, created_at ASC
+    `),
+    getWelcomeReaction: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        emoji_key AS emojiKey,
+        emoji_name AS emojiName,
+        emoji_id AS emojiId,
+        animated,
+        sort_order AS sortOrder,
+        created_at AS createdAt
+      FROM welcome_reactions
+      WHERE guild_id = ? AND emoji_key = ?
+      LIMIT 1
+    `),
+    insertWelcomeReaction: sqlite.prepare(`
+      INSERT INTO welcome_reactions (
+        guild_id,
+        emoji_key,
+        emoji_name,
+        emoji_id,
+        animated,
+        sort_order,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `),
+    clearWelcomeReactions: sqlite.prepare(`
+      DELETE FROM welcome_reactions
+      WHERE guild_id = ?
+    `),
+    getWelcomeReactionCount: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM welcome_reactions
+      WHERE guild_id = ?
     `)
   };
 
@@ -485,6 +531,31 @@ function createDatabase(databasePath) {
           now,
           now
         );
+      }
+    },
+    welcomeReactions: {
+      list(guildId) {
+        return statements.listWelcomeReactions.all(guildId);
+      },
+      get(guildId, emojiKey) {
+        return statements.getWelcomeReaction.get(guildId, emojiKey) || null;
+      },
+      count(guildId) {
+        return Number(statements.getWelcomeReactionCount.get(guildId)?.count || 0);
+      },
+      insert({ guildId, emojiKey, emojiName, emojiId, animated, sortOrder }) {
+        statements.insertWelcomeReaction.run(
+          guildId,
+          emojiKey,
+          emojiName || null,
+          emojiId || null,
+          animated ? 1 : 0,
+          sortOrder,
+          new Date().toISOString()
+        );
+      },
+      clear(guildId) {
+        statements.clearWelcomeReactions.run(guildId);
       }
     }
   };

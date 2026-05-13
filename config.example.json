@@ -2,6 +2,8 @@
   "entranceChannelId": "YOUR_ENTRANCE_CHANNEL_ID",
   "timelineChannelId": "YOUR_TIMELINE_CHANNEL_ID",
   "introChannelId": "YOUR_INTRO_CHANNEL_ID",
+  "welcomeChannelId": "YOUR_WELCOME_CHANNEL_ID",
+  "welcomeReactionsMax": 5,
   "watchedForums": {
     "question": [
       "YOUR_QUESTION_FORUM_ID_1",
