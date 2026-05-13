@@ -454,6 +454,54 @@ function createDatabase(databasePath) {
       ORDER BY datetime(created_at) DESC, message_id DESC
       LIMIT ?
     `),
+    listRecentArchivedMessagesByAuthorInGuild: sqlite.prepare(`
+      SELECT
+        message_id AS messageId,
+        guild_id AS guildId,
+        channel_id AS channelId,
+        parent_id AS parentId,
+        thread_id AS threadId,
+        author_id AS authorId,
+        author_name AS authorName,
+        author_is_bot AS authorIsBot,
+        content,
+        clean_content AS cleanContent,
+        attachments_json AS attachmentsJson,
+        embeds_json AS embedsJson,
+        referenced_message_id AS referencedMessageId,
+        message_type AS messageType,
+        created_at AS createdAt,
+        edited_at AS editedAt,
+        archived_at AS archivedAt
+      FROM archived_messages
+      WHERE guild_id = ? AND author_id = ?
+      ORDER BY datetime(created_at) DESC, message_id DESC
+      LIMIT ?
+    `),
+    getThreadStarterArchivedMessage: sqlite.prepare(`
+      SELECT
+        message_id AS messageId,
+        guild_id AS guildId,
+        channel_id AS channelId,
+        parent_id AS parentId,
+        thread_id AS threadId,
+        author_id AS authorId,
+        author_name AS authorName,
+        author_is_bot AS authorIsBot,
+        content,
+        clean_content AS cleanContent,
+        attachments_json AS attachmentsJson,
+        embeds_json AS embedsJson,
+        referenced_message_id AS referencedMessageId,
+        message_type AS messageType,
+        created_at AS createdAt,
+        edited_at AS editedAt,
+        archived_at AS archivedAt
+      FROM archived_messages
+      WHERE channel_id = ?
+      ORDER BY datetime(created_at) ASC, message_id ASC
+      LIMIT 1
+    `),
     countArchivedMessages: sqlite.prepare(`
       SELECT COUNT(*) AS count
       FROM archived_messages
@@ -481,6 +529,69 @@ function createDatabase(databasePath) {
     countLlmResponses: sqlite.prepare(`
       SELECT COUNT(*) AS count
       FROM llm_responses
+    `),
+    upsertIntroDmState: sqlite.prepare(`
+      INSERT INTO intro_dm_state (
+        guild_id,
+        user_id,
+        prompt_type,
+        sent_at,
+        replied_count,
+        opt_out,
+        last_error,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, user_id, prompt_type) DO UPDATE SET
+        sent_at = excluded.sent_at,
+        replied_count = excluded.replied_count,
+        opt_out = excluded.opt_out,
+        last_error = excluded.last_error,
+        updated_at = excluded.updated_at
+    `),
+    getIntroDmState: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        prompt_type AS promptType,
+        sent_at AS sentAt,
+        replied_count AS repliedCount,
+        opt_out AS optOut,
+        last_error AS lastError,
+        updated_at AS updatedAt
+      FROM intro_dm_state
+      WHERE guild_id = ? AND user_id = ? AND prompt_type = ?
+      LIMIT 1
+    `),
+    listIntroDmStatesByUser: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        prompt_type AS promptType,
+        sent_at AS sentAt,
+        replied_count AS repliedCount,
+        opt_out AS optOut,
+        last_error AS lastError,
+        updated_at AS updatedAt
+      FROM intro_dm_state
+      WHERE guild_id = ? AND user_id = ?
+      ORDER BY updated_at DESC
+    `),
+    markIntroDmOptOutByUser: sqlite.prepare(`
+      UPDATE intro_dm_state
+      SET opt_out = 1,
+          updated_at = ?,
+          last_error = NULL
+      WHERE guild_id = ? AND user_id = ?
+    `),
+    incrementIntroDmReplyCountByUser: sqlite.prepare(`
+      UPDATE intro_dm_state
+      SET replied_count = replied_count + 1,
+          updated_at = ?
+      WHERE guild_id = ? AND user_id = ?
+    `),
+    countIntroDmStates: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM intro_dm_state
     `)
   };
 
@@ -699,6 +810,12 @@ function createDatabase(databasePath) {
       listRecentMessages(channelId, limit) {
         return statements.listRecentArchivedMessagesByChannel.all(channelId, limit);
       },
+      listRecentMessagesByAuthor(guildId, authorId, limit) {
+        return statements.listRecentArchivedMessagesByAuthorInGuild.all(guildId, authorId, limit);
+      },
+      getThreadStarterMessage(channelId) {
+        return statements.getThreadStarterArchivedMessage.get(channelId) || null;
+      },
       countMessages() {
         return Number(statements.countArchivedMessages.get()?.count || 0);
       }
@@ -718,6 +835,35 @@ function createDatabase(databasePath) {
       },
       count() {
         return Number(statements.countLlmResponses.get()?.count || 0);
+      }
+    },
+    introDm: {
+      upsertState({ guildId, userId, promptType, sentAt, repliedCount = 0, optOut = false, lastError = null }) {
+        statements.upsertIntroDmState.run(
+          guildId,
+          userId,
+          promptType,
+          sentAt || null,
+          repliedCount,
+          optOut ? 1 : 0,
+          lastError,
+          new Date().toISOString()
+        );
+      },
+      getState(guildId, userId, promptType) {
+        return statements.getIntroDmState.get(guildId, userId, promptType) || null;
+      },
+      listStatesByUser(guildId, userId) {
+        return statements.listIntroDmStatesByUser.all(guildId, userId);
+      },
+      markOptOutByUser(guildId, userId) {
+        statements.markIntroDmOptOutByUser.run(new Date().toISOString(), guildId, userId);
+      },
+      incrementReplyCountByUser(guildId, userId) {
+        statements.incrementIntroDmReplyCountByUser.run(new Date().toISOString(), guildId, userId);
+      },
+      countStates() {
+        return Number(statements.countIntroDmStates.get()?.count || 0);
       }
     }
   };

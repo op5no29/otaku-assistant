@@ -6,6 +6,7 @@ const { backfillQuestionTags } = require('../modules/questionResolver/backfillQu
 const { applyQuestionStatusTag } = require('../modules/questionResolver/threadTags');
 const { getBotHealth } = require('../modules/ops/health');
 const { notifyOpsChannel } = require('../modules/ops/notify');
+const { sendIntroDm, getIntroDmStatus, PROMPT_TYPES } = require('../modules/introDm');
 const {
   createWelcomeReactionSetup,
   listWelcomeReactions,
@@ -119,6 +120,16 @@ module.exports = {
       subcommand
         .setName('llm-status')
         .setDescription('Ollama LLM の状態とアーカイブ件数を表示します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('intro-dm-test')
+        .setDescription('開発者限定の自己紹介DMテストを送信します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('intro-dm-status')
+        .setDescription('intro DM テスト設定と保存状態を表示します。')
     ),
   async execute(interaction) {
     if (!isAdministrator(interaction.member)) {
@@ -152,6 +163,36 @@ module.exports = {
           `archivedMessageCount: ${interaction.client.db.archives.countMessages()}`,
           `llmResponseCount: ${interaction.client.db.llmResponses.count()}`
         ].join('\n'),
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'intro-dm-status') {
+      const status = getIntroDmStatus(interaction.client);
+      await interaction.reply({
+        content: [
+          `introDmEnabled: ${status.enabled}`,
+          `introDmDevTestMode: ${status.devTestMode}`,
+          `introDmDevUserId: ${status.devUserId}`,
+          `introDmStateCount: ${status.stateCount}`
+        ].join('\n'),
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'intro-dm-test') {
+      const targetUserId = interaction.client.appConfig.introDm.devUserId;
+      const result = await sendIntroDm(interaction.client, {
+        userId: targetUserId,
+        promptType: PROMPT_TYPES.VC_NO_INTRO
+      });
+
+      await interaction.reply({
+        content: result.ok
+          ? `intro DM テストを送信しました。\n対象ユーザー: ${targetUserId}`
+          : `intro DM テストを送信できませんでした。\n理由: ${result.skippedReason || result.error?.message || 'unknown'}`,
         ephemeral: true
       });
       return;

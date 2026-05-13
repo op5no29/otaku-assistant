@@ -122,6 +122,18 @@ function runMigrations(database) {
       author_id TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS intro_dm_state (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      prompt_type TEXT NOT NULL,
+      sent_at TEXT,
+      replied_count INTEGER NOT NULL DEFAULT 0,
+      opt_out INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id, prompt_type)
+    );
   `);
 
   const vcProfileColumns = new Set(

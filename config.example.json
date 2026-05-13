@@ -36,6 +36,8 @@
   },
   "llmEnabled": true,
   "llmContextMessageLimit": 50,
+  "llmShortRequestContextLimit": 2,
+  "llmMentionedUserMessageLimit": 30,
   "llmThinkingMessage": "少女祈祷中...",
   "llmThinkingMessages": [
     "少女祈祷中...",
@@ -51,10 +53,16 @@
     "ただいま応答処理が詰まっています。少し待ってからもう一度試してください。",
     "ローカルLLMが別の応答を処理中です。少し待ってからもう一度試してください。"
   ],
+  "llmNumPredict": 160,
+  "llmNumPredictShort": 48,
+  "llmNumCtx": 1024,
+  "llmTemperature": 0.3,
+  "llmTopP": 0.9,
+  "llmKeepAlive": "30m",
   "llmMaxReplyChars": 1800,
   "llmTimeoutMs": 120000,
   "ollamaBaseUrl": "http://127.0.0.1:11434",
-  "ollamaModel": "qwen3:4b",
+  "ollamaModel": "gemma3:4b",
   "questions": {
     "resolvedPrefix": "[解決済]",
     "allowResolveBy": [
@@ -62,6 +70,15 @@
       "administrator"
     ],
     "moderatorRoleIds": []
+  },
+  "introDm": {
+    "enabled": false,
+    "devTestMode": true,
+    "devUserId": "323041740963446785",
+    "vcReminderCooldownDays": 7,
+    "joinReminderHours": 48,
+    "maxLlmReplies": 2,
+    "llmRepliesEnabled": false
   },
   "ops": {
     "logChannelId": "YOUR_OPS_LOG_CHANNEL_ID",

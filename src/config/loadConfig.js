@@ -78,6 +78,30 @@ function ensureOpsConfig(value) {
   };
 }
 
+function ensureIntroDmConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      enabled: false,
+      devTestMode: true,
+      devUserId: '323041740963446785',
+      vcReminderCooldownDays: 7,
+      joinReminderHours: 48,
+      maxLlmReplies: 2,
+      llmRepliesEnabled: false
+    };
+  }
+
+  return {
+    enabled: value.enabled === true,
+    devTestMode: value.devTestMode !== false,
+    devUserId: String(value.devUserId || '323041740963446785'),
+    vcReminderCooldownDays: Number(value.vcReminderCooldownDays ?? 7),
+    joinReminderHours: Number(value.joinReminderHours ?? 48),
+    maxLlmReplies: Number(value.maxLlmReplies ?? 2),
+    llmRepliesEnabled: value.llmRepliesEnabled === true
+  };
+}
+
 function loadConfig(configPath) {
   if (!process.env.DISCORD_TOKEN) {
     throw new Error('DISCORD_TOKEN is missing in .env');
@@ -130,6 +154,8 @@ function loadConfig(configPath) {
     llm: {
       enabled: parsed.llmEnabled !== false,
       contextMessageLimit: Number(parsed.llmContextMessageLimit ?? 50),
+      shortRequestContextLimit: Number(parsed.llmShortRequestContextLimit ?? 2),
+      mentionedUserMessageLimit: Number(parsed.llmMentionedUserMessageLimit ?? 30),
       thinkingMessage: String(parsed.llmThinkingMessage || '少女祈祷中...'),
       thinkingMessages: ensureStringArray(parsed.llmThinkingMessages, [
         '少女祈祷中...',
@@ -145,10 +171,16 @@ function loadConfig(configPath) {
         'ただいま応答処理が詰まっています。少し待ってからもう一度試してください。',
         'ローカルLLMが別の応答を処理中です。少し待ってからもう一度試してください。'
       ]),
+      numPredict: Number(parsed.llmNumPredict ?? 160),
+      numPredictShort: Number(parsed.llmNumPredictShort ?? 48),
+      numCtx: Number(parsed.llmNumCtx ?? 1024),
+      temperature: Number(parsed.llmTemperature ?? 0.3),
+      topP: Number(parsed.llmTopP ?? 0.9),
+      keepAlive: String(parsed.llmKeepAlive || '30m'),
       maxReplyChars: Number(parsed.llmMaxReplyChars ?? 1800),
       timeoutMs: Number(parsed.llmTimeoutMs ?? 120000),
       baseUrl: String(parsed.ollamaBaseUrl || process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434'),
-      model: String(parsed.ollamaModel || process.env.OLLAMA_MODEL || 'qwen3:4b')
+      model: String(parsed.ollamaModel || process.env.OLLAMA_MODEL || 'gemma3:4b')
     },
     questions: {
       resolvedPrefix: String(parsed.questions?.resolvedPrefix || '[解決済]'),
@@ -158,6 +190,7 @@ function loadConfig(configPath) {
       ),
       moderatorRoleIds: ensureArray(parsed.questions?.moderatorRoleIds || [], 'questions.moderatorRoleIds')
     },
+    introDm: ensureIntroDmConfig(parsed.introDm),
     ops: ensureOpsConfig(parsed.ops),
     questionForumTags: ensureTagMap(parsed.questionForumTags, 'questionForumTags'),
     botHashtagRoutes: ensureBotHashtagRoutes(parsed.botHashtagRoutes, 'botHashtagRoutes')

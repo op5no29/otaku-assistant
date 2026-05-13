@@ -21,7 +21,19 @@ function getRecentArchivedMessages(client, { channelId, limit = 50 }) {
   return rows.map(normalizeArchivedMessage).reverse();
 }
 
+function getRecentArchivedMessagesByAuthor(client, { guildId, authorId, limit = 30 }) {
+  const rows = client.db.archives.listRecentMessagesByAuthor(guildId, authorId, limit);
+  return rows.map(normalizeArchivedMessage).reverse();
+}
+
+function getThreadStarterArchivedMessage(client, { channelId }) {
+  const row = client.db.archives.getThreadStarterMessage(channelId);
+  return row ? normalizeArchivedMessage(row) : null;
+}
+
 module.exports = {
   getRecentArchivedMessages,
+  getRecentArchivedMessagesByAuthor,
+  getThreadStarterArchivedMessage,
   normalizeArchivedMessage
 };

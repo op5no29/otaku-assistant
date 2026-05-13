@@ -256,17 +256,17 @@ Otaku Assistant can answer when mentioned by using a local Ollama model only.
 Required `.env` values:
 
 - `OLLAMA_BASE_URL` (default: `http://127.0.0.1:11434`)
-- `OLLAMA_MODEL` (default: `qwen3:4b`)
+- `OLLAMA_MODEL` (default: `gemma3:4b`)
 
 Recommended models:
 
-- `qwen3:4b`
 - `gemma3:4b`
+- `qwen3:4b`
 
 Example local setup:
 
 ```bash
-ollama pull qwen3:4b
+ollama pull gemma3:4b
 ollama serve
 ```
 
