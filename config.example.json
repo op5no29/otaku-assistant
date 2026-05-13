@@ -38,6 +38,13 @@
     "maxReuploadBytes": 25000000,
     "tempDir": "./tmp/relay-media"
   },
+  "twitterMedia": {
+    "enabled": true,
+    "videoMode": "preview-only",
+    "maxVideoUploadBytes": 25000000,
+    "suppressDuplicateImages": true,
+    "resolveTimeoutMs": 15000
+  },
   "llmEnabled": true,
   "llmContextMessageLimit": 50,
   "llmShortRequestContextLimit": 2,
@@ -116,6 +123,7 @@
   "globalHashtagRoutes": [
     {
       "tags": ["技術", "tech", "Tech", "TECH", "開発", "tips", "tool", "ツール"],
+      "displayTag": "技術",
       "destinationChannelId": "YOUR_TECH_SHARING_CHANNEL_ID",
       "alsoTimeline": true
     }

@@ -45,8 +45,13 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
     logger.info('Question card built', {
       sourceMessageId: post.messageId,
       questionCardStatusColor: post.isResolved ? 'green' : 'red',
-      questionCardTitleIncluded: Boolean(post.title?.trim()),
-      questionCardBodyIncluded: Boolean(String(post.content || '').trim())
+      questionCardTitle: post.title?.trim() || '',
+      questionCardBody: String(post.content || '').trim(),
+      questionCardAuthorDisplayName: post.displayName || '',
+      questionCardCategory: post.forumName || '',
+      questionCardStatus: post.isResolved ? '解決済み' : '受付中',
+      attachmentNamesCount: Array.isArray(post.attachments) ? post.attachments.length : 0,
+      duplicateBlocksSkipped: true
     });
   }
 
@@ -101,11 +106,30 @@ function isMergeableShortTweetPost(post, config) {
   return true;
 }
 
+function logShortMergeEvaluation(logger, payload) {
+  logger.info('timeline short merge candidate evaluated', payload);
+}
+
 function getConsecutiveMergeChain(client, message, post, config, logger) {
-  logger.info('timeline short merge candidate evaluated', {
+  const text = String(post.content || '').trim();
+  logShortMergeEvaluation(logger, {
     sourceMessageId: message.id,
+    sourceChannelId: String(message.channel.parentId || ''),
     sourceThreadId: message.channelId,
     authorId: message.author?.id || null,
+    bodyText: text,
+    textLength: text.length,
+    hasAttachments: Array.isArray(post.attachments) && post.attachments.length > 0,
+    hasMedia: Boolean(
+      (Array.isArray(post.imageUrls) && post.imageUrls.length) ||
+      post.firstImageUrl ||
+      post.firstVideoUrl ||
+      post.generatedVideoThumbnailUrl ||
+      (Array.isArray(post.customEmojiMediaItems) && post.customEmojiMediaItems.length)
+    ),
+    hasUrl: /\bhttps?:\/\//i.test(text),
+    isReply: Boolean(post.referencedSourceMessageId || post.replyContext),
+    hasBotHashtagRoute: Array.isArray(post.matchedBotHashtagRoutes) && post.matchedBotHashtagRoutes.length > 0,
     mergeable: isMergeableShortTweetPost(post, config)
   });
 
@@ -125,7 +149,7 @@ function getConsecutiveMergeChain(client, message, post, config, logger) {
   if (currentIndex <= 0) {
     logger.info('timeline short merge skipped', {
       sourceMessageId: message.id,
-      reason: 'no_previous_message'
+      reason: currentIndex === -1 ? 'current_message_not_archived' : 'no_previous_message'
     });
     return null;
   }
@@ -137,6 +161,15 @@ function getConsecutiveMergeChain(client, message, post, config, logger) {
   logger.info('timeline short merge previous message checked', {
     sourceMessageId: message.id,
     previousSourceMessageId: previous.messageId,
+    previousAuthorId: previous.authorId || null,
+    previousIsMergeable: Boolean(
+      String(previous.content || '').trim() &&
+      String(previous.content || '').trim().length <= Number(config.timeline.shortMergeMaxChars || 60) &&
+      !previous.referencedMessageId &&
+      !(Array.isArray(previous.attachments) && previous.attachments.length) &&
+      !(Array.isArray(previous.embeds) && previous.embeds.length) &&
+      !/\bhttps?:\/\//i.test(String(previous.content || '').trim())
+    ),
     sameAuthor
   });
   if (!sameAuthor) {
@@ -203,9 +236,14 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
   logger.info('timeline short merge state checked', {
     sourceMessageId: message.id,
     previousSourceMessageId: previousEntry.messageId,
+    previousRelayedMessageId: existingRelay?.relayedMessageId || null,
     mergeStateFound: Boolean(existingRelay?.relayedMessageId)
   });
   if (!existingRelay?.relayedMessageId) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      reason: 'previous_relay_target_missing'
+    });
     return null;
   }
 
@@ -246,6 +284,11 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
   };
 
   try {
+    logger.info('merge edit attempted', {
+      sourceMessageId: message.id,
+      relayedMessageId: timelineMessage.id,
+      mergedCount: mergedParts.length
+    });
     const mergePayload = buildTimelineMessage({
       post: mergedPost,
       config,
@@ -816,6 +859,14 @@ async function relayTweetMessage(message, { config, db, logger }) {
           db,
           logger
         });
+        const mergedResult = await tryMergeShortTweetMessage(message, post, target, {
+          config,
+          db,
+          logger
+        });
+        if (mergedResult?.merged) {
+          continue;
+        }
         const sendPayload = {
           ...payload,
           ...(reply ? { reply } : {})

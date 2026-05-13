@@ -33,6 +33,13 @@ module.exports = {
       });
     }
 
+    client.logger.info('timeline short merge config loaded', {
+      enabled: client.appConfig.timeline.shortMergeEnabled,
+      maxChars: client.appConfig.timeline.shortMergeMaxChars,
+      windowSeconds: client.appConfig.timeline.shortMergeWindowSeconds,
+      maxParts: client.appConfig.timeline.shortMergeMaxParts
+    });
+
     await notifyOpsChannel(client, [
       '✅ Otaku Assistant started / ready',
       `- Version: ${pkg.version}`,

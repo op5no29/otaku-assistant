@@ -84,6 +84,94 @@ function parseBotHashtagRoutes(content, routeConfig = {}) {
   };
 }
 
+function parseGlobalHashtagRoutes(content, routeConfig = {}) {
+  const rawContent = String(content || '');
+  if (!rawContent) {
+    return {
+      content: rawContent,
+      matchedRoutes: [],
+      displayTags: [],
+      detectedTags: []
+    };
+  }
+
+  const routeEntries = Object.entries(routeConfig).map(([routeKey, route]) => ({
+    routeKey,
+    route,
+    tags: Array.isArray(route?.tags) ? route.tags.filter(Boolean) : [],
+    display: `#${String(route?.displayTag || route?.display || route?.tags?.[0] || routeKey).trim()}`
+  }));
+
+  const remainingLines = [];
+  const matchedRoutes = [];
+  const displayTags = [];
+  const detectedTags = [];
+  const seenRoutes = new Set();
+  const seenDisplays = new Set();
+
+  for (const line of rawContent.split(/\r?\n/)) {
+    const trimmedLine = line.trim();
+    let matchedRoute = null;
+    let detectedTag = null;
+    let remainingContent = '';
+
+    for (const routeEntry of routeEntries) {
+      for (const tag of routeEntry.tags) {
+        const normalizedPrefix = `##${String(tag).trim()}`;
+        const normalizedPrefixLower = normalizedPrefix.toLowerCase();
+        const normalizedLine = trimmedLine.toLowerCase();
+
+        if (normalizedLine === normalizedPrefixLower) {
+          matchedRoute = routeEntry;
+          detectedTag = String(tag).trim();
+          break;
+        }
+
+        if (normalizedLine.startsWith(`${normalizedPrefixLower} `) || normalizedLine.startsWith(`${normalizedPrefixLower}\t`)) {
+          matchedRoute = routeEntry;
+          detectedTag = String(tag).trim();
+          remainingContent = trimmedLine.slice(normalizedPrefix.length).trimStart();
+          break;
+        }
+      }
+
+      if (matchedRoute) {
+        break;
+      }
+    }
+
+    if (!matchedRoute) {
+      remainingLines.push(line);
+      continue;
+    }
+
+    if (!seenRoutes.has(matchedRoute.routeKey)) {
+      matchedRoutes.push(matchedRoute.routeKey);
+      seenRoutes.add(matchedRoute.routeKey);
+    }
+
+    if (!seenDisplays.has(matchedRoute.display)) {
+      displayTags.push(matchedRoute.display);
+      seenDisplays.add(matchedRoute.display);
+    }
+
+    if (detectedTag) {
+      detectedTags.push(detectedTag);
+    }
+
+    if (remainingContent) {
+      remainingLines.push(remainingContent);
+    }
+  }
+
+  return {
+    content: remainingLines.join('\n'),
+    matchedRoutes,
+    displayTags,
+    detectedTags
+  };
+}
+
 function splitFileName(fileName) {
   const value = String(fileName || 'attachment');
   const extensionIndex = value.lastIndexOf('.');
@@ -505,6 +593,7 @@ function restoreCustomEmojiTokens(content, guild) {
 module.exports = {
   truncateText,
   parseBotHashtagRoutes,
+  parseGlobalHashtagRoutes,
   sanitizeDisplayFileName,
   resolveBestAttachmentFileName,
   createUniqueDisplayFileName,

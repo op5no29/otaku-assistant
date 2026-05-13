@@ -97,6 +97,22 @@ function buildAuthorSection({ displayName, avatarUrl }) {
   return section;
 }
 
+function buildMetadataSection({ lines, avatarUrl, avatarDescription }) {
+  const section = new SectionBuilder().addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(lines.join('\n'))
+  );
+
+  if (avatarUrl) {
+    section.setThumbnailAccessory(
+      new ThumbnailBuilder()
+        .setURL(avatarUrl)
+        .setDescription(avatarDescription || 'アイコン')
+    );
+  }
+
+  return section;
+}
+
 function addImageIfPresent(container, firstImageUrl) {
   if (!firstImageUrl) {
     return;
@@ -129,7 +145,14 @@ function addMediaIfPresent(container, post) {
     ...explicitMediaGalleryItems,
     ...customEmojiMediaItems,
     ...mediaUrls.map((url) => ({ url }))
-  ].filter((item, index, array) => item.url && array.findIndex((other) => other.url === item.url) === index);
+  ].filter((item, index, array) => {
+    if (!item.url) {
+      return false;
+    }
+
+    const normalized = normalizeMediaUrl(item.url);
+    return array.findIndex((other) => normalizeMediaUrl(other.url) === normalized) === index;
+  });
 
   if (!galleryItems.length) {
     return;
@@ -446,35 +469,45 @@ function buildQuestionTimelineMessage({ post, config }) {
   const body = trimmedContent || null;
   const questionTitle = post.title?.trim() || 'タイトルなし';
   const statusLabel = post.isResolved ? '解決済み' : '受付中';
-  const headline = post.isResolved
-    ? `${post.forumName} / 解決済み`
-    : `${post.forumName} / 受付中`;
+  const attachmentNamesBlock = buildAttachmentFileNameBlock(post);
   const primaryMediaUrls = [...new Set([
     ...(Array.isArray(post.imageUrls) ? post.imageUrls : []),
     post.firstImageUrl,
     post.generatedVideoThumbnailUrl
   ].filter(Boolean))];
 
-  addQuestionHeader(container, {
-    title: questionTitle,
-    subtitle: null
-  });
-  container.addSectionComponents(
-    buildAuthorSection({
-      displayName: post.displayName,
-      avatarUrl: post.avatarUrl
-    })
-  );
-  container.addSeparatorComponents(
-    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
-  );
   container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(headline),
-    new TextDisplayBuilder().setContent(`**カテゴリ**: ${post.forumName}\n**ステータス**: ${statusLabel}${buildAttachmentFileNameBlock(post) ? `\n**添付ファイル**\n${buildAttachmentFileNameBlock(post)}` : ''}`),
-    new TextDisplayBuilder().setContent(body || buildAttachmentFileNameBlock(post) || '（本文はまだありません）')
+    new TextDisplayBuilder().setContent(`### ${questionTitle}`)
   );
   if (body) {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(body)
+    );
+  }
+  container.addSectionComponents(
+    buildMetadataSection({
+      lines: [
+        `**質問作成者**: ${post.displayName || '不明'}`,
+        `**カテゴリ**: ${post.forumName}`,
+        `**ステータス**: ${statusLabel}`
+      ],
+      avatarUrl: post.avatarUrl
+        || null,
+      avatarDescription: `${post.displayName || '質問作成者'} のアイコン`
+    })
+  );
+  if (!body && !attachmentNamesBlock) {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent('（本文はまだありません）')
+    );
+  }
+  if (attachmentNamesBlock) {
     addAttachmentNamesSection(container, post);
+  }
+  if (!body) {
+    container.addSeparatorComponents(
+      new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+    );
   }
   addMediaIfPresent(container, post);
   addSocialPreviewIfPresent(
@@ -540,7 +573,7 @@ function buildKnowledgeTimelineMessage({ post, config }) {
   } else if (!addAttachmentNamesSection(container, post, { showOnlyAsFallback: true })) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent('（本文はまだありません）'));
   }
-  if (body) {
+  if (body && buildAttachmentFileNameBlock(post)) {
     addAttachmentNamesSection(container, post);
   }
   addMediaIfPresent(container, post);

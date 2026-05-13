@@ -6,6 +6,7 @@ const {
   findFirstVideoAttachment,
   normalizeAttachments,
   parseBotHashtagRoutes,
+  parseGlobalHashtagRoutes,
   restoreCustomEmojiTokens
 } = require('../../utils/text');
 
@@ -66,53 +67,6 @@ function getKnowledgeTagLabels(thread) {
     .filter(Boolean);
 }
 
-function stripGlobalHashtagPrefixes(content, globalHashtagRoutes = {}) {
-  const lines = String(content || '').split(/\r?\n/);
-  const remainingLines = [];
-
-  for (const line of lines) {
-    const trimmedLine = line.trim();
-    let matched = false;
-    let remainingContent = '';
-
-    for (const route of Object.values(globalHashtagRoutes)) {
-      const tags = Array.isArray(route?.tags) ? route.tags : [];
-      for (const tag of tags) {
-        const normalizedPrefix = `##${String(tag || '').trim()}`;
-        const normalizedLine = trimmedLine.toLowerCase();
-        const normalizedPrefixLower = normalizedPrefix.toLowerCase();
-
-        if (normalizedLine === normalizedPrefixLower) {
-          matched = true;
-          remainingContent = '';
-          break;
-        }
-
-        if (normalizedLine.startsWith(`${normalizedPrefixLower} `) || normalizedLine.startsWith(`${normalizedPrefixLower}\t`)) {
-          matched = true;
-          remainingContent = trimmedLine.slice(normalizedPrefix.length).trimStart();
-          break;
-        }
-      }
-
-      if (matched) {
-        break;
-      }
-    }
-
-    if (!matched) {
-      remainingLines.push(line);
-      continue;
-    }
-
-    if (remainingContent) {
-      remainingLines.push(remainingContent);
-    }
-  }
-
-  return remainingLines.join('\n');
-}
-
 function detectSocialLink(content) {
   if (!content) {
     return null;
@@ -151,13 +105,254 @@ function normalizeMediaUrl(url) {
   try {
     const parsed = new URL(String(url || ''));
     parsed.hash = '';
-    if (/tenor|giphy/i.test(parsed.hostname)) {
+    if (/tenor|giphy|twimg|twitter|x\.com|discordapp|discord\.com|odesli/i.test(parsed.hostname)) {
       parsed.search = '';
     }
     return parsed.toString();
   } catch {
     return String(url || '');
   }
+}
+
+function getPreviewProvider(url) {
+  try {
+    return new URL(String(url || '')).hostname.toLowerCase();
+  } catch {
+    return '';
+  }
+}
+
+function extractTwitterStatusId(url) {
+  const match = String(url || '').match(/(?:x\.com|twitter\.com)\/[^/]+\/status\/(\d+)/i);
+  return match?.[1] || null;
+}
+
+function inferCandidateKind(url, source) {
+  const value = String(url || '');
+  if (/\.mp4(?:[?#].*)?$/i.test(value) || /\.webm(?:[?#].*)?$/i.test(value)) {
+    return 'video';
+  }
+  if (/\.gif(?:[?#].*)?$/i.test(value)) {
+    return 'image';
+  }
+  if (/thumbnail/i.test(source)) {
+    return 'thumbnail';
+  }
+  if (/image/i.test(source)) {
+    return 'image';
+  }
+  if (/video|media/i.test(source)) {
+    return 'poster';
+  }
+  return 'unknown';
+}
+
+function inferCandidatePriority(candidate) {
+  if (candidate.kind === 'video') {
+    return 100;
+  }
+  if (candidate.kind === 'image') {
+    return 80;
+  }
+  if (candidate.kind === 'poster') {
+    return 60;
+  }
+  if (candidate.kind === 'thumbnail') {
+    return 40;
+  }
+  if (candidate.kind === 'logo') {
+    return 10;
+  }
+  return 20;
+}
+
+function looksLikeLogoCandidate(url) {
+  const value = String(url || '');
+  return /abs\.twimg\.com|favicon|icon|logo|profile_images/i.test(value);
+}
+
+function buildPreviewCandidate(url, source, sourceUrl) {
+  if (!url) {
+    return null;
+  }
+
+  const provider = getPreviewProvider(url || sourceUrl);
+  const kind = looksLikeLogoCandidate(url) ? 'logo' : inferCandidateKind(url, source);
+  return {
+    url,
+    normalizedUrl: normalizeMediaUrl(url),
+    kind,
+    source,
+    provider,
+    priority: inferCandidatePriority({ kind }),
+    twitterStatusId: extractTwitterStatusId(sourceUrl)
+  };
+}
+
+function collectPreviewMediaCandidates(embeds, sourceUrl = null) {
+  const candidates = [];
+
+  for (const embed of embeds || []) {
+    const pushCandidate = (url, source) => {
+      const candidate = buildPreviewCandidate(url, source, sourceUrl || embed.url || null);
+      if (candidate) {
+        candidates.push(candidate);
+      }
+    };
+
+    if (embed.image?.url) {
+      pushCandidate(embed.image.url, 'embed.image');
+    }
+    if (embed.thumbnail?.url) {
+      pushCandidate(embed.thumbnail.url, 'embed.thumbnail');
+    }
+    if (embed.video?.url) {
+      pushCandidate(embed.video.url, 'embed.video');
+    }
+
+    const rawMediaUrls = new Set();
+    collectPreviewMediaUrlsFromRawEmbed(embed.data || embed, rawMediaUrls);
+    for (const url of rawMediaUrls) {
+      pushCandidate(url, 'socialPreview');
+    }
+  }
+
+  return candidates;
+}
+
+function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger = null, messageId = null) {
+  const rejected = [];
+  const deduped = [];
+  const seenNormalized = new Set();
+
+  for (const candidate of candidates) {
+    if (!candidate?.url) {
+      continue;
+    }
+
+    if (seenNormalized.has(candidate.normalizedUrl)) {
+      rejected.push({ ...candidate, reason: 'duplicate_normalized_url' });
+      continue;
+    }
+
+    seenNormalized.add(candidate.normalizedUrl);
+    deduped.push(candidate);
+  }
+
+  const isTwitterStatus = Boolean(extractTwitterStatusId(sourceUrl));
+  const nonLogo = deduped.filter((candidate) => candidate.kind !== 'logo');
+  const selected = [];
+
+  if (isTwitterStatus) {
+    const groupedByPath = new Map();
+    for (const candidate of nonLogo) {
+      const key = candidate.normalizedUrl;
+      const existing = groupedByPath.get(key);
+      if (!existing || candidate.priority > existing.priority) {
+        if (existing) {
+          rejected.push({ ...existing, reason: 'twitter_lower_priority_duplicate' });
+        }
+        groupedByPath.set(key, candidate);
+      } else {
+        rejected.push({ ...candidate, reason: 'twitter_lower_priority_duplicate' });
+      }
+    }
+
+    const values = Array.from(groupedByPath.values());
+    const playableVideo = values.find((candidate) => candidate.kind === 'video');
+    const twitterThumbs = values.filter((candidate) => /twimg\.com/i.test(candidate.provider));
+    const uniqueTwitterBases = new Map();
+
+    for (const candidate of twitterThumbs) {
+      let baseKey = candidate.normalizedUrl;
+      try {
+        const parsed = new URL(candidate.normalizedUrl);
+        baseKey = `${parsed.hostname}${parsed.pathname}`;
+      } catch {}
+
+      const existing = uniqueTwitterBases.get(baseKey);
+      if (!existing || candidate.priority > existing.priority) {
+        if (existing) {
+          rejected.push({ ...existing, reason: 'twitter_duplicate_thumbnail_suppressed' });
+        }
+        uniqueTwitterBases.set(baseKey, candidate);
+      } else {
+        rejected.push({ ...candidate, reason: 'twitter_duplicate_thumbnail_suppressed' });
+      }
+    }
+
+    if (playableVideo) {
+      selected.push(playableVideo);
+      logger?.info?.('twitter playable video unavailable fallback', {
+        sourceMessageId: messageId,
+        twitterVideoCandidateFound: true,
+        twitterSelectedMediaKind: 'video'
+      });
+    } else {
+      const twitterCandidates = Array.from(uniqueTwitterBases.values()).sort((left, right) => right.priority - left.priority);
+      const mediaStyleCandidates = twitterCandidates.filter((candidate) => /\/media\//i.test(candidate.normalizedUrl));
+      const thumbStyleCandidates = twitterCandidates.filter((candidate) => !/\/media\//i.test(candidate.normalizedUrl));
+      const finalTwitterSelection = mediaStyleCandidates.length ? mediaStyleCandidates : thumbStyleCandidates.slice(0, 1);
+      selected.push(...finalTwitterSelection);
+      logger?.info?.('twitter playable video unavailable fallback', {
+        sourceMessageId: messageId,
+        twitterVideoCandidateFound: false,
+        twitterSelectedMediaKind: finalTwitterSelection.length > 1 ? 'images' : finalTwitterSelection[0]?.kind || 'none'
+      });
+    }
+  } else if (getGifProviderName(sourceUrl)) {
+    const bestGifCandidate = [...nonLogo].sort((left, right) => right.priority - left.priority)[0];
+    if (bestGifCandidate) {
+      selected.push(bestGifCandidate);
+    }
+  } else {
+    const bestCandidate = [...nonLogo].sort((left, right) => right.priority - left.priority)[0];
+    if (bestCandidate) {
+      selected.push(bestCandidate);
+    }
+  }
+
+  logger?.info?.('preview media candidates collected', {
+    sourceMessageId: messageId,
+    sourceUrl,
+    candidates: candidates.map((candidate) => ({
+      url: candidate.url,
+      source: candidate.source,
+      kind: candidate.kind,
+      priority: candidate.priority
+    })),
+    rejected: rejected.map((candidate) => ({
+      url: candidate.url,
+      source: candidate.source,
+      kind: candidate.kind,
+      reason: candidate.reason
+    })),
+    selectedMediaCount: selected.length,
+    selectedUrls: selected.map((candidate) => candidate.url)
+  });
+
+  if (isTwitterStatus) {
+    logger?.info?.('twitter media candidates grouped', {
+      sourceMessageId: messageId,
+      statusId: extractTwitterStatusId(sourceUrl),
+      candidateCount: candidates.length,
+      selectedMediaCount: selected.length
+    });
+    if (rejected.some((candidate) => candidate.reason === 'twitter_duplicate_thumbnail_suppressed')) {
+      logger?.info?.('twitter duplicate thumbnail suppressed', {
+        sourceMessageId: messageId,
+        suppressedCount: rejected.filter((candidate) => candidate.reason === 'twitter_duplicate_thumbnail_suppressed').length
+      });
+    }
+    if (rejected.some((candidate) => candidate.kind === 'logo')) {
+      logger?.info?.('twitter logo suppressed', {
+        sourceMessageId: messageId,
+        suppressedCount: rejected.filter((candidate) => candidate.kind === 'logo').length
+      });
+    }
+  }
+
+  return selected;
 }
 
 function scoreGifMediaCandidate(url) {
@@ -254,56 +449,24 @@ function collectPreviewMediaUrlsFromRawEmbed(value, collector, context = { key: 
   }
 }
 
-function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null) {
-  const imageUrls = [];
-  const mediaUrls = [];
+function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null, logger = null, messageId = null) {
   let primaryPreview = null;
-  let duplicateCount = 0;
-  const seenNormalized = new Set();
   const gifProvider = getGifProviderName(sourceUrl);
+  const candidates = collectPreviewMediaCandidates(embeds, sourceUrl);
+  const selectedCandidates = selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger, messageId);
 
   for (const embed of embeds || []) {
-    const rawImageUrls = new Set();
-    const rawMediaUrls = new Set();
     const imageUrl = pickPreviewImage(embed);
     const description = embed.description?.trim() || null;
     const title = embed.title?.trim() || embed.author?.name?.trim() || null;
     const embedSourceUrl = embed.url || null;
     const siteName = embed.provider?.name || embed.author?.name || null;
 
-    if (imageUrl) {
-      rawImageUrls.add(imageUrl);
-    }
-
-    collectPreviewImageUrlsFromRawEmbed(embed.data || embed, rawImageUrls);
-    collectPreviewMediaUrlsFromRawEmbed(embed.data || embed, rawMediaUrls);
-
-    for (const collectedImageUrl of rawImageUrls) {
-      const normalized = normalizeMediaUrl(collectedImageUrl);
-      if (collectedImageUrl && !seenNormalized.has(normalized)) {
-        seenNormalized.add(normalized);
-        imageUrls.push(collectedImageUrl);
-        mediaUrls.push(collectedImageUrl);
-      } else if (collectedImageUrl) {
-        duplicateCount += 1;
-      }
-    }
-
-    for (const collectedMediaUrl of rawMediaUrls) {
-      const normalized = normalizeMediaUrl(collectedMediaUrl);
-      if (collectedMediaUrl && !seenNormalized.has(normalized)) {
-        seenNormalized.add(normalized);
-        mediaUrls.push(collectedMediaUrl);
-      } else if (collectedMediaUrl) {
-        duplicateCount += 1;
-      }
-    }
-
-    if (!primaryPreview && (title || description || mediaUrls.length)) {
+    if (!primaryPreview && (title || description || selectedCandidates.length)) {
       primaryPreview = {
         title,
         description,
-        imageUrl: imageUrl || imageUrls[0] || null,
+        imageUrl: imageUrl || selectedCandidates.find((candidate) => candidate.kind !== 'video')?.url || null,
         imageUrls: [],
         sourceUrl: embedSourceUrl,
         siteName
@@ -311,28 +474,26 @@ function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null) {
     }
   }
 
-  if (!primaryPreview && !mediaUrls.length) {
+  if (!primaryPreview && !selectedCandidates.length) {
     return null;
   }
 
-  let finalMediaUrls = mediaUrls;
-  if (gifProvider && finalMediaUrls.length) {
-    finalMediaUrls = [...finalMediaUrls]
-      .sort((left, right) => scoreGifMediaCandidate(right) - scoreGifMediaCandidate(left))
-      .slice(0, 1);
-  }
+  const finalMediaUrls = selectedCandidates.map((candidate) => candidate.url);
+  const finalImageUrls = selectedCandidates
+    .filter((candidate) => candidate.kind !== 'video')
+    .map((candidate) => candidate.url);
 
   return {
     title: primaryPreview?.title || null,
     description: primaryPreview?.description || null,
-    imageUrl: primaryPreview?.imageUrl || imageUrls[0] || null,
-    imageUrls,
+    imageUrl: primaryPreview?.imageUrl || finalImageUrls[0] || null,
+    imageUrls: finalImageUrls,
     mediaUrls: finalMediaUrls,
     sourceUrl: primaryPreview?.sourceUrl || null,
     siteName: primaryPreview?.siteName || null,
-    isGifShare: isGifProviderUrl(sourceUrl) || mediaUrls.some((url) => looksLikeAnimatedMediaUrl(url)),
+    isGifShare: isGifProviderUrl(sourceUrl) || finalMediaUrls.some((url) => looksLikeAnimatedMediaUrl(url)),
     gifProvider,
-    duplicateCount: duplicateCount + Math.max(0, mediaUrls.length - finalMediaUrls.length)
+    duplicateCount: Math.max(0, candidates.length - selectedCandidates.length)
   };
 }
 
@@ -351,7 +512,7 @@ async function getSocialPreviewData(message, logger, attempts = 3, retryDelayMs 
   let workingMessage = message;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const preview = extractSocialPreviewFromEmbeds(workingMessage.embeds, socialLink);
+      const preview = extractSocialPreviewFromEmbeds(workingMessage.embeds, socialLink, logger, message.id);
 
     if (preview) {
       logger.info('Link preview embed data found', {
@@ -377,6 +538,11 @@ async function getSocialPreviewData(message, logger, attempts = 3, retryDelayMs 
       }
 
       if (/https?:\/\/(?:www\.)?(x\.com|twitter\.com)\//i.test(socialLink)) {
+        logger.info('twitter status detected', {
+          sourceMessageId: message.id,
+          statusId: extractTwitterStatusId(socialLink),
+          selectedMediaKind: preview.mediaUrls?.length ? (/\.(mp4|webm)(?:[?#].*)?$/i.test(preview.mediaUrls[0]) ? 'video' : 'image') : 'none'
+        });
         if ((preview.imageUrls || []).length <= 1) {
           logger.info('Twitter/X preview only exposed one image', {
             messageId: message.id,
@@ -932,8 +1098,8 @@ async function extractPlainMessagePost(message, config, logger = null) {
   const firstVideo = findFirstVideoAttachment(canonicalMessage.attachments);
   const socialPreview = logger ? await getSocialPreviewData(canonicalMessage, logger) : null;
   const restoredContent = restoreCustomEmojiTokens(canonicalMessage.content || message.content || '', guild);
-  const globalPrefixStrippedContent = stripGlobalHashtagPrefixes(restoredContent, config.globalHashtagRoutes);
-  const hashtagRouting = parseBotHashtagRoutes(globalPrefixStrippedContent, config.botHashtagRoutes);
+  const globalRouting = parseGlobalHashtagRoutes(restoredContent, config.globalHashtagRoutes);
+  const hashtagRouting = parseBotHashtagRoutes(globalRouting.content, config.botHashtagRoutes);
   const strippedContent = stripPreviewedGifLinks(hashtagRouting.content, socialPreview);
   const customEmojiMedia = extractCustomEmojiMedia(strippedContent.content);
   const displayName =
@@ -941,6 +1107,18 @@ async function extractPlainMessagePost(message, config, logger = null) {
     canonicalMessage.author?.globalName ||
     canonicalMessage.author?.username ||
     '不明なユーザー';
+
+  const displayBotHashtags = [...new Set([...(globalRouting.displayTags || []), ...(hashtagRouting.displayTags || [])])];
+  if (logger && globalRouting.displayTags.length) {
+    logger.info('route display tag resolved', {
+      sourceMessageId: canonicalMessage.id,
+      detectedTags: globalRouting.detectedTags,
+      normalizedDisplayTags: globalRouting.displayTags,
+      rawPrefixRemoved: globalRouting.content !== restoredContent,
+      normalizedHashtagInserted: true,
+      finalBodyText: String(customEmojiMedia.content || '').slice(0, 500)
+    });
+  }
 
   return {
     message: canonicalMessage,
@@ -961,7 +1139,7 @@ async function extractPlainMessagePost(message, config, logger = null) {
     content: customEmojiMedia.content,
     customEmojiMediaItems: customEmojiMedia.mediaItems,
     matchedBotHashtagRoutes: hashtagRouting.matchedRoutes,
-    displayBotHashtags: hashtagRouting.displayTags,
+    displayBotHashtags,
     jumpUrl: getMessageJumpUrl({
       guildId: canonicalMessage.guildId || (guild ? guild.id : ''),
       channelId: canonicalMessage.channelId,

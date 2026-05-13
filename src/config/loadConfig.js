@@ -44,6 +44,7 @@ function ensureGlobalHashtagRoutes(value, label) {
     return {
       tags: ensureArray(route.tags || [], `${routeLabel}.tags`),
       channelId: String(route.destinationChannelId || route.channelId || ''),
+      displayTag: String(route.displayTag || route.display || route.tags?.[0] || ''),
       alsoTimeline: route.alsoTimeline === true
     };
   };
@@ -63,6 +64,26 @@ function ensureGlobalHashtagRoutes(value, label) {
       return [String(routeKey), normalizeRoute(route, `${label}.${routeKey}`)];
     })
   );
+}
+
+function ensureTwitterMediaConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      enabled: true,
+      videoMode: 'preview-only',
+      maxVideoUploadBytes: 25_000_000,
+      suppressDuplicateImages: true,
+      resolveTimeoutMs: 15_000
+    };
+  }
+
+  return {
+    enabled: value.enabled !== false,
+    videoMode: String(value.videoMode || 'preview-only'),
+    maxVideoUploadBytes: Number(value.maxVideoUploadBytes ?? 25_000_000),
+    suppressDuplicateImages: value.suppressDuplicateImages !== false,
+    resolveTimeoutMs: Number(value.resolveTimeoutMs ?? 15_000)
+  };
 }
 
 function ensureBotHashtagRoutes(value, label) {
@@ -235,7 +256,8 @@ function loadConfig(configPath) {
     questionForumTags: ensureTagMap(parsed.questionForumTags, 'questionForumTags'),
     botHashtagRoutes: ensureBotHashtagRoutes(parsed.botHashtagRoutes, 'botHashtagRoutes'),
     vcListenOnlyChannelIds: ensureArray(parsed.vcListenOnlyChannelIds || [], 'vcListenOnlyChannelIds'),
-    globalHashtagRoutes: ensureGlobalHashtagRoutes(parsed.globalHashtagRoutes, 'globalHashtagRoutes')
+    globalHashtagRoutes: ensureGlobalHashtagRoutes(parsed.globalHashtagRoutes, 'globalHashtagRoutes'),
+    twitterMedia: ensureTwitterMediaConfig(parsed.twitterMedia)
   };
 }
 
