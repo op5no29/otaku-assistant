@@ -407,6 +407,89 @@ function stripPreviewedGifLinks(content, socialPreview) {
   };
 }
 
+function extractCustomEmojiMedia(content) {
+  const rawContent = String(content || '');
+  const tokenPattern = /<(?:(a)?):([A-Za-z0-9_]{2,32}):(\d+)>/g;
+  const tokens = [];
+  const seenIds = new Set();
+
+  let match;
+  while ((match = tokenPattern.exec(rawContent)) !== null) {
+    const [, animatedFlag, name, id] = match;
+    if (seenIds.has(id)) {
+      continue;
+    }
+
+    seenIds.add(id);
+    tokens.push({
+      token: match[0],
+      name,
+      id,
+      animated: Boolean(animatedFlag),
+      url: `https://cdn.discordapp.com/emojis/${id}.${animatedFlag ? 'gif' : 'png'}`
+    });
+  }
+
+  if (!tokens.length) {
+    return {
+      content: rawContent,
+      mediaItems: [],
+      tokens,
+      hasNonEmojiText: Boolean(rawContent.trim())
+    };
+  }
+
+  const strippedContent = rawContent
+    .replace(tokenPattern, ' ')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\n[ \t]+/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
+
+  return {
+    content: strippedContent,
+    mediaItems: tokens.map((token) => ({
+      url: token.url,
+      description: `${token.name} emoji`
+    })),
+    tokens,
+    hasNonEmojiText: Boolean(strippedContent)
+  };
+}
+
+function logAttachmentMetadata(logger, messageId, label, attachment, messageJsonAttachments = null) {
+  const attachmentJson = typeof attachment?.toJSON === 'function' ? attachment.toJSON() : null;
+
+  logger?.info?.('Attachment raw metadata observed', {
+    sourceMessageId: messageId,
+    metadataLabel: label,
+    attachmentId: String(attachment?.id || ''),
+    attachmentName: attachment?.name || null,
+    attachmentFilename: attachment?.filename || null,
+    attachmentTitle: attachment?.title || null,
+    attachmentDescription: attachment?.description || null,
+    attachmentUrl: attachment?.url ? String(attachment.url).slice(0, 240) : null,
+    attachmentProxyUrl: attachment?.proxyURL ? String(attachment.proxyURL).slice(0, 240) : null,
+    contentType: attachment?.contentType || null,
+    size: Number(attachment?.size || 0),
+    attachmentKeys: attachment ? Object.keys(attachment) : [],
+    attachmentJson,
+    messageJsonAttachment: messageJsonAttachments?.find?.((entry) => String(entry?.id || '') === String(attachment?.id || '')) || null
+  });
+}
+
+async function fetchCanonicalMessage(message, logger) {
+  try {
+    return await message.channel.messages.fetch(message.id, { force: true });
+  } catch (error) {
+    logger?.info?.('Canonical message fetch failed; using gateway message snapshot', {
+      sourceMessageId: message.id,
+      error: error.message
+    });
+    return message;
+  }
+}
+
 async function getStarterMessage(thread, logger, attempts = 4, retryDelayMs = 750) {
   let lastError = null;
 
@@ -595,64 +678,66 @@ async function extractFirstPost(thread, config, logger) {
     return null;
   }
 
+  const fetchedStarterMessage = await fetchCanonicalMessage(starterMessage, logger);
   const guildMember =
-    starterMessage.member ||
-    (starterMessage.author
-      ? await thread.guild.members.fetch(starterMessage.author.id).catch(() => null)
+    fetchedStarterMessage.member ||
+    (fetchedStarterMessage.author
+      ? await thread.guild.members.fetch(fetchedStarterMessage.author.id).catch(() => null)
       : null);
   const normalizedTitle = normalizeQuestionTitle(
     thread.name || '',
     config.questions?.resolvedPrefix
   );
   const imageAttachments = config.timeline.includeFirstImage
-    ? findImageAttachments(starterMessage.attachments)
+    ? findImageAttachments(fetchedStarterMessage.attachments)
     : [];
-  const attachments = normalizeAttachments(starterMessage.attachments);
+  const attachments = normalizeAttachments(fetchedStarterMessage.attachments, {
+    sourceContent: fetchedStarterMessage.content || starterMessage.content || ''
+  });
   const firstImage = config.timeline.includeFirstImage
-    ? findFirstImageAttachment(starterMessage.attachments)
+    ? findFirstImageAttachment(fetchedStarterMessage.attachments)
     : null;
-  const firstVideo = findFirstVideoAttachment(starterMessage.attachments);
-  const socialPreview = await getSocialPreviewData(starterMessage, logger);
+  const firstVideo = findFirstVideoAttachment(fetchedStarterMessage.attachments);
+  const socialPreview = await getSocialPreviewData(fetchedStarterMessage, logger);
   const knowledgeTagLabels = getKnowledgeTagLabels(thread);
 
+  const starterMessageJsonAttachments = typeof starterMessage.toJSON === 'function'
+    ? starterMessage.toJSON()?.attachments || []
+    : [];
+  const fetchedStarterMessageJsonAttachments = typeof fetchedStarterMessage.toJSON === 'function'
+    ? fetchedStarterMessage.toJSON()?.attachments || []
+    : [];
+
   for (const attachment of starterMessage.attachments.values()) {
-    logger.info('Attachment raw metadata observed', {
-      sourceMessageId: starterMessage.id,
-      attachmentId: String(attachment.id || ''),
-      attachmentName: attachment.name || null,
-      attachmentFilename: attachment.filename || null,
-      attachmentTitle: attachment.title || null,
-      attachmentDescription: attachment.description || null,
-      attachmentUrl: attachment.url ? String(attachment.url).slice(0, 240) : null,
-      attachmentProxyUrl: attachment.proxyURL ? String(attachment.proxyURL).slice(0, 240) : null,
-      contentType: attachment.contentType || null,
-      size: Number(attachment.size || 0),
-      attachmentKeys: Object.keys(attachment)
-    });
+    logAttachmentMetadata(logger, starterMessage.id, 'gateway', attachment, starterMessageJsonAttachments);
+  }
+
+  for (const attachment of fetchedStarterMessage.attachments.values()) {
+    logAttachmentMetadata(logger, starterMessage.id, 'fetched', attachment, fetchedStarterMessageJsonAttachments);
   }
 
   return {
-    message: starterMessage,
-    messageId: starterMessage.id,
-    createdAt: starterMessage.createdAt || new Date(),
-    author: starterMessage.author || null,
+    message: fetchedStarterMessage,
+    messageId: fetchedStarterMessage.id,
+    createdAt: fetchedStarterMessage.createdAt || starterMessage.createdAt || new Date(),
+    author: fetchedStarterMessage.author || starterMessage.author || null,
     displayName:
       guildMember?.displayName ||
-      starterMessage.author?.globalName ||
-      starterMessage.author?.username ||
+      fetchedStarterMessage.author?.globalName ||
+      fetchedStarterMessage.author?.username ||
       '不明なユーザー',
     avatarUrl:
       guildMember?.displayAvatarURL?.({ extension: 'png', size: 128 }) ||
-      starterMessage.author?.displayAvatarURL?.({ extension: 'png', size: 128 }) ||
+      fetchedStarterMessage.author?.displayAvatarURL?.({ extension: 'png', size: 128 }) ||
       null,
     rawTitle: thread.name || '',
     title: normalizedTitle.title || '',
     isResolved: normalizedTitle.isResolved,
-    content: starterMessage.content || '',
+    content: fetchedStarterMessage.content || starterMessage.content || '',
     jumpUrl: getMessageJumpUrl({
       guildId: thread.guildId,
       channelId: thread.id,
-      messageId: starterMessage.id
+      messageId: fetchedStarterMessage.id
     }),
     attachments,
     imageUrls: imageAttachments.map((attachment) => attachment.url),
@@ -669,70 +754,77 @@ async function extractFirstPost(thread, config, logger) {
 }
 
 async function extractThreadMessagePost(message, config, logger = null) {
-  const thread = message.channel;
+  const canonicalMessage = await fetchCanonicalMessage(message, logger);
+  const thread = canonicalMessage.channel;
   const guildMember =
-    message.member ||
-    (message.author ? await thread.guild.members.fetch(message.author.id).catch(() => null) : null);
+    canonicalMessage.member ||
+    (canonicalMessage.author ? await thread.guild.members.fetch(canonicalMessage.author.id).catch(() => null) : null);
   const imageAttachments = config.timeline.includeFirstImage
-    ? findImageAttachments(message.attachments)
+    ? findImageAttachments(canonicalMessage.attachments)
     : [];
-  const attachments = normalizeAttachments(message.attachments);
+  const attachments = normalizeAttachments(canonicalMessage.attachments, {
+    sourceContent: canonicalMessage.content || message.content || ''
+  });
   const firstImage = config.timeline.includeFirstImage
-    ? findFirstImageAttachment(message.attachments)
+    ? findFirstImageAttachment(canonicalMessage.attachments)
     : null;
-  const firstVideo = findFirstVideoAttachment(message.attachments);
+  const firstVideo = findFirstVideoAttachment(canonicalMessage.attachments);
+  const gatewayMessageJsonAttachments = typeof message.toJSON === 'function'
+    ? message.toJSON()?.attachments || []
+    : [];
+  const fetchedMessageJsonAttachments = typeof canonicalMessage.toJSON === 'function'
+    ? canonicalMessage.toJSON()?.attachments || []
+    : [];
+
   for (const attachment of message.attachments.values()) {
-    logger?.info?.('Attachment raw metadata observed', {
-      sourceMessageId: message.id,
-      attachmentId: String(attachment.id || ''),
-      attachmentName: attachment.name || null,
-      attachmentFilename: attachment.filename || null,
-      attachmentTitle: attachment.title || null,
-      attachmentDescription: attachment.description || null,
-      attachmentUrl: attachment.url ? String(attachment.url).slice(0, 240) : null,
-      attachmentProxyUrl: attachment.proxyURL ? String(attachment.proxyURL).slice(0, 240) : null,
-      contentType: attachment.contentType || null,
-      size: Number(attachment.size || 0),
-      attachmentKeys: Object.keys(attachment)
-    });
+    logAttachmentMetadata(logger, message.id, 'gateway', attachment, gatewayMessageJsonAttachments);
+  }
+  for (const attachment of canonicalMessage.attachments.values()) {
+    logAttachmentMetadata(logger, message.id, 'fetched', attachment, fetchedMessageJsonAttachments);
   }
 
-  const socialPreview = logger ? await getSocialPreviewData(message, logger) : null;
+  const socialPreview = logger ? await getSocialPreviewData(canonicalMessage, logger) : null;
   const threadOwnerInfo = await getThreadOwnerInfo(thread, logger);
-  const restoredContent = restoreCustomEmojiTokens(message.content || '', thread.guild);
+  const restoredContent = restoreCustomEmojiTokens(canonicalMessage.content || message.content || '', thread.guild);
   const hashtagRouting = parseBotHashtagRoutes(restoredContent, config.botHashtagRoutes);
   const strippedContent = stripPreviewedGifLinks(hashtagRouting.content, socialPreview);
+  const customEmojiMedia = extractCustomEmojiMedia(strippedContent.content);
   const { referencedSourceMessageId, replyContext } = await getReplyContext(message, logger);
   const displayName =
     guildMember?.displayName ||
-    message.author?.globalName ||
-    message.author?.username ||
+    canonicalMessage.author?.globalName ||
+    canonicalMessage.author?.username ||
     '不明なユーザー';
 
   logger?.info?.('Message content prepared for relay', {
     sourceMessageId: message.id,
     contentSource: 'message.content',
-    rawContent: String(message.content || '').slice(0, 500),
-    cleanContent: String(message.cleanContent || '').slice(0, 500),
+    rawContent: String(canonicalMessage.content || message.content || '').slice(0, 500),
+    cleanContent: String(canonicalMessage.cleanContent || message.cleanContent || '').slice(0, 500),
     extractedBodyText: String(hashtagRouting.content || '').slice(0, 500),
     finalBodyText: String(strippedContent.content || '').slice(0, 500),
+    finalBodyTextAfterEmojiProcessing: String(customEmojiMedia.content || '').slice(0, 500),
     bodyUrlHidden: strippedContent.bodyUrlHidden,
+    customEmojiTokensFound: customEmojiMedia.tokens.map((token) => token.token),
+    customEmojiIds: customEmojiMedia.tokens.map((token) => token.id),
+    generatedEmojiMediaUrls: customEmojiMedia.mediaItems.map((item) => item.url),
+    hasNonEmojiText: customEmojiMedia.hasNonEmojiText,
     customEmojiTokensPreserved: /<a?:\w+:\d+>/.test(strippedContent.content || ''),
-    originalContentHadCustomEmojiToken: /<a?:\w+:\d+>/.test(message.content || ''),
+    originalContentHadCustomEmojiToken: /<a?:\w+:\d+>/.test(canonicalMessage.content || message.content || ''),
     usedCleanContent: false
   });
 
   return {
-    message,
-    messageId: message.id,
-    createdAt: message.createdAt || new Date(),
-    author: message.author || null,
+    message: canonicalMessage,
+    messageId: canonicalMessage.id,
+    createdAt: canonicalMessage.createdAt || message.createdAt || new Date(),
+    author: canonicalMessage.author || message.author || null,
     displayName,
     avatarUrl:
       guildMember?.displayAvatarURL?.({ extension: 'png', size: 128 }) ||
-      message.author?.displayAvatarURL?.({ extension: 'png', size: 128 }) ||
+      canonicalMessage.author?.displayAvatarURL?.({ extension: 'png', size: 128 }) ||
       null,
-    timelineHeadline: buildTweetHeadline(displayName, threadOwnerInfo, message.author?.id || null, {
+    timelineHeadline: buildTweetHeadline(displayName, threadOwnerInfo, canonicalMessage.author?.id || null, {
       isReply: Boolean(referencedSourceMessageId)
     }),
     threadOwnerId: threadOwnerInfo?.id || null,
@@ -742,13 +834,14 @@ async function extractThreadMessagePost(message, config, logger = null) {
     title: '',
     rawTitle: thread.name || '',
     isResolved: false,
-    content: strippedContent.content,
+    content: customEmojiMedia.content,
+    customEmojiMediaItems: customEmojiMedia.mediaItems,
     matchedBotHashtagRoutes: hashtagRouting.matchedRoutes,
     displayBotHashtags: hashtagRouting.displayTags,
     jumpUrl: getMessageJumpUrl({
       guildId: thread.guildId,
       channelId: thread.id,
-      messageId: message.id
+      messageId: canonicalMessage.id
     }),
     attachments,
     imageUrls: imageAttachments.map((attachment) => attachment.url),

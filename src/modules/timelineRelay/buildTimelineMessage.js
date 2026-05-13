@@ -113,6 +113,9 @@ function addMediaIfPresent(container, post) {
   const explicitMediaGalleryItems = Array.isArray(post.mediaGalleryItems)
     ? post.mediaGalleryItems.filter((item) => item?.url)
     : [];
+  const customEmojiMediaItems = Array.isArray(post.customEmojiMediaItems)
+    ? post.customEmojiMediaItems.filter((item) => item?.url)
+    : [];
   const imageUrls = Array.isArray(post.imageUrls) ? post.imageUrls : [];
   const primaryImageUrls = imageUrls.length
     ? imageUrls
@@ -124,6 +127,7 @@ function addMediaIfPresent(container, post) {
   ].filter(Boolean))];
   const galleryItems = [
     ...explicitMediaGalleryItems,
+    ...customEmojiMediaItems,
     ...mediaUrls.map((url) => ({ url }))
   ].filter((item, index, array) => item.url && array.findIndex((other) => other.url === item.url) === index);
 
@@ -386,7 +390,8 @@ function buildTweetTimelineMessage({ post, config }) {
     post.firstImageUrl,
     post.generatedVideoThumbnailUrl,
     post.musicLink?.artworkUrl,
-    ...(Array.isArray(post.mediaGalleryItems) ? post.mediaGalleryItems.map((item) => item.url) : [])
+    ...(Array.isArray(post.mediaGalleryItems) ? post.mediaGalleryItems.map((item) => item.url) : []),
+    ...(Array.isArray(post.customEmojiMediaItems) ? post.customEmojiMediaItems.map((item) => item.url) : [])
   ].filter(Boolean))];
 
   container.addSectionComponents(
@@ -398,7 +403,11 @@ function buildTweetTimelineMessage({ post, config }) {
   addReplyContextIfPresent(container, post);
   if (body) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent(body));
-  } else if (!addAttachmentNamesSection(container, post, { showOnlyAsFallback: true }) && !post.socialPreview?.isGifShare) {
+  } else if (
+    !addAttachmentNamesSection(container, post, { showOnlyAsFallback: true }) &&
+    !post.socialPreview?.isGifShare &&
+    !(Array.isArray(post.customEmojiMediaItems) && post.customEmojiMediaItems.length)
+  ) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent('（本文はまだありません）'));
   }
   addBotHashtagSection(container, post);

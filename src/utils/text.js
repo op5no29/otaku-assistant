@@ -114,17 +114,53 @@ function isMeaningfulFileName(candidate) {
     return false;
   }
 
-  return !/^\d+$/.test(base.trim());
+  if (/^\d+$/.test(base.trim())) {
+    return false;
+  }
+
+  if (/^[\d_-]{1,8}$/.test(base.trim())) {
+    return false;
+  }
+
+  return true;
 }
 
-function resolveBestAttachmentFileName(attachment) {
+function findFileNameInText(content, extension = '') {
+  const text = String(content || '');
+  if (!text) {
+    return null;
+  }
+
+  const escapedExtension = extension ? extension.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : '';
+  const pattern = escapedExtension
+    ? new RegExp(`([^\\s<>\"']+${escapedExtension})`, 'iu')
+    : /([^\s<>"']+\.[A-Za-z0-9]{1,8})/iu;
+  const match = text.match(pattern);
+
+  if (!match?.[1]) {
+    return null;
+  }
+
+  return sanitizeDisplayFileName(match[1]);
+}
+
+function resolveBestAttachmentFileName(attachment, options = {}) {
+  const extension = splitFileName(
+    attachment?.name ||
+    attachment?.filename ||
+    attachment?.title ||
+    attachment?.description ||
+    decodeUrlFileName(attachment?.url) ||
+    'attachment'
+  ).extension;
   const candidates = [
-    attachment?.name,
-    attachment?.filename,
     attachment?.title,
+    attachment?.filename,
+    attachment?.name,
     attachment?.description,
     decodeUrlFileName(attachment?.url),
-    decodeUrlFileName(attachment?.proxyURL || attachment?.proxyUrl)
+    decodeUrlFileName(attachment?.proxyURL || attachment?.proxyUrl),
+    findFileNameInText(options.sourceContent, extension)
   ].filter(Boolean);
 
   const meaningful = candidates.find((candidate) => isMeaningfulFileName(candidate));
@@ -293,12 +329,55 @@ function normalizeAttachment(attachment) {
 }
 
 function normalizeAttachments(attachments) {
+  const options = arguments[1] || {};
   if (!attachments) {
     return [];
   }
 
   return Array.from(attachments.values())
-    .map((attachment) => normalizeAttachment(attachment))
+    .map((attachment) => {
+      if (!attachment) {
+        return null;
+      }
+
+      const lowerName = attachment.name?.toLowerCase() || '';
+      const isImage = isImageAttachment(attachment);
+      const isGif = isGifAttachment(attachment);
+      const isVideo = isVideoAttachment(attachment);
+      const isAudio = isAudioAttachment(attachment);
+      const isPdf = isPdfAttachment(attachment);
+      const originalDiscordNameRaw = String(attachment.name || attachment.filename || '');
+      const originalFileName = resolveBestAttachmentFileName(attachment, options);
+
+      return {
+        id: String(attachment.id || ''),
+        attachmentId: String(attachment.id || ''),
+        originalDiscordNameRaw,
+        originalName: originalFileName,
+        originalFileName,
+        displayFileName: originalFileName,
+        uploadFileName: originalFileName,
+        name: originalFileName,
+        lowerName,
+        url: attachment.url,
+        attachmentUrl: attachment.url,
+        proxyUrl: attachment.proxyURL || attachment.proxyUrl || null,
+        contentType: attachment.contentType || null,
+        size: Number(attachment.size || 0),
+        extension: splitFileName(originalFileName).extension,
+        metadata: {
+          filename: attachment.filename || null,
+          title: attachment.title || null,
+          description: attachment.description || null
+        },
+        isImage,
+        isGif,
+        isVideo,
+        isAudio,
+        isPdf,
+        isPreviewableUpload: true
+      };
+    })
     .filter(Boolean);
 }
 
