@@ -3,6 +3,7 @@ const { buildTimelineMessage } = require('./buildTimelineMessage');
 const { extractFirstPost, extractThreadMessagePost, extractPlainMessagePost } = require('./extractFirstPost');
 const { prepareVideoThumbnail } = require('./videoThumbnail');
 const { prepareAttachmentRelay } = require('./attachmentRelay');
+const { resolveTwitterMedia } = require('./twitterMediaResolver');
 const { enrichPostWithMusicLink } = require('./musicLinks');
 const { applyQuestionStatusTag } = require('../questionResolver/threadTags');
 const { getRecentArchivedMessages } = require('../messageArchive');
@@ -39,7 +40,8 @@ function getForumType(parentId, config) {
 }
 
 async function buildTimelinePayload(post, { config, forumType, logger }) {
-  const videoPrepared = await prepareVideoThumbnail(post, logger);
+  const twitterResolved = await resolveTwitterMedia(post, config, logger);
+  const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, logger);
   const attachmentPrepared = await prepareAttachmentRelay(videoPrepared.post, config, logger);
   if (forumType === 'question') {
     logger.info('Question card built', {
@@ -64,6 +66,7 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
     cleanup: async () => {
       await attachmentPrepared.cleanup();
       await videoPrepared.cleanup();
+      await twitterResolved.cleanup();
     }
   };
 }
@@ -79,7 +82,7 @@ function isMergeableShortTweetPost(post, config) {
   if (post.referencedSourceMessageId) {
     return false;
   }
-  if (post.title || post.rawTitle || post.replyContext) {
+  if (post.title || post.replyContext) {
     return false;
   }
   if (Array.isArray(post.attachments) && post.attachments.length) {
@@ -226,23 +229,134 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
     return null;
   }
 
-  const chain = getConsecutiveMergeChain(message.client, message, post, config, logger);
-  if (!chain) {
+  const text = String(post.content || '').trim();
+  const sourceChannelId = String(message.channelId || '');
+  const sourceThreadId = String(message.channel?.id || '');
+  const parentId = String(message.channel?.parentId || '');
+  const recentMessages = getRecentArchivedMessages(message.client, {
+    channelId: sourceChannelId,
+    limit: Number(config.timeline.shortMergeMaxParts || 5) + 3
+  });
+  const currentIndex = recentMessages.findIndex((entry) => String(entry.messageId) === String(message.id));
+  const previousEntry = currentIndex > 0 ? recentMessages[currentIndex - 1] : null;
+  const previousText = String(previousEntry?.content || '').trim();
+  const previousIsMergeable = Boolean(
+    previousEntry &&
+    previousText &&
+    previousText.length <= Number(config.timeline.shortMergeMaxChars || 60) &&
+    !previousEntry.referencedMessageId &&
+    !(Array.isArray(previousEntry.attachments) && previousEntry.attachments.length) &&
+    !(Array.isArray(previousEntry.embeds) && previousEntry.embeds.length) &&
+    !/\bhttps?:\/\//i.test(previousText)
+  );
+  const mergeState = db.timelineMerge.get(
+    message.guildId,
+    sourceChannelId,
+    message.author?.id || '',
+    target.destinationChannelId
+  );
+
+  logShortMergeEvaluation(logger, {
+    sourceMessageId: message.id,
+    sourceChannelId,
+    sourceThreadId,
+    parentId,
+    authorId: message.author?.id || null,
+    bodyText: text,
+    bodyTextLength: text.length,
+    hasAttachments: Array.isArray(post.attachments) && post.attachments.length > 0,
+    hasEmbeds: Boolean(post.socialPreview),
+    hasUrls: /\bhttps?:\/\//i.test(text),
+    hasMediaGallery: Boolean(
+      (Array.isArray(post.imageUrls) && post.imageUrls.length) ||
+      post.firstImageUrl ||
+      post.firstVideoUrl ||
+      post.generatedVideoThumbnailUrl ||
+      (Array.isArray(post.mediaGalleryItems) && post.mediaGalleryItems.length)
+    ),
+    isReply: Boolean(post.referencedSourceMessageId || post.replyContext),
+    isQuestion: false,
+    isGlobalHashtag: false,
+    isBotHashtag: Array.isArray(post.matchedBotHashtagRoutes) && post.matchedBotHashtagRoutes.length > 0,
+    destinationChannelId: target.destinationChannelId,
+    relayKind: target.relayKind,
+    previousSourceMessageId: previousEntry?.messageId || null,
+    previousSourceAuthorId: previousEntry?.authorId || null,
+    previousRelayDbRecordFound: Boolean(mergeState?.relayedMessageId),
+    previousRelayedTimelineMessageId: mergeState?.relayedMessageId || null
+  });
+
+  if (!isMergeableShortTweetPost(post, config)) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      destinationChannelId: target.destinationChannelId,
+      reason: 'current_not_mergeable'
+    });
     return null;
   }
 
-  const previousEntry = chain[chain.length - 2];
-  const existingRelay = db.relays.getMessageRelayTarget(previousEntry.messageId, target.destinationChannelId);
-  logger.info('timeline short merge state checked', {
-    sourceMessageId: message.id,
-    previousSourceMessageId: previousEntry.messageId,
-    previousRelayedMessageId: existingRelay?.relayedMessageId || null,
-    mergeStateFound: Boolean(existingRelay?.relayedMessageId)
-  });
-  if (!existingRelay?.relayedMessageId) {
+  if (!previousEntry) {
     logger.info('timeline short merge skipped', {
       sourceMessageId: message.id,
-      reason: 'previous_relay_target_missing'
+      destinationChannelId: target.destinationChannelId,
+      reason: 'no_previous_message'
+    });
+    return null;
+  }
+
+  if (String(previousEntry.authorId || '') !== String(message.author?.id || '')) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      destinationChannelId: target.destinationChannelId,
+      reason: 'intervening_author_detected'
+    });
+    return null;
+  }
+
+  if (!previousIsMergeable) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      destinationChannelId: target.destinationChannelId,
+      reason: 'previous_not_mergeable'
+    });
+    return null;
+  }
+
+  if (!mergeState?.relayedMessageId || String(mergeState.lastSourceMessageId || '') !== String(previousEntry.messageId || '')) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      destinationChannelId: target.destinationChannelId,
+      reason: !mergeState?.relayedMessageId ? 'merge_state_missing' : 'merge_state_not_immediately_previous'
+    });
+    return null;
+  }
+
+  const lastMessageAt = new Date(mergeState.lastMessageAt || 0).getTime();
+  const currentMessageAt = new Date(message.createdAt || Date.now()).getTime();
+  if (!lastMessageAt || currentMessageAt - lastMessageAt > Number(config.timeline.shortMergeWindowSeconds || 180) * 1000) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      destinationChannelId: target.destinationChannelId,
+      reason: 'outside_merge_window'
+    });
+    return null;
+  }
+
+  const mergedParts = (() => {
+    try {
+      const parsed = JSON.parse(mergeState.mergedTextJson || '[]');
+      return Array.isArray(parsed) ? parsed.filter(Boolean) : [];
+    } catch {
+      return [];
+    }
+  })();
+  const nextMergedParts = [...mergedParts, text].slice(-Number(config.timeline.shortMergeMaxParts || 5));
+
+  if (nextMergedParts.length < 2) {
+    logger.info('timeline short merge skipped', {
+      sourceMessageId: message.id,
+      destinationChannelId: target.destinationChannelId,
+      reason: 'chain_too_short'
     });
     return null;
   }
@@ -256,19 +370,19 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
     return null;
   }
 
-  const timelineMessage = await destinationChannel.messages.fetch(existingRelay.relayedMessageId).catch(() => null);
+  const timelineMessage = await destinationChannel.messages.fetch(mergeState.relayedMessageId).catch(() => null);
   if (!timelineMessage) {
     logger.info('timeline short merge skipped', {
       sourceMessageId: message.id,
+      destinationChannelId: target.destinationChannelId,
       reason: 'timeline_message_missing'
     });
     return null;
   }
 
-  const mergedParts = chain.map((entry) => String(entry.content || '').trim()).filter(Boolean);
   const mergedPost = {
     ...post,
-    content: mergedParts.join('\n'),
+    content: nextMergedParts.join('\n'),
     attachments: [],
     imageUrls: [],
     firstImageUrl: null,
@@ -287,7 +401,7 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
     logger.info('merge edit attempted', {
       sourceMessageId: message.id,
       relayedMessageId: timelineMessage.id,
-      mergedCount: mergedParts.length
+      mergedCount: nextMergedParts.length
     });
     const mergePayload = buildTimelineMessage({
       post: mergedPost,
@@ -310,21 +424,21 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
     });
     db.timelineMerge.upsert({
       guildId: message.guildId,
-      sourceChannelId: message.channelId,
-      sourceThreadId: message.channel.id,
+      sourceChannelId,
+      sourceThreadId,
       authorId: message.author?.id || null,
       destinationChannelId: target.destinationChannelId,
       lastSourceMessageId: message.id,
       relayedMessageId: timelineMessage.id,
-      mergedTextJson: JSON.stringify(mergedParts),
-      mergedCount: mergedParts.length,
+      mergedTextJson: JSON.stringify(nextMergedParts),
+      mergedCount: nextMergedParts.length,
       lastMessageAt: new Date(message.createdAt || Date.now()).toISOString()
     });
-    logger.info('timeline card edited for merge', {
+    logger.info('timeline short merge edit success', {
       sourceMessageId: message.id,
       previousSourceMessageId: previousEntry.messageId,
       relayedMessageId: timelineMessage.id,
-      mergedCount: mergedParts.length
+      mergedCount: nextMergedParts.length
     });
     return {
       merged: true,
@@ -334,7 +448,7 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
     logger.warn('merge edit failed fallback send', {
       sourceMessageId: message.id,
       previousSourceMessageId: previousEntry.messageId,
-      relayedMessageId: existingRelay.relayedMessageId,
+      relayedMessageId: mergeState.relayedMessageId,
       error: error.message
     });
     return null;
@@ -888,6 +1002,30 @@ async function relayTweetMessage(message, { config, db, logger }) {
           relayedMessageId: sentMessage.id,
           authorId: message.author?.id || null
         });
+
+        if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
+          if (isMergeableShortTweetPost(post, config)) {
+            db.timelineMerge.upsert({
+              guildId: message.guildId,
+              sourceChannelId: String(message.channelId || ''),
+              sourceThreadId: String(message.channel.id || ''),
+              authorId: message.author?.id || null,
+              destinationChannelId: target.destinationChannelId,
+              lastSourceMessageId: message.id,
+              relayedMessageId: sentMessage.id,
+              mergedTextJson: JSON.stringify([String(post.content || '').trim()]),
+              mergedCount: 1,
+              lastMessageAt: new Date(message.createdAt || Date.now()).toISOString()
+            });
+          } else {
+            db.timelineMerge.delete(
+              message.guildId,
+              String(message.channelId || ''),
+              message.author?.id || '',
+              target.destinationChannelId
+            );
+          }
+        }
 
         logger.info('Tweet message relayed', {
           messageId: message.id,

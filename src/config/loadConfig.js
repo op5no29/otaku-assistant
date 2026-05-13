@@ -45,6 +45,7 @@ function ensureGlobalHashtagRoutes(value, label) {
       tags: ensureArray(route.tags || [], `${routeLabel}.tags`),
       channelId: String(route.destinationChannelId || route.channelId || ''),
       displayTag: String(route.displayTag || route.display || route.tags?.[0] || ''),
+      displayMode: String(route.displayMode || 'displayTag'),
       alsoTimeline: route.alsoTimeline === true
     };
   };
@@ -73,7 +74,8 @@ function ensureTwitterMediaConfig(value) {
       videoMode: 'preview-only',
       maxVideoUploadBytes: 25_000_000,
       suppressDuplicateImages: true,
-      resolveTimeoutMs: 15_000
+      resolveTimeoutMs: 15_000,
+      ytDlpPath: 'yt-dlp'
     };
   }
 
@@ -82,7 +84,8 @@ function ensureTwitterMediaConfig(value) {
     videoMode: String(value.videoMode || 'preview-only'),
     maxVideoUploadBytes: Number(value.maxVideoUploadBytes ?? 25_000_000),
     suppressDuplicateImages: value.suppressDuplicateImages !== false,
-    resolveTimeoutMs: Number(value.resolveTimeoutMs ?? 15_000)
+    resolveTimeoutMs: Number(value.resolveTimeoutMs ?? 15_000),
+    ytDlpPath: String(value.ytDlpPath || 'yt-dlp')
   };
 }
 

@@ -1114,9 +1114,11 @@ async function extractPlainMessagePost(message, config, logger = null) {
       sourceMessageId: canonicalMessage.id,
       detectedTags: globalRouting.detectedTags,
       normalizedDisplayTags: globalRouting.displayTags,
+      displayMode: Array.from(new Set(globalRouting.matchedRoutes.map((routeKey) => config.globalHashtagRoutes?.[routeKey]?.displayMode || 'displayTag'))),
       rawPrefixRemoved: globalRouting.content !== restoredContent,
       normalizedHashtagInserted: true,
-      finalBodyText: String(customEmojiMedia.content || '').slice(0, 500)
+      finalBodyText: String(customEmojiMedia.content || '').slice(0, 500),
+      finalDisplayBotHashtags: displayBotHashtags
     });
   }
 

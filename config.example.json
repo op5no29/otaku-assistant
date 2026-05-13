@@ -43,7 +43,8 @@
     "videoMode": "preview-only",
     "maxVideoUploadBytes": 25000000,
     "suppressDuplicateImages": true,
-    "resolveTimeoutMs": 15000
+    "resolveTimeoutMs": 15000,
+    "ytDlpPath": "yt-dlp"
   },
   "llmEnabled": true,
   "llmContextMessageLimit": 50,
@@ -124,6 +125,7 @@
     {
       "tags": ["技術", "tech", "Tech", "TECH", "開発", "tips", "tool", "ツール"],
       "displayTag": "技術",
+      "displayMode": "matchedTag",
       "destinationChannelId": "YOUR_TECH_SHARING_CHANNEL_ID",
       "alsoTimeline": true
     }

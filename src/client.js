@@ -44,6 +44,7 @@ function createBotClient({ appConfig, database, logger }) {
   client.activeWelcomeReactionSetups = new Map();
   client.activeLlmUsers = new Set();
   client.llmGlobalRequestActive = false;
+  client.questionResolveLocks = new Set();
 
   client.once('clientReady', (...args) => readyEvent.execute(...args));
   client.on('threadCreate', (...args) => threadCreateEvent.execute(...args));

@@ -99,6 +99,7 @@ function parseGlobalHashtagRoutes(content, routeConfig = {}) {
     routeKey,
     route,
     tags: Array.isArray(route?.tags) ? route.tags.filter(Boolean) : [],
+    displayMode: String(route?.displayMode || 'displayTag'),
     display: `#${String(route?.displayTag || route?.display || route?.tags?.[0] || routeKey).trim()}`
   }));
 
@@ -113,6 +114,7 @@ function parseGlobalHashtagRoutes(content, routeConfig = {}) {
     const trimmedLine = line.trim();
     let matchedRoute = null;
     let detectedTag = null;
+    let matchedTagToken = null;
     let remainingContent = '';
 
     for (const routeEntry of routeEntries) {
@@ -123,13 +125,15 @@ function parseGlobalHashtagRoutes(content, routeConfig = {}) {
 
         if (normalizedLine === normalizedPrefixLower) {
           matchedRoute = routeEntry;
-          detectedTag = String(tag).trim();
+          matchedTagToken = trimmedLine.slice(2).trim();
+          detectedTag = matchedTagToken || String(tag).trim();
           break;
         }
 
         if (normalizedLine.startsWith(`${normalizedPrefixLower} `) || normalizedLine.startsWith(`${normalizedPrefixLower}\t`)) {
           matchedRoute = routeEntry;
-          detectedTag = String(tag).trim();
+          matchedTagToken = trimmedLine.slice(2).split(/\s+/, 1)[0]?.trim() || String(tag).trim();
+          detectedTag = matchedTagToken;
           remainingContent = trimmedLine.slice(normalizedPrefix.length).trimStart();
           break;
         }
@@ -150,9 +154,13 @@ function parseGlobalHashtagRoutes(content, routeConfig = {}) {
       seenRoutes.add(matchedRoute.routeKey);
     }
 
-    if (!seenDisplays.has(matchedRoute.display)) {
-      displayTags.push(matchedRoute.display);
-      seenDisplays.add(matchedRoute.display);
+    const finalDisplayTag = matchedRoute.displayMode === 'matchedTag'
+      ? `#${detectedTag}`
+      : matchedRoute.display;
+
+    if (!seenDisplays.has(finalDisplayTag)) {
+      displayTags.push(finalDisplayTag);
+      seenDisplays.add(finalDisplayTag);
     }
 
     if (detectedTag) {
