@@ -1,7 +1,7 @@
 const { ChannelType } = require('discord.js');
 const { setTimeout: sleep } = require('node:timers/promises');
 const { updateResolvedState } = require('./resolveThread');
-const { applyQuestionStatusTag } = require('./threadTags');
+const { applyQuestionStatusTag, areQuestionStatusTagsAlreadyCorrect } = require('./threadTags');
 const { canManageQuestionThread } = require('../../utils/permissions');
 const { addPrefix, removePrefix } = require('../../utils/text');
 const { updateQuestionTimelineCard } = require('../timelineRelay');
@@ -21,6 +21,73 @@ async function withTimeout(promise, timeoutMs, label) {
       throw new Error(`${label}_timeout`);
     })
   ]);
+}
+
+function buildDesiredThreadTitle(currentName, targetStatus, prefix) {
+  return targetStatus === 'resolved'
+    ? addPrefix(currentName, prefix)
+    : removePrefix(currentName, prefix);
+}
+
+function scheduleQuestionVisualSyncRetry({ client, threadId, targetStatus, logger, reason }) {
+  const retryDelayMs = 45_000;
+  logger.warn('sync retry scheduled', {
+    threadId,
+    targetStatus,
+    reason,
+    retryDelayMs
+  });
+
+  setTimeout(async () => {
+    try {
+      const thread = await client.channels.fetch(threadId).catch(() => null);
+      if (!thread?.isThread?.()) {
+        logger.warn('sync retry failed', {
+          threadId,
+          targetStatus,
+          reason: 'thread_not_found'
+        });
+        return;
+      }
+
+      const config = client.appConfig;
+      const prefix = config.questions.resolvedPrefix;
+      const desiredName = buildDesiredThreadTitle(thread.name || '', targetStatus, prefix);
+
+      if ((thread.name || '') !== desiredName) {
+        await withTimeout(
+          thread.setName(
+            desiredName,
+            `Question status sync retry to ${targetStatus}`
+          ),
+          15_000,
+          'thread_set_name'
+        );
+      }
+
+      if (!areQuestionStatusTagsAlreadyCorrect(thread, targetStatus, config)) {
+        await withTimeout(
+          applyQuestionStatusTag(thread, targetStatus, {
+            config,
+            logger
+          }),
+          10_000,
+          'apply_question_status_tag'
+        );
+      }
+
+      logger.info('sync retry finished', {
+        threadId,
+        targetStatus
+      });
+    } catch (error) {
+      logger.warn('sync retry failed', {
+        threadId,
+        targetStatus,
+        error: error.message
+      });
+    }
+  }, retryDelayMs);
 }
 
 async function resolveThread({ interaction, mode }) {
@@ -84,12 +151,21 @@ async function resolveThread({ interaction, mode }) {
     const prefix = config.questions.resolvedPrefix;
     const currentName = thread.name || '';
     interaction.client.db.questions.ensureQuestionThread(thread.id, thread.ownerId || null);
-    const currentStatus = currentName.startsWith(prefix) ? 'resolved' : 'open';
+    const questionRecord = interaction.client.db.questions.getQuestionThread(thread.id);
+    const currentStatus = questionRecord?.resolvedAt
+      ? 'resolved'
+      : currentName.startsWith(prefix) ? 'resolved' : 'open';
     const targetStatus = mode === 'resolve' ? 'resolved' : 'open';
     logger.info('question state loaded', {
       interactionId: interaction.id,
       threadId: thread.id,
       currentStatus,
+      targetStatus,
+      currentStatusSource: questionRecord?.resolvedAt ? 'db_status' : 'thread_title'
+    });
+    logger.info('command targetStatus computed', {
+      interactionId: interaction.id,
+      threadId: thread.id,
       targetStatus
     });
 
@@ -105,85 +181,28 @@ async function resolveThread({ interaction, mode }) {
 
     const partialFailureReasons = [];
     let workingThread = thread;
+    let dbStatusUpdated = false;
 
-    const newName = mode === 'resolve'
-      ? addPrefix(currentName, prefix)
-      : removePrefix(currentName, prefix);
-
-    logger.info('thread title update started', {
-      threadId: thread.id,
-      mode,
-      from: currentName,
-      to: newName
-    });
-    try {
-      workingThread = await withTimeout(
-        thread.setName(
-          newName,
-          mode === 'resolve' ? 'Question resolved by slash command' : 'Question unresolved by slash command'
-        ),
-        15_000,
-        'thread_set_name'
-      );
-      logger.info('thread title update finished', {
-        threadId: thread.id,
-        mode,
-        to: newName
-      });
-    } catch (error) {
-      partialFailureReasons.push('thread_title');
-      logger.warn('thread title update partial failure', {
-        threadId: thread.id,
-        mode,
-        error: error.message
-      });
-      logger.info('continuing after thread title failure', {
-        threadId: thread.id,
-        mode
-      });
-    }
-
-    logger.info('tag update started', {
+    logger.info('DB update started', {
       threadId: thread.id,
       mode,
       targetStatus
     });
     try {
-      workingThread = await withTimeout(
-        applyQuestionStatusTag(workingThread, targetStatus, {
-          config,
-          logger
-        }),
-        10_000,
-        'apply_question_status_tag'
-      );
-      logger.info('tag update finished', {
-        threadId: thread.id,
-        mode,
-        targetStatus
-      });
-    } catch (error) {
-      partialFailureReasons.push('status_tag');
-      logger.warn('tag update partial failure', {
-        threadId: thread.id,
-        mode,
-        error: error.message
-      });
-    }
-
-    logger.info('DB update started', {
-      threadId: thread.id,
-      mode
-    });
-    try {
-      if (mode === 'resolve') {
+      if (targetStatus === 'resolved') {
         interaction.client.db.questions.markResolved(thread.id);
       } else {
         updateResolvedState(interaction.client.db, thread.id, null);
       }
+      dbStatusUpdated = true;
       logger.info('DB update finished', {
         threadId: thread.id,
-        mode
+        mode,
+        targetStatus
+      });
+      logger.info('DB status set to targetStatus', {
+        threadId: thread.id,
+        targetStatus
       });
     } catch (error) {
       partialFailureReasons.push('db');
@@ -196,13 +215,16 @@ async function resolveThread({ interaction, mode }) {
 
     logger.info('timeline card update started', {
       threadId: thread.id,
-      mode
+      mode,
+      targetStatus
     });
     try {
       await withTimeout(updateQuestionTimelineCard(workingThread, {
         config,
         db: interaction.client.db,
-        logger
+        logger,
+        questionStatusOverride: targetStatus,
+        statusSource: dbStatusUpdated ? 'command_target_status' : 'db_status'
       }), 10_000, 'question_timeline_update');
       logger.info('timeline card update finished', {
         threadId: thread.id,
@@ -217,32 +239,161 @@ async function resolveThread({ interaction, mode }) {
       });
     }
 
+    const newName = buildDesiredThreadTitle(currentName, targetStatus, prefix);
+    if ((thread.name || '') === newName) {
+      logger.info('title sync skipped/already correct', {
+        threadId: thread.id,
+        mode,
+        targetStatus,
+        currentName
+      });
+    } else {
+      logger.info('thread title update started', {
+        threadId: thread.id,
+        mode,
+        from: currentName,
+        to: newName
+      });
+      try {
+        workingThread = await withTimeout(
+          thread.setName(
+            newName,
+            mode === 'resolve' ? 'Question resolved by slash command' : 'Question unresolved by slash command'
+          ),
+          15_000,
+          'thread_set_name'
+        );
+        logger.info('thread title update finished', {
+          threadId: thread.id,
+          mode,
+          to: newName
+        });
+      } catch (error) {
+        partialFailureReasons.push('thread_title');
+        logger.warn('thread title update partial failure', {
+          threadId: thread.id,
+          mode,
+          error: error.message
+        });
+        logger.info('continuing after thread title failure', {
+          threadId: thread.id,
+          mode
+        });
+        logger.warn('stale thread tag ignored because command targetStatus is authoritative', {
+          threadId: thread.id,
+          mode,
+          targetStatus
+        });
+      }
+    }
+
+    if (areQuestionStatusTagsAlreadyCorrect(workingThread, targetStatus, config)) {
+      logger.info('tag sync skipped/already correct', {
+        threadId: thread.id,
+        mode,
+        targetStatus,
+        appliedTags: workingThread.appliedTags || []
+      });
+    } else {
+      logger.info('tag update started', {
+        threadId: thread.id,
+        mode,
+        targetStatus
+      });
+      try {
+        workingThread = await withTimeout(
+          applyQuestionStatusTag(workingThread, targetStatus, {
+            config,
+            logger
+          }),
+          10_000,
+          'apply_question_status_tag'
+        );
+        logger.info('tag update finished', {
+          threadId: thread.id,
+          mode,
+          targetStatus
+        });
+      } catch (error) {
+        partialFailureReasons.push('status_tag');
+        logger.warn('tag sync partial failure', {
+          threadId: thread.id,
+          mode,
+          error: error.message
+        });
+        logger.warn('stale thread tag ignored because command targetStatus is authoritative', {
+          threadId: thread.id,
+          mode,
+          targetStatus
+        });
+      }
+    }
+
+    if (!dbStatusUpdated) {
+      await interaction.editReply('内部状態の更新に失敗しました。時間をおいてもう一度お試しください。');
+      logger.warn('command reply sent with partial failure', {
+        interactionId: interaction.id,
+        threadId: thread.id,
+        mode,
+        partialFailureReasons
+      });
+      return;
+    }
+
+    if (partialFailureReasons.includes('thread_title') || partialFailureReasons.includes('status_tag')) {
+      scheduleQuestionVisualSyncRetry({
+        client: interaction.client,
+        threadId: thread.id,
+        targetStatus,
+        logger,
+        reason: partialFailureReasons.join(',')
+      });
+    }
+
     const successMessage = mode === 'resolve'
       ? 'この質問を解決済みにしました。'
       : 'この質問を受付中に戻しました。';
+    const partialSyncMessage = mode === 'resolve'
+      ? 'この質問を解決済みにしました。ただし、スレッドタイトル/タグの同期に失敗しました。後で再試行します。'
+      : 'この質問を受付中に戻しました。ただし、スレッドタイトル/タグの同期に失敗しました。後で再試行します。';
     const partialMessageMap = {
-      thread_title: 'ステータスは更新しましたが、スレッドタイトルの更新に失敗しました。少し後で再試行される可能性があります。',
-      status_tag: 'ステータスは更新しましたが、フォーラムタグの更新に失敗しました。',
+      thread_title: partialSyncMessage,
+      status_tag: partialSyncMessage,
       timeline_card: 'ステータスは更新しましたが、タイムラインカードの更新に失敗しました。',
-      db: 'ステータス更新処理の一部に失敗しました。'
+      db: '内部状態の更新に失敗しました。時間をおいてもう一度お試しください。'
     };
+    const primaryPartialFailure = partialFailureReasons.find((reason) => reason !== 'thread_title' && reason !== 'status_tag')
+      || partialFailureReasons[0];
     const replyMessage = partialFailureReasons.length
-      ? partialMessageMap[partialFailureReasons[0]] || 'ステータスは更新しましたが、一部の更新に失敗しました。'
+      ? partialMessageMap[primaryPartialFailure] || 'ステータスは更新しましたが、一部の更新に失敗しました。'
       : successMessage;
 
-    logger.info(mode === 'resolve' ? 'Resolve success' : 'Unresolve success', {
-      threadId: thread.id,
-      userId: interaction.user.id,
-      partialFailureReasons
-    });
+    logger.info(
+      partialFailureReasons.length
+        ? mode === 'resolve' ? 'Resolve completed with partial failure' : 'Unresolve completed with partial failure'
+        : mode === 'resolve' ? 'Resolve success' : 'Unresolve success',
+      {
+        threadId: thread.id,
+        userId: interaction.user.id,
+        partialFailureReasons
+      }
+    );
 
     await interaction.editReply(replyMessage);
-    logger.info('command reply sent with partial failure', {
-      interactionId: interaction.id,
-      threadId: thread.id,
-      mode,
-      partialFailureReasons
-    });
+    if (partialFailureReasons.length) {
+      logger.info('command reply sent with partial failure', {
+        interactionId: interaction.id,
+        threadId: thread.id,
+        mode,
+        partialFailureReasons
+      });
+    } else {
+      logger.info('command reply sent', {
+        interactionId: interaction.id,
+        threadId: thread.id,
+        mode
+      });
+    }
   } catch (error) {
     logger.error('question resolve/unresolve failed', {
       interactionId: interaction.id,

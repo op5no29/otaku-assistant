@@ -884,7 +884,7 @@ async function getReplyContext(message, logger) {
   }
 }
 
-async function extractFirstPost(thread, config, logger) {
+async function extractFirstPost(thread, config, logger, options = {}) {
   const starterMessage = await getStarterMessage(thread, logger);
 
   if (!starterMessage) {
@@ -901,6 +901,13 @@ async function extractFirstPost(thread, config, logger) {
     thread.name || '',
     config.questions?.resolvedPrefix
   );
+  const explicitQuestionStatus = options.questionStatusOverride || null;
+  const explicitResolved =
+    explicitQuestionStatus === 'resolved'
+      ? true
+      : explicitQuestionStatus === 'open'
+        ? false
+        : normalizedTitle.isResolved;
   const imageAttachments = config.timeline.includeFirstImage
     ? findImageAttachments(fetchedStarterMessage.attachments)
     : [];
@@ -947,7 +954,7 @@ async function extractFirstPost(thread, config, logger) {
       null,
     rawTitle: thread.name || '',
     title: normalizedTitle.title || '',
-    isResolved: normalizedTitle.isResolved,
+    isResolved: explicitResolved,
     content: fetchedStarterMessage.content || starterMessage.content || '',
     jumpUrl: getMessageJumpUrl({
       guildId: thread.guildId,

@@ -1332,7 +1332,7 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
   });
 }
 
-async function updateQuestionTimelineCard(thread, { config, db, logger }) {
+async function updateQuestionTimelineCard(thread, { config, db, logger, questionStatusOverride = null, statusSource = null }) {
   const relay = db.relays.getThreadRelay(thread.id);
 
   if (!relay?.timelineMessageId) {
@@ -1342,7 +1342,9 @@ async function updateQuestionTimelineCard(thread, { config, db, logger }) {
     return;
   }
 
-  const post = await extractFirstPost(thread, config, logger);
+  const post = await extractFirstPost(thread, config, logger, {
+    questionStatusOverride
+  });
   if (!post) {
     logger.warn('Question timeline card update skipped because starter message was unavailable', {
       threadId: thread.id
@@ -1369,6 +1371,11 @@ async function updateQuestionTimelineCard(thread, { config, db, logger }) {
     forumType: 'question',
     logger
   });
+  logger.info('timeline card update using explicit targetStatus', {
+    threadId: thread.id,
+    questionStatusOverride,
+    cardBuilderStatusSource: questionStatusOverride ? (statusSource || 'command_target_status') : 'thread_state'
+  });
   try {
     await timelineMessage.edit({
       ...payload,
@@ -1382,7 +1389,8 @@ async function updateQuestionTimelineCard(thread, { config, db, logger }) {
     threadId: thread.id,
     timelineMessageId: relay.timelineMessageId,
     resolved: post.isResolved,
-    questionCardStatusColor: post.isResolved ? 'green' : 'red'
+    questionCardStatusColor: post.isResolved ? 'green' : 'red',
+    cardBuilderStatusSource: questionStatusOverride ? (statusSource || 'command_target_status') : 'thread_state'
   });
 }
 

@@ -3,6 +3,23 @@ function getStatusTagConfig(thread, config) {
   return config.questionForumTags?.[parentId] || null;
 }
 
+function areQuestionStatusTagsAlreadyCorrect(thread, status, config) {
+  const tagConfig = getStatusTagConfig(thread, config);
+  if (!tagConfig?.open || !tagConfig?.resolved) {
+    return false;
+  }
+
+  const appliedTags = new Set((thread.appliedTags || []).map(String));
+  const openTagId = String(tagConfig.open);
+  const resolvedTagId = String(tagConfig.resolved);
+
+  if (status === 'resolved') {
+    return appliedTags.has(resolvedTagId) && !appliedTags.has(openTagId);
+  }
+
+  return appliedTags.has(openTagId) && !appliedTags.has(resolvedTagId);
+}
+
 async function applyQuestionStatusTag(thread, status, { config, logger }) {
   const tagConfig = getStatusTagConfig(thread, config);
 
@@ -46,5 +63,6 @@ async function applyQuestionStatusTag(thread, status, { config, logger }) {
 }
 
 module.exports = {
-  applyQuestionStatusTag
+  applyQuestionStatusTag,
+  areQuestionStatusTagsAlreadyCorrect
 };
