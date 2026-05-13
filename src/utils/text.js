@@ -88,6 +88,51 @@ function sanitizeDisplayFileName(value) {
   return normalized || 'attachment';
 }
 
+function decodeUrlFileName(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    const lastSegment = parsed.pathname.split('/').filter(Boolean).pop();
+    if (!lastSegment) {
+      return null;
+    }
+
+    return sanitizeDisplayFileName(decodeURIComponent(lastSegment));
+  } catch {
+    return null;
+  }
+}
+
+function isMeaningfulFileName(candidate) {
+  if (!candidate) {
+    return false;
+  }
+
+  const safeName = sanitizeDisplayFileName(candidate);
+  const { base, extension } = splitFileName(safeName);
+
+  if (!extension) {
+    return false;
+  }
+
+  return !/^\d+$/.test(base.trim());
+}
+
+function resolveBestAttachmentFileName(attachment) {
+  const candidates = [
+    attachment?.name,
+    attachment?.filename,
+    attachment?.title,
+    attachment?.description,
+    decodeUrlFileName(attachment?.url),
+    decodeUrlFileName(attachment?.proxyURL || attachment?.proxyUrl)
+  ].filter(Boolean);
+
+  const meaningful = candidates.find((candidate) => isMeaningfulFileName(candidate));
+  const fallback = candidates.find(Boolean);
+
+  return sanitizeDisplayFileName(meaningful || fallback || 'attachment');
+}
+
 function createUniqueDisplayFileName(originalName, usedNames) {
   const safeName = sanitizeDisplayFileName(originalName);
   const { base, extension } = splitFileName(safeName);
@@ -214,14 +259,30 @@ function normalizeAttachment(attachment) {
   const isAudio = isAudioAttachment(attachment);
   const isPdf = isPdfAttachment(attachment);
 
+  const originalDiscordNameRaw = String(attachment.name || attachment.filename || '');
+  const originalFileName = resolveBestAttachmentFileName(attachment);
+
   return {
     id: String(attachment.id || ''),
-    originalName: String(attachment.name || 'attachment'),
-    name: sanitizeDisplayFileName(attachment.name || 'attachment'),
+    attachmentId: String(attachment.id || ''),
+    originalDiscordNameRaw,
+    originalName: originalFileName,
+    originalFileName,
+    displayFileName: originalFileName,
+    uploadFileName: originalFileName,
+    name: originalFileName,
     lowerName,
     url: attachment.url,
+    attachmentUrl: attachment.url,
+    proxyUrl: attachment.proxyURL || attachment.proxyUrl || null,
     contentType: attachment.contentType || null,
     size: Number(attachment.size || 0),
+    extension: splitFileName(originalFileName).extension,
+    metadata: {
+      filename: attachment.filename || null,
+      title: attachment.title || null,
+      description: attachment.description || null
+    },
     isImage,
     isGif,
     isVideo,
@@ -241,10 +302,27 @@ function normalizeAttachments(attachments) {
     .filter(Boolean);
 }
 
+function restoreCustomEmojiTokens(content, guild) {
+  const rawContent = String(content || '');
+  if (!rawContent || /<a?:\w+:\d+>/.test(rawContent) || !guild?.emojis?.cache) {
+    return rawContent;
+  }
+
+  return rawContent.replace(/(^|[\s(])\:([A-Za-z0-9_]{2,32})\:(?=[$\s)!,.!?])/g, (match, prefix, emojiName) => {
+    const emoji = guild.emojis.cache.find((entry) => entry.name === emojiName);
+    if (!emoji) {
+      return match;
+    }
+
+    return `${prefix}<${emoji.animated ? 'a' : ''}:${emoji.name}:${emoji.id}>`;
+  });
+}
+
 module.exports = {
   truncateText,
   parseBotHashtagRoutes,
   sanitizeDisplayFileName,
+  resolveBestAttachmentFileName,
   createUniqueDisplayFileName,
   addPrefix,
   removePrefix,
@@ -254,5 +332,6 @@ module.exports = {
   isGifAttachment,
   isAudioAttachment,
   isPdfAttachment,
-  normalizeAttachments
+  normalizeAttachments,
+  restoreCustomEmojiTokens
 };

@@ -5,7 +5,8 @@ const {
   findFirstImageAttachment,
   findFirstVideoAttachment,
   normalizeAttachments,
-  parseBotHashtagRoutes
+  parseBotHashtagRoutes,
+  restoreCustomEmojiTokens
 } = require('../../utils/text');
 
 const QUESTION_FORUM_LABELS = {
@@ -74,6 +75,22 @@ function detectSocialLink(content) {
   return match?.[0] || null;
 }
 
+function getGifProviderName(url) {
+  if (/tenor\.com|media\.tenor\.com/i.test(String(url || ''))) {
+    return 'tenor';
+  }
+
+  if (/giphy\.com|media\d*\.giphy\.com/i.test(String(url || ''))) {
+    return 'giphy';
+  }
+
+  if (/cdn\.discordapp\.com/i.test(String(url || '')) && /\.gif/i.test(String(url || ''))) {
+    return 'discord-cdn';
+  }
+
+  return null;
+}
+
 function isGifProviderUrl(url) {
   return /https?:\/\/(?:www\.)?(?:tenor\.com|media\.tenor\.com|giphy\.com|media\d*\.giphy\.com)\//i.test(String(url || ''));
 }
@@ -94,6 +111,22 @@ function normalizeMediaUrl(url) {
   } catch {
     return String(url || '');
   }
+}
+
+function scoreGifMediaCandidate(url) {
+  if (/\.gif(?:[?#].*)?$/i.test(url)) {
+    return 3;
+  }
+
+  if (/\.mp4(?:[?#].*)?$/i.test(url)) {
+    return 2;
+  }
+
+  if (/\.webm(?:[?#].*)?$/i.test(url)) {
+    return 1;
+  }
+
+  return 0;
 }
 
 function pickPreviewImage(embed) {
@@ -180,6 +213,7 @@ function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null) {
   let primaryPreview = null;
   let duplicateCount = 0;
   const seenNormalized = new Set();
+  const gifProvider = getGifProviderName(sourceUrl);
 
   for (const embed of embeds || []) {
     const rawImageUrls = new Set();
@@ -234,16 +268,24 @@ function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null) {
     return null;
   }
 
+  let finalMediaUrls = mediaUrls;
+  if (gifProvider && finalMediaUrls.length) {
+    finalMediaUrls = [...finalMediaUrls]
+      .sort((left, right) => scoreGifMediaCandidate(right) - scoreGifMediaCandidate(left))
+      .slice(0, 1);
+  }
+
   return {
     title: primaryPreview?.title || null,
     description: primaryPreview?.description || null,
     imageUrl: primaryPreview?.imageUrl || imageUrls[0] || null,
     imageUrls,
-    mediaUrls,
+    mediaUrls: finalMediaUrls,
     sourceUrl: primaryPreview?.sourceUrl || null,
     siteName: primaryPreview?.siteName || null,
     isGifShare: isGifProviderUrl(sourceUrl) || mediaUrls.some((url) => looksLikeAnimatedMediaUrl(url)),
-    duplicateCount
+    gifProvider,
+    duplicateCount: duplicateCount + Math.max(0, mediaUrls.length - finalMediaUrls.length)
   };
 }
 
@@ -278,9 +320,10 @@ async function getSocialPreviewData(message, logger, attempts = 3, retryDelayMs 
       if (preview.isGifShare) {
         logger.info('GIF preview extracted', {
           sourceMessageId: message.id,
-          detectedGifProvider: new URL(socialLink).hostname,
+          detectedGifProvider: preview.gifProvider || getGifProviderName(socialLink),
           originalLink: socialLink,
           extractedMediaUrl: preview.mediaUrls?.[0] || preview.imageUrls?.[0] || null,
+          mediaCandidates: preview.mediaUrls || [],
           acceptedMediaCount: preview.mediaUrls?.length || 0,
           rejectedDuplicateCount: preview.duplicateCount || 0
         });
@@ -572,6 +615,22 @@ async function extractFirstPost(thread, config, logger) {
   const socialPreview = await getSocialPreviewData(starterMessage, logger);
   const knowledgeTagLabels = getKnowledgeTagLabels(thread);
 
+  for (const attachment of starterMessage.attachments.values()) {
+    logger.info('Attachment raw metadata observed', {
+      sourceMessageId: starterMessage.id,
+      attachmentId: String(attachment.id || ''),
+      attachmentName: attachment.name || null,
+      attachmentFilename: attachment.filename || null,
+      attachmentTitle: attachment.title || null,
+      attachmentDescription: attachment.description || null,
+      attachmentUrl: attachment.url ? String(attachment.url).slice(0, 240) : null,
+      attachmentProxyUrl: attachment.proxyURL ? String(attachment.proxyURL).slice(0, 240) : null,
+      contentType: attachment.contentType || null,
+      size: Number(attachment.size || 0),
+      attachmentKeys: Object.keys(attachment)
+    });
+  }
+
   return {
     message: starterMessage,
     messageId: starterMessage.id,
@@ -622,9 +681,26 @@ async function extractThreadMessagePost(message, config, logger = null) {
     ? findFirstImageAttachment(message.attachments)
     : null;
   const firstVideo = findFirstVideoAttachment(message.attachments);
+  for (const attachment of message.attachments.values()) {
+    logger?.info?.('Attachment raw metadata observed', {
+      sourceMessageId: message.id,
+      attachmentId: String(attachment.id || ''),
+      attachmentName: attachment.name || null,
+      attachmentFilename: attachment.filename || null,
+      attachmentTitle: attachment.title || null,
+      attachmentDescription: attachment.description || null,
+      attachmentUrl: attachment.url ? String(attachment.url).slice(0, 240) : null,
+      attachmentProxyUrl: attachment.proxyURL ? String(attachment.proxyURL).slice(0, 240) : null,
+      contentType: attachment.contentType || null,
+      size: Number(attachment.size || 0),
+      attachmentKeys: Object.keys(attachment)
+    });
+  }
+
   const socialPreview = logger ? await getSocialPreviewData(message, logger) : null;
   const threadOwnerInfo = await getThreadOwnerInfo(thread, logger);
-  const hashtagRouting = parseBotHashtagRoutes(message.content || '', config.botHashtagRoutes);
+  const restoredContent = restoreCustomEmojiTokens(message.content || '', thread.guild);
+  const hashtagRouting = parseBotHashtagRoutes(restoredContent, config.botHashtagRoutes);
   const strippedContent = stripPreviewedGifLinks(hashtagRouting.content, socialPreview);
   const { referencedSourceMessageId, replyContext } = await getReplyContext(message, logger);
   const displayName =
@@ -636,9 +712,14 @@ async function extractThreadMessagePost(message, config, logger = null) {
   logger?.info?.('Message content prepared for relay', {
     sourceMessageId: message.id,
     contentSource: 'message.content',
+    rawContent: String(message.content || '').slice(0, 500),
+    cleanContent: String(message.cleanContent || '').slice(0, 500),
+    extractedBodyText: String(hashtagRouting.content || '').slice(0, 500),
+    finalBodyText: String(strippedContent.content || '').slice(0, 500),
     bodyUrlHidden: strippedContent.bodyUrlHidden,
-    customEmojiTokensPreserved: /<a?:\w+:\d+>/.test(message.content || ''),
-    originalContentHadCustomEmojiToken: /<a?:\w+:\d+>/.test(message.content || '')
+    customEmojiTokensPreserved: /<a?:\w+:\d+>/.test(strippedContent.content || ''),
+    originalContentHadCustomEmojiToken: /<a?:\w+:\d+>/.test(message.content || ''),
+    usedCleanContent: false
   });
 
   return {
