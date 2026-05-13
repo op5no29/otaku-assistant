@@ -80,6 +80,7 @@ function splitFileName(fileName) {
 
 function sanitizeDisplayFileName(value) {
   const normalized = String(value || 'attachment')
+    .normalize('NFC')
     .replace(/[\/\\]/g, '_')
     .replace(/[\u0000-\u001f\u007f]/g, '')
     .replace(/\s+/g, ' ')
@@ -125,6 +126,51 @@ function isMeaningfulFileName(candidate) {
   return true;
 }
 
+function containsJapaneseOrKana(value) {
+  return /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/u.test(String(value || ''));
+}
+
+function looksLikeDegradedFileName(candidate) {
+  if (!candidate) {
+    return true;
+  }
+
+  const safeName = sanitizeDisplayFileName(candidate);
+  const { base, extension } = splitFileName(safeName);
+
+  if (!extension) {
+    return true;
+  }
+
+  const trimmedBase = base.trim();
+  if (/^\d+$/.test(trimmedBase)) {
+    return true;
+  }
+
+  if (/^[\d_-]{1,8}$/.test(trimmedBase)) {
+    return true;
+  }
+
+  if (/_$/.test(trimmedBase)) {
+    return true;
+  }
+
+  return false;
+}
+
+function chooseExtension(attachment) {
+  const extensionCandidates = [
+    splitFileName(attachment?.name).extension,
+    splitFileName(attachment?.filename).extension,
+    splitFileName(attachment?.title).extension,
+    splitFileName(attachment?.description).extension,
+    splitFileName(decodeUrlFileName(attachment?.url)).extension,
+    splitFileName(decodeUrlFileName(attachment?.proxyURL || attachment?.proxyUrl)).extension
+  ].filter(Boolean);
+
+  return extensionCandidates[0] || '';
+}
+
 function findFileNameInText(content, extension = '') {
   const text = String(content || '');
   if (!text) {
@@ -145,28 +191,64 @@ function findFileNameInText(content, extension = '') {
 }
 
 function resolveBestAttachmentFileName(attachment, options = {}) {
-  const extension = splitFileName(
-    attachment?.name ||
-    attachment?.filename ||
-    attachment?.title ||
-    attachment?.description ||
-    decodeUrlFileName(attachment?.url) ||
-    'attachment'
-  ).extension;
-  const candidates = [
-    attachment?.title,
-    attachment?.filename,
-    attachment?.name,
-    attachment?.description,
-    decodeUrlFileName(attachment?.url),
-    decodeUrlFileName(attachment?.proxyURL || attachment?.proxyUrl),
-    findFileNameInText(options.sourceContent, extension)
-  ].filter(Boolean);
+  const extension = chooseExtension(attachment);
+  const titleCandidate = sanitizeDisplayFileName(attachment?.title || '');
+  const filenameCandidate = sanitizeDisplayFileName(attachment?.filename || '');
+  const nameCandidate = sanitizeDisplayFileName(attachment?.name || '');
+  const descriptionCandidate = sanitizeDisplayFileName(attachment?.description || '');
+  const urlCandidate = decodeUrlFileName(attachment?.url);
+  const proxyCandidate = decodeUrlFileName(attachment?.proxyURL || attachment?.proxyUrl);
+  const contentCandidate = findFileNameInText(options.sourceContent, extension);
 
-  const meaningful = candidates.find((candidate) => isMeaningfulFileName(candidate));
-  const fallback = candidates.find(Boolean);
+  const titleBase = splitFileName(titleCandidate).base;
+  const titleWithExtension = titleCandidate
+    ? sanitizeDisplayFileName(splitFileName(titleCandidate).extension ? titleCandidate : `${titleBase}${extension}`)
+    : '';
 
-  return sanitizeDisplayFileName(meaningful || fallback || 'attachment');
+  let chosen = '';
+  let chosenSource = 'fallback';
+
+  if (
+    titleCandidate &&
+    containsJapaneseOrKana(titleCandidate) &&
+    (looksLikeDegradedFileName(nameCandidate) || !containsJapaneseOrKana(nameCandidate))
+  ) {
+    chosen = titleWithExtension;
+    chosenSource = 'attachment.title+extension';
+  } else {
+    const candidates = [
+      { value: titleWithExtension, source: splitFileName(titleCandidate).extension ? 'attachment.title' : 'attachment.title+extension' },
+      { value: filenameCandidate, source: 'attachment.filename' },
+      { value: nameCandidate, source: 'attachment.name' },
+      { value: descriptionCandidate, source: 'attachment.description' },
+      { value: urlCandidate, source: 'attachment.url' },
+      { value: proxyCandidate, source: 'attachment.proxyURL' },
+      { value: contentCandidate, source: 'message.content' }
+    ].filter((candidate) => candidate.value);
+
+    const meaningful = candidates.find((candidate) => isMeaningfulFileName(candidate.value) && !looksLikeDegradedFileName(candidate.value));
+    const fallback = candidates.find((candidate) => isMeaningfulFileName(candidate.value)) || candidates[0];
+
+    chosen = meaningful?.value || fallback?.value || 'attachment';
+    chosenSource = meaningful?.source || fallback?.source || 'fallback';
+  }
+
+  const finalDisplayFileName = sanitizeDisplayFileName(chosen || 'attachment');
+
+  if (options.logger) {
+    options.logger.info('Attachment filename resolved', {
+      sourceMessageId: options.sourceMessageId || null,
+      attachmentId: String(attachment?.id || ''),
+      titleCandidate,
+      nameCandidate,
+      filenameCandidate,
+      extensionSource: extension || null,
+      chosenFileNameSource: chosenSource,
+      finalDisplayFileName
+    });
+  }
+
+  return finalDisplayFileName;
 }
 
 function createUniqueDisplayFileName(originalName, usedNames) {

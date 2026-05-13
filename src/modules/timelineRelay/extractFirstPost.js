@@ -692,7 +692,9 @@ async function extractFirstPost(thread, config, logger) {
     ? findImageAttachments(fetchedStarterMessage.attachments)
     : [];
   const attachments = normalizeAttachments(fetchedStarterMessage.attachments, {
-    sourceContent: fetchedStarterMessage.content || starterMessage.content || ''
+    sourceContent: fetchedStarterMessage.content || starterMessage.content || '',
+    logger,
+    sourceMessageId: fetchedStarterMessage.id
   });
   const firstImage = config.timeline.includeFirstImage
     ? findFirstImageAttachment(fetchedStarterMessage.attachments)
@@ -763,7 +765,9 @@ async function extractThreadMessagePost(message, config, logger = null) {
     ? findImageAttachments(canonicalMessage.attachments)
     : [];
   const attachments = normalizeAttachments(canonicalMessage.attachments, {
-    sourceContent: canonicalMessage.content || message.content || ''
+    sourceContent: canonicalMessage.content || message.content || '',
+    logger,
+    sourceMessageId: canonicalMessage.id
   });
   const firstImage = config.timeline.includeFirstImage
     ? findFirstImageAttachment(canonicalMessage.attachments)
@@ -809,6 +813,9 @@ async function extractThreadMessagePost(message, config, logger = null) {
     customEmojiIds: customEmojiMedia.tokens.map((token) => token.id),
     generatedEmojiMediaUrls: customEmojiMedia.mediaItems.map((item) => item.url),
     hasNonEmojiText: customEmojiMedia.hasNonEmojiText,
+    emojiOnly: customEmojiMedia.tokens.length > 0 && !customEmojiMedia.hasNonEmojiText,
+    emojiMediaFallbackEnabled: customEmojiMedia.tokens.length > 0 && !customEmojiMedia.hasNonEmojiText,
+    skippedEmojiMediaBecauseTextExists: customEmojiMedia.tokens.length > 0 && customEmojiMedia.hasNonEmojiText,
     customEmojiTokensPreserved: /<a?:\w+:\d+>/.test(strippedContent.content || ''),
     originalContentHadCustomEmojiToken: /<a?:\w+:\d+>/.test(canonicalMessage.content || message.content || ''),
     usedCleanContent: false
@@ -834,8 +841,8 @@ async function extractThreadMessagePost(message, config, logger = null) {
     title: '',
     rawTitle: thread.name || '',
     isResolved: false,
-    content: customEmojiMedia.content,
-    customEmojiMediaItems: customEmojiMedia.mediaItems,
+    content: customEmojiMedia.hasNonEmojiText ? strippedContent.content : customEmojiMedia.content,
+    customEmojiMediaItems: customEmojiMedia.hasNonEmojiText ? [] : customEmojiMedia.mediaItems,
     matchedBotHashtagRoutes: hashtagRouting.matchedRoutes,
     displayBotHashtags: hashtagRouting.displayTags,
     jumpUrl: getMessageJumpUrl({
