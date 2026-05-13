@@ -39,6 +39,7 @@ function buildStatusLines(interaction) {
     `- media relay: ${appConfig.mediaRelay.maxReuploadBytes > 0 ? 'enabled' : 'disabled'}`,
     `- Odesli/music: ${musicRouteEnabled ? 'enabled' : 'disabled'}`,
     `- welcome auto-reactions: ${appConfig.welcomeChannelId ? 'enabled' : 'disabled'}`,
+    `- local LLM: ${appConfig.llm.enabled ? 'enabled' : 'disabled'}`,
     '設定:',
     `- timeline channel: ${appConfig.timelineChannelId || 'not set'}`,
     `- tweet forum: ${appConfig.watchedForums.tweet[0] || 'not set'}`,
@@ -113,6 +114,11 @@ module.exports = {
             .setMinValue(1)
             .setMaxValue(500)
         )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('llm-status')
+        .setDescription('Ollama LLM の状態とアーカイブ件数を表示します。')
     ),
   async execute(interaction) {
     if (!isAdministrator(interaction.member)) {
@@ -129,6 +135,23 @@ module.exports = {
     if (subcommand === 'status') {
       await interaction.reply({
         content: buildStatusLines(interaction).join('\n'),
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'llm-status') {
+      const llmConfig = interaction.client.appConfig.llm;
+      await interaction.reply({
+        content: [
+          `llmEnabled: ${llmConfig.enabled}`,
+          `ollamaBaseUrl: ${llmConfig.baseUrl}`,
+          `model: ${llmConfig.model}`,
+          `activeRequestCount: ${interaction.client.activeLlmUsers.size}`,
+          `globalBusy: ${interaction.client.llmGlobalRequestActive}`,
+          `archivedMessageCount: ${interaction.client.db.archives.countMessages()}`,
+          `llmResponseCount: ${interaction.client.db.llmResponses.count()}`
+        ].join('\n'),
         ephemeral: true
       });
       return;

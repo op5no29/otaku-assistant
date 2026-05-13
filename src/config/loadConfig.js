@@ -54,6 +54,14 @@ function ensureBotHashtagRoutes(value, label) {
   );
 }
 
+function ensureStringArray(value, fallback = []) {
+  if (!Array.isArray(value)) {
+    return fallback.map(String);
+  }
+
+  return value.filter(Boolean).map(String);
+}
+
 function ensureOpsConfig(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
@@ -118,6 +126,29 @@ function loadConfig(configPath) {
     mediaRelay: {
       maxReuploadBytes: Number(parsed.mediaRelay?.maxReuploadBytes ?? 25_000_000),
       tempDir: String(parsed.mediaRelay?.tempDir || './tmp/relay-media')
+    },
+    llm: {
+      enabled: parsed.llmEnabled !== false,
+      contextMessageLimit: Number(parsed.llmContextMessageLimit ?? 50),
+      thinkingMessage: String(parsed.llmThinkingMessage || '少女祈祷中...'),
+      thinkingMessages: ensureStringArray(parsed.llmThinkingMessages, [
+        '少女祈祷中...',
+        '応答作成中...',
+        '会話を整理中...',
+        '文脈を読み込み中...',
+        'ローカルLLMが考えています...',
+        '少しお待ちください...'
+      ]),
+      busyMessages: ensureStringArray(parsed.llmBusyMessages, [
+        '回線が混雑しています。少し待ってからもう一度試してください。',
+        '少女が困っています。少し待ってからもう一度試してください。',
+        'ただいま応答処理が詰まっています。少し待ってからもう一度試してください。',
+        'ローカルLLMが別の応答を処理中です。少し待ってからもう一度試してください。'
+      ]),
+      maxReplyChars: Number(parsed.llmMaxReplyChars ?? 1800),
+      timeoutMs: Number(parsed.llmTimeoutMs ?? 120000),
+      baseUrl: String(parsed.ollamaBaseUrl || process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434'),
+      model: String(parsed.ollamaModel || process.env.OLLAMA_MODEL || 'qwen3:4b')
     },
     questions: {
       resolvedPrefix: String(parsed.questions?.resolvedPrefix || '[解決済]'),

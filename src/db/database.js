@@ -368,6 +368,119 @@ function createDatabase(databasePath) {
       SELECT COUNT(*) AS count
       FROM welcome_reactions
       WHERE guild_id = ?
+    `),
+    upsertArchivedMessage: sqlite.prepare(`
+      INSERT INTO archived_messages (
+        message_id,
+        guild_id,
+        channel_id,
+        parent_id,
+        thread_id,
+        author_id,
+        author_name,
+        author_is_bot,
+        content,
+        clean_content,
+        attachments_json,
+        embeds_json,
+        referenced_message_id,
+        message_type,
+        created_at,
+        edited_at,
+        archived_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(message_id) DO UPDATE SET
+        guild_id = excluded.guild_id,
+        channel_id = excluded.channel_id,
+        parent_id = excluded.parent_id,
+        thread_id = excluded.thread_id,
+        author_id = excluded.author_id,
+        author_name = excluded.author_name,
+        author_is_bot = excluded.author_is_bot,
+        content = excluded.content,
+        clean_content = excluded.clean_content,
+        attachments_json = excluded.attachments_json,
+        embeds_json = excluded.embeds_json,
+        referenced_message_id = excluded.referenced_message_id,
+        message_type = excluded.message_type,
+        created_at = excluded.created_at,
+        edited_at = excluded.edited_at,
+        archived_at = excluded.archived_at
+    `),
+    getArchivedMessage: sqlite.prepare(`
+      SELECT
+        message_id AS messageId,
+        guild_id AS guildId,
+        channel_id AS channelId,
+        parent_id AS parentId,
+        thread_id AS threadId,
+        author_id AS authorId,
+        author_name AS authorName,
+        author_is_bot AS authorIsBot,
+        content,
+        clean_content AS cleanContent,
+        attachments_json AS attachmentsJson,
+        embeds_json AS embedsJson,
+        referenced_message_id AS referencedMessageId,
+        message_type AS messageType,
+        created_at AS createdAt,
+        edited_at AS editedAt,
+        archived_at AS archivedAt
+      FROM archived_messages
+      WHERE message_id = ?
+      LIMIT 1
+    `),
+    listRecentArchivedMessagesByChannel: sqlite.prepare(`
+      SELECT
+        message_id AS messageId,
+        guild_id AS guildId,
+        channel_id AS channelId,
+        parent_id AS parentId,
+        thread_id AS threadId,
+        author_id AS authorId,
+        author_name AS authorName,
+        author_is_bot AS authorIsBot,
+        content,
+        clean_content AS cleanContent,
+        attachments_json AS attachmentsJson,
+        embeds_json AS embedsJson,
+        referenced_message_id AS referencedMessageId,
+        message_type AS messageType,
+        created_at AS createdAt,
+        edited_at AS editedAt,
+        archived_at AS archivedAt
+      FROM archived_messages
+      WHERE channel_id = ?
+      ORDER BY datetime(created_at) DESC, message_id DESC
+      LIMIT ?
+    `),
+    countArchivedMessages: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM archived_messages
+    `),
+    insertLlmResponse: sqlite.prepare(`
+      INSERT OR REPLACE INTO llm_responses (
+        response_message_id,
+        request_message_id,
+        channel_id,
+        author_id,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?)
+    `),
+    getLlmResponseByMessageId: sqlite.prepare(`
+      SELECT
+        response_message_id AS responseMessageId,
+        request_message_id AS requestMessageId,
+        channel_id AS channelId,
+        author_id AS authorId,
+        created_at AS createdAt
+      FROM llm_responses
+      WHERE response_message_id = ?
+      LIMIT 1
+    `),
+    countLlmResponses: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM llm_responses
     `)
   };
 
@@ -556,6 +669,55 @@ function createDatabase(databasePath) {
       },
       clear(guildId) {
         statements.clearWelcomeReactions.run(guildId);
+      }
+    },
+    archives: {
+      upsertMessage(record) {
+        statements.upsertArchivedMessage.run(
+          record.messageId,
+          record.guildId,
+          record.channelId,
+          record.parentId,
+          record.threadId,
+          record.authorId,
+          record.authorName,
+          record.authorIsBot ? 1 : 0,
+          record.content,
+          record.cleanContent,
+          record.attachmentsJson,
+          record.embedsJson,
+          record.referencedMessageId,
+          record.messageType,
+          record.createdAt,
+          record.editedAt,
+          new Date().toISOString()
+        );
+      },
+      getMessage(messageId) {
+        return statements.getArchivedMessage.get(messageId) || null;
+      },
+      listRecentMessages(channelId, limit) {
+        return statements.listRecentArchivedMessagesByChannel.all(channelId, limit);
+      },
+      countMessages() {
+        return Number(statements.countArchivedMessages.get()?.count || 0);
+      }
+    },
+    llmResponses: {
+      insert({ responseMessageId, requestMessageId, channelId, authorId }) {
+        statements.insertLlmResponse.run(
+          responseMessageId,
+          requestMessageId,
+          channelId,
+          authorId,
+          new Date().toISOString()
+        );
+      },
+      get(responseMessageId) {
+        return statements.getLlmResponseByMessageId.get(responseMessageId) || null;
+      },
+      count() {
+        return Number(statements.countLlmResponses.get()?.count || 0);
       }
     }
   };

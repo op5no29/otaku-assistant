@@ -46,6 +46,14 @@ async function createWelcomeReactionSetup(interaction) {
   const { client } = interaction;
   const store = ensureSetupStore(client);
   const maxCount = Number(client.appConfig.welcomeReactionsMax || 5);
+  const previousCount = client.db.welcomeReactions.count(interaction.guildId);
+  client.db.welcomeReactions.clear(interaction.guildId);
+
+  client.logger.info('Welcome reaction setup DB reset', {
+    guildId: interaction.guildId,
+    clearedCount: previousCount
+  });
+
   const setupMessage = await interaction.channel.send({
     content: `Welcome通知につけたいリアクションをこのメッセージに押してください。最大${maxCount}個まで保存されます。`
   });
@@ -57,7 +65,7 @@ async function createWelcomeReactionSetup(interaction) {
     createdAt: Date.now()
   });
 
-  client.logger.info('Welcome reaction setup message created', {
+  client.logger.info('Welcome reaction setup started', {
     guildId: interaction.guildId,
     channelId: interaction.channelId,
     setupMessageId: setupMessage.id,
@@ -121,50 +129,128 @@ async function handleWelcomeReactionSetup(reaction, user) {
     await reaction.fetch().catch(() => null);
   }
 
-  const descriptor = createReactionDescriptor(reaction.emoji);
-  const maxCount = Number(client.appConfig.welcomeReactionsMax || 5);
-  const existing = client.db.welcomeReactions.get(guildId, descriptor.emojiKey);
-  const currentCount = client.db.welcomeReactions.count(guildId);
-
-  if (existing) {
-    logger.info('Welcome reaction setup skipped', {
-      guildId,
-      reactionMessageId: message.id,
-      userId: user.id,
-      emojiKey: descriptor.emojiKey,
-      reason: 'already_saved'
-    });
-    return;
-  }
-
-  if (currentCount >= maxCount) {
-    logger.info('Welcome reaction setup skipped', {
-      guildId,
-      reactionMessageId: message.id,
-      userId: user.id,
-      emojiKey: descriptor.emojiKey,
-      reason: 'max_reached',
-      maxCount
-    });
-    return;
-  }
-
-  client.db.welcomeReactions.insert({
-    guildId,
-    ...descriptor,
-    sortOrder: currentCount + 1
+  await syncWelcomeReactionsFromSetupMessage(message, {
+    actorUserId: user.id,
+    actorReason: 'reaction_add'
   });
+}
 
-  logger.info('Welcome reaction saved', {
+async function handleWelcomeReactionSetupRemoval(reaction, user) {
+  const message = reaction.message.partial ? await reaction.message.fetch() : reaction.message;
+  const client = message.client;
+  const logger = client.logger;
+  const guildId = message.guildId;
+  const setup = ensureSetupStore(client).get(guildId);
+
+  if (!setup || setup.messageId !== message.id) {
+    logger.info('Welcome reaction setup removal ignored', {
+      guildId,
+      reactionMessageId: message.id,
+      reason: 'no_active_setup'
+    });
+    return;
+  }
+
+  if (user.bot) {
+    logger.info('Welcome reaction setup removal ignored', {
+      guildId,
+      reactionMessageId: message.id,
+      reason: 'bot_user'
+    });
+    return;
+  }
+
+  const member = await message.guild.members.fetch(user.id).catch(() => null);
+  if (!isAdministrator(member)) {
+    logger.info('Welcome reaction setup removal ignored', {
+      guildId,
+      reactionMessageId: message.id,
+      userId: user.id,
+      reason: 'not_admin'
+    });
+    return;
+  }
+
+  logger.info('Welcome reaction remove detected', {
     guildId,
     reactionMessageId: message.id,
-    userId: user.id,
-    emojiKey: descriptor.emojiKey,
-    emojiName: descriptor.emojiName,
-    emojiId: descriptor.emojiId,
-    animated: descriptor.animated,
-    sortOrder: currentCount + 1
+    userId: user.id
   });
+
+  await syncWelcomeReactionsFromSetupMessage(message, {
+    actorUserId: user.id,
+    actorReason: 'reaction_remove'
+  });
+}
+
+async function syncWelcomeReactionsFromSetupMessage(message, options = {}) {
+  const client = message.client;
+  const logger = client.logger;
+  const guildId = message.guildId;
+  const setup = ensureSetupStore(client).get(guildId);
+
+  if (!setup || setup.messageId !== message.id) {
+    logger.info('Welcome reaction sync skipped', {
+      guildId,
+      reactionMessageId: message.id,
+      reason: 'no_active_setup'
+    });
+    return { savedCount: 0 };
+  }
+
+  const maxCount = Number(client.appConfig.welcomeReactionsMax || 5);
+  const fetchedMessage = message.partial ? await message.fetch().catch(() => null) : message;
+
+  if (!fetchedMessage) {
+    logger.warn('Welcome setup message missing/deleted, keeping last saved settings', {
+      guildId,
+      reactionMessageId: message.id
+    });
+    return { savedCount: client.db.welcomeReactions.count(guildId) };
+  }
+
+  logger.info('Welcome reaction setup sync started', {
+    guildId,
+    channelId: fetchedMessage.channelId,
+    reactionMessageId: fetchedMessage.id,
+    actorUserId: options.actorUserId || null,
+    actorReason: options.actorReason || 'unknown'
+  });
+
+  const collectedReactions = [];
+  const seenEmojiKeys = new Set();
+
+  for (const reaction of fetchedMessage.reactions.cache.values()) {
+    const descriptor = createReactionDescriptor(reaction.emoji);
+    if (!descriptor.emojiKey || seenEmojiKeys.has(descriptor.emojiKey)) {
+      continue;
+    }
+
+    seenEmojiKeys.add(descriptor.emojiKey);
+    collectedReactions.push(descriptor);
+  }
+
+  const selectedReactions = collectedReactions.slice(0, maxCount);
+  client.db.welcomeReactions.clear(guildId);
+
+  selectedReactions.forEach((reaction, index) => {
+    client.db.welcomeReactions.insert({
+      guildId,
+      ...reaction,
+      sortOrder: index + 1
+    });
+  });
+
+  logger.info('Welcome reaction setup sync finished', {
+    guildId,
+    reactionMessageId: fetchedMessage.id,
+    savedReactionCount: selectedReactions.length,
+    ignoredExtraReactionCount: Math.max(0, collectedReactions.length - selectedReactions.length)
+  });
+
+  return {
+    savedCount: selectedReactions.length
+  };
 }
 
 async function applyWelcomeReactionsToMessage(message) {
@@ -341,6 +427,8 @@ module.exports = {
   listWelcomeReactions,
   clearWelcomeReactions,
   handleWelcomeReactionSetup,
+  handleWelcomeReactionSetupRemoval,
+  syncWelcomeReactionsFromSetupMessage,
   applyWelcomeReactionsToMessage,
   backfillWelcomeReactions,
   formatSavedEmoji

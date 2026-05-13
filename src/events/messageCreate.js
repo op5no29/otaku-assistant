@@ -1,14 +1,36 @@
 const { relayTweetMessage } = require('../modules/timelineRelay');
 const { applyWelcomeReactionsToMessage } = require('../modules/welcomeReactions');
+const { saveMessageToArchive } = require('../modules/messageArchive');
+const { handleLlmMessage } = require('../modules/llm');
 
 module.exports = {
   async execute(message) {
     const client = message.client;
 
     try {
+      await saveMessageToArchive(client, message);
+    } catch (error) {
+      client.logger.error('Archive save failed', {
+        messageId: message.id,
+        channelId: message.channelId,
+        error: error.message
+      });
+    }
+
+    try {
       await applyWelcomeReactionsToMessage(message);
     } catch (error) {
       client.logger.error('Failed to apply welcome reactions', {
+        messageId: message.id,
+        channelId: message.channelId,
+        error: error.message
+      });
+    }
+
+    try {
+      await handleLlmMessage(message);
+    } catch (error) {
+      client.logger.error('Failed to handle LLM message trigger', {
         messageId: message.id,
         channelId: message.channelId,
         error: error.message

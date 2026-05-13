@@ -238,6 +238,7 @@ Example:
 - `/maintenance list-welcome-reactions` - show saved welcome reactions (Administrator only)
 - `/maintenance clear-welcome-reactions` - remove all saved welcome reactions (Administrator only)
 - `/maintenance backfill-welcome-reactions [limit]` - apply saved welcome reactions to recent Discord join notifications in the welcome channel (Administrator only)
+- `/maintenance llm-status` - show local Ollama LLM status, active request count, and archive counts (Administrator only)
 
 ## Local Run Commands
 
@@ -247,6 +248,35 @@ Example:
 - `npm run check` - syntax check all project JavaScript files
 - `npm run backfill-question-tags` - apply `受付中` / `解決済み` tags to existing question threads
 - `npm run post-entrance-guide` - post or update the official Components V2 entrance guide from `content/entranceGuide.md`
+
+## Local LLM (Ollama)
+
+Otaku Assistant can answer when mentioned by using a local Ollama model only.
+
+Required `.env` values:
+
+- `OLLAMA_BASE_URL` (default: `http://127.0.0.1:11434`)
+- `OLLAMA_MODEL` (default: `qwen3:4b`)
+
+Recommended models:
+
+- `qwen3:4b`
+- `gemma3:4b`
+
+Example local setup:
+
+```bash
+ollama pull qwen3:4b
+ollama serve
+```
+
+Then mention the bot in Discord:
+
+```text
+@Otaku Assistant この流れを要約して
+```
+
+The bot archives guild messages into SQLite, posts `少女祈祷中...`, calls Ollama, and edits that temporary reply with the final answer.
 
 You can also pass a different guide source file:
 

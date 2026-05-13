@@ -94,6 +94,34 @@ function runMigrations(database) {
       created_at TEXT NOT NULL,
       PRIMARY KEY (guild_id, emoji_key)
     );
+
+    CREATE TABLE IF NOT EXISTS archived_messages (
+      message_id TEXT PRIMARY KEY,
+      guild_id TEXT,
+      channel_id TEXT,
+      parent_id TEXT,
+      thread_id TEXT,
+      author_id TEXT,
+      author_name TEXT,
+      author_is_bot INTEGER NOT NULL DEFAULT 0,
+      content TEXT,
+      clean_content TEXT,
+      attachments_json TEXT,
+      embeds_json TEXT,
+      referenced_message_id TEXT,
+      message_type INTEGER,
+      created_at TEXT,
+      edited_at TEXT,
+      archived_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS llm_responses (
+      response_message_id TEXT PRIMARY KEY,
+      request_message_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      author_id TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
   `);
 
   const vcProfileColumns = new Set(

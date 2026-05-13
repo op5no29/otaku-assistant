@@ -34,6 +34,27 @@
     "maxReuploadBytes": 25000000,
     "tempDir": "./tmp/relay-media"
   },
+  "llmEnabled": true,
+  "llmContextMessageLimit": 50,
+  "llmThinkingMessage": "少女祈祷中...",
+  "llmThinkingMessages": [
+    "少女祈祷中...",
+    "応答作成中...",
+    "会話を整理中...",
+    "文脈を読み込み中...",
+    "ローカルLLMが考えています...",
+    "少しお待ちください..."
+  ],
+  "llmBusyMessages": [
+    "回線が混雑しています。少し待ってからもう一度試してください。",
+    "少女が困っています。少し待ってからもう一度試してください。",
+    "ただいま応答処理が詰まっています。少し待ってからもう一度試してください。",
+    "ローカルLLMが別の応答を処理中です。少し待ってからもう一度試してください。"
+  ],
+  "llmMaxReplyChars": 1800,
+  "llmTimeoutMs": 120000,
+  "ollamaBaseUrl": "http://127.0.0.1:11434",
+  "ollamaModel": "qwen3:4b",
   "questions": {
     "resolvedPrefix": "[解決済]",
     "allowResolveBy": [

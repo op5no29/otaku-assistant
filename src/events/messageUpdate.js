@@ -1,8 +1,20 @@
 const { updateTweetTimelineCard } = require('../modules/timelineRelay');
+const { saveMessageToArchive } = require('../modules/messageArchive');
 
 module.exports = {
   async execute(oldMessage, newMessage) {
     const client = newMessage.client;
+
+    try {
+      const resolvedMessage = newMessage.partial ? await newMessage.fetch() : newMessage;
+      await saveMessageToArchive(client, resolvedMessage);
+    } catch (error) {
+      client.logger.error('Archive update failed', {
+        messageId: newMessage.id,
+        channelId: newMessage.channelId,
+        error: error.message
+      });
+    }
 
     try {
       await updateTweetTimelineCard(oldMessage, newMessage, {
