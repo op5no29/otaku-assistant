@@ -1164,19 +1164,35 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
   const vcListenOnlyChannelIds = config.vcListenOnlyChannelIds || [];
   const isVcListenOnly = vcListenOnlyChannelIds.includes(sourceChannelId);
   const content = String(message.content || '');
+  const hasDoublePrefix = content.split(/\r?\n/).some((line) => line.trim().startsWith('##'));
+
+  logger.info('global hashtag messageCreate evaluated', {
+    sourceMessageId: message.id,
+    sourceChannelId,
+    rawContent: content,
+    hasDoublePrefix,
+    globalRouteCount: Object.keys(globalHashtagRoutes).length,
+    isVcListenOnly
+  });
 
   const globalMatches = detectGlobalHashtagMatches(content, globalHashtagRoutes);
 
   let hasAnyRoute = globalMatches.size > 0;
 
   if (!hasAnyRoute && !isVcListenOnly) {
+    if (hasDoublePrefix) {
+      logger.info('global hashtag relay skipped reason', {
+        sourceMessageId: message.id,
+        sourceChannelId,
+        matchedRoute: false,
+        reason: 'no_matching_global_route'
+      });
+    }
     return;
   }
 
   if (isVcListenOnly) {
-    const lines = content.split(/\r?\n/);
-    const hasAnyDoublePrefix = lines.some((line) => line.trim().startsWith('##'));
-    if (!hasAnyDoublePrefix) {
+    if (!hasDoublePrefix) {
       return;
     }
   }
@@ -1184,6 +1200,7 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
   logger.info('Global hashtag relay evaluation started', {
     sourceMessageId: message.id,
     sourceChannelId,
+    rawContent: content,
     isVcListenOnly,
     globalMatchCount: globalMatches.size,
     globalMatchKeys: Array.from(globalMatches.keys())
@@ -1191,6 +1208,18 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
 
   const extractedPost = await extractPlainMessagePost(message, config, logger);
   const post = await enrichPostWithMusicLink(extractedPost, { db, logger });
+  const detectedTag = Array.from(globalMatches.values())
+    .flatMap((route) => route.tags || [])
+    .find((tag) => {
+      const prefix = `##${String(tag || '').trim()}`;
+      const loweredContent = content.toLowerCase();
+      const loweredPrefix = prefix.toLowerCase();
+      return (
+        loweredContent.includes(`\n${loweredPrefix}`) ||
+        loweredContent.startsWith(loweredPrefix)
+      );
+    }) || null;
+  const cleanedBody = post.body || '';
 
   const destinationTargets = [];
   const seenDestinationIds = new Set();
@@ -1212,7 +1241,11 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
       logger.info('Global hashtag route matched', {
         sourceMessageId: message.id,
         routeKey,
+        detectedTag,
+        matchedRoute: true,
         destinationChannelId: route.channelId,
+        routeDestinationChannelId: route.channelId,
+        alsoTimeline: route.alsoTimeline === true,
         willRelay: added
       });
     }
@@ -1244,10 +1277,23 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
   if (!destinationTargets.length) {
     logger.info('Global hashtag relay skipped: no valid destinations', {
       sourceMessageId: message.id,
-      sourceChannelId
+      sourceChannelId,
+      destinationsBeforeDedupe: [],
+      destinationsAfterDedupe: []
     });
     return;
   }
+
+  logger.info('Global hashtag destinations computed', {
+    sourceMessageId: message.id,
+    detectedTag,
+    matchedRoute: globalMatches.size > 0,
+    routeDestinationChannelId: Array.from(globalMatches.values()).map((route) => route.channelId).filter(Boolean),
+    alsoTimeline: Array.from(globalMatches.values()).some((route) => route.alsoTimeline === true),
+    destinationsBeforeDedupe: destinationTargets.map((target) => target.destinationChannelId),
+    destinationsAfterDedupe: destinationTargets.map((target) => target.destinationChannelId),
+    cleanedBody
+  });
 
   const { payload, cleanup } = await buildTimelinePayload(post, {
     config,
@@ -1294,6 +1340,12 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
           continue;
         }
 
+        logger.info('global hashtag relay send started', {
+          sourceMessageId: message.id,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind
+        });
+
         const sentMessage = await sendRelayMessage(destinationChannel, payload, logger, {
           sourceMessageId: message.id,
           destinationChannelId: target.destinationChannelId,
@@ -1320,6 +1372,20 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
           relayKind: target.relayKind,
           relayedMessageId: sentMessage.id
         });
+        logger.info('global hashtag relay send finished', {
+          sourceMessageId: message.id,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
+          returnedMessageId: sentMessage.id
+        });
+      } catch (error) {
+        logger.error('target global hashtag relay send failed', {
+          sourceMessageId: message.id,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
+          error: error.message
+        });
+        throw error;
       } finally {
         message.client.timelineRelayMessageInFlight.delete(relayInFlightKey);
       }

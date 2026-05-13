@@ -32,24 +32,35 @@ function ensureTagMap(value, label) {
 }
 
 function ensureGlobalHashtagRoutes(value, label) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  if (!value || typeof value !== 'object') {
     return {};
+  }
+
+  const normalizeRoute = (route, routeLabel) => {
+    if (!route || typeof route !== 'object' || Array.isArray(route)) {
+      throw new Error(`${routeLabel} must be an object`);
+    }
+
+    return {
+      tags: ensureArray(route.tags || [], `${routeLabel}.tags`),
+      channelId: String(route.destinationChannelId || route.channelId || ''),
+      alsoTimeline: route.alsoTimeline === true
+    };
+  };
+
+  if (Array.isArray(value)) {
+    return Object.fromEntries(
+      value.map((route, index) => {
+        const normalized = normalizeRoute(route, `${label}[${index}]`);
+        const fallbackKey = normalized.tags[0] || `route_${index + 1}`;
+        return [String(route.key || fallbackKey), normalized];
+      })
+    );
   }
 
   return Object.fromEntries(
     Object.entries(value).map(([routeKey, route]) => {
-      if (!route || typeof route !== 'object') {
-        throw new Error(`${label}.${routeKey} must be an object`);
-      }
-
-      return [
-        String(routeKey),
-        {
-          tags: ensureArray(route.tags || [], `${label}.${routeKey}.tags`),
-          channelId: String(route.channelId || ''),
-          alsoTimeline: route.alsoTimeline === true
-        }
-      ];
+      return [String(routeKey), normalizeRoute(route, `${label}.${routeKey}`)];
     })
   );
 }

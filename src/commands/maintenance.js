@@ -161,6 +161,11 @@ module.exports = {
     )
     .addSubcommand((subcommand) =>
       subcommand
+        .setName('hashtag-route-status')
+        .setDescription('グローバル ## ルート設定の読込状態を表示します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
         .setName('intro-dm-scan-dry-run')
         .setDescription('自己紹介なしメンバー候補をDM送信せずに確認します。')
     )
@@ -285,6 +290,24 @@ module.exports = {
           `introChannelId: ${status.introChannelId || 'not set'}`,
           `savedProfileCount: ${status.savedProfileCount}`,
           `latestArchivedProfileDate: ${status.latestArchivedProfileDate || 'none'}`
+        ].join('\n'),
+        ephemeral: true
+      });
+      return;
+    }
+
+    if (subcommand === 'hashtag-route-status') {
+      const routes = Object.entries(appConfig.globalHashtagRoutes || {});
+      await interaction.reply({
+        content: [
+          `timelineChannelId: ${appConfig.timelineChannelId || 'not set'}`,
+          `globalHashtagRoutes count: ${routes.length}`,
+          ...(routes.length
+            ? routes.map(
+                ([routeKey, route]) =>
+                  `- ${routeKey}: tags=[${(route.tags || []).join(', ')}], destination=${route.channelId || 'not set'}, alsoTimeline=${route.alsoTimeline === true}`
+              )
+            : ['- no global hashtag routes loaded'])
         ].join('\n'),
         ephemeral: true
       });

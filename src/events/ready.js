@@ -9,12 +9,29 @@ module.exports = {
     await rebuildVoiceProfileState(client);
 
     const health = getBotHealth(client);
+    const globalHashtagRoutes = Object.entries(client.appConfig.globalHashtagRoutes || {});
 
     client.logger.info('Bot ready', {
       botTag: client.user?.tag,
       guildId: process.env.GUILD_ID,
       voiceProfileCategoryCount: client.voiceProfileCategoryMap.size
     });
+
+    if (globalHashtagRoutes.length > 0) {
+      client.logger.info('globalHashtagRoutes loaded', {
+        count: globalHashtagRoutes.length,
+        routes: globalHashtagRoutes.map(([routeKey, route]) => ({
+          routeKey,
+          tags: route.tags || [],
+          destinationChannelId: route.channelId || '',
+          alsoTimeline: route.alsoTimeline === true
+        }))
+      });
+    } else {
+      client.logger.warn('globalHashtagRoutes missing; ##技術 routing disabled', {
+        count: 0
+      });
+    }
 
     await notifyOpsChannel(client, [
       '✅ Otaku Assistant started / ready',

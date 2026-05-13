@@ -108,5 +108,16 @@
       "display": "#良い音楽",
       "channelId": "YOUR_GOOD_MUSIC_CHANNEL_ID"
     }
-  }
+  },
+  "vcListenOnlyChannelIds": [
+    "YOUR_VC_LISTEN_ONLY_CHANNEL_ID_1",
+    "YOUR_VC_LISTEN_ONLY_CHANNEL_ID_2"
+  ],
+  "globalHashtagRoutes": [
+    {
+      "tags": ["技術", "tech", "Tech", "TECH", "開発", "tips", "tool", "ツール"],
+      "destinationChannelId": "YOUR_TECH_SHARING_CHANNEL_ID",
+      "alsoTimeline": true
+    }
+  ]
 }
