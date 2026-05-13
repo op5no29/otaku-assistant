@@ -814,8 +814,8 @@ async function extractThreadMessagePost(message, config, logger = null) {
     generatedEmojiMediaUrls: customEmojiMedia.mediaItems.map((item) => item.url),
     hasNonEmojiText: customEmojiMedia.hasNonEmojiText,
     emojiOnly: customEmojiMedia.tokens.length > 0 && !customEmojiMedia.hasNonEmojiText,
-    emojiMediaFallbackEnabled: customEmojiMedia.tokens.length > 0 && !customEmojiMedia.hasNonEmojiText,
-    skippedEmojiMediaBecauseTextExists: customEmojiMedia.tokens.length > 0 && customEmojiMedia.hasNonEmojiText,
+    emojiMediaFallbackEnabled: customEmojiMedia.tokens.length > 0,
+    removedEmojiTokensFromBody: customEmojiMedia.tokens.length > 0,
     customEmojiTokensPreserved: /<a?:\w+:\d+>/.test(strippedContent.content || ''),
     originalContentHadCustomEmojiToken: /<a?:\w+:\d+>/.test(canonicalMessage.content || message.content || ''),
     usedCleanContent: false
@@ -841,8 +841,8 @@ async function extractThreadMessagePost(message, config, logger = null) {
     title: '',
     rawTitle: thread.name || '',
     isResolved: false,
-    content: customEmojiMedia.hasNonEmojiText ? strippedContent.content : customEmojiMedia.content,
-    customEmojiMediaItems: customEmojiMedia.hasNonEmojiText ? [] : customEmojiMedia.mediaItems,
+    content: customEmojiMedia.content,
+    customEmojiMediaItems: customEmojiMedia.mediaItems,
     matchedBotHashtagRoutes: hashtagRouting.matchedRoutes,
     displayBotHashtags: hashtagRouting.displayTags,
     jumpUrl: getMessageJumpUrl({
