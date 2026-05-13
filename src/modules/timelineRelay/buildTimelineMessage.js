@@ -19,6 +19,19 @@ const MAX_MEDIA_ITEMS = 10;
 const MAX_DOWNLOAD_BUTTONS = 4;
 const REPLY_CONTEXT_MAX_LENGTH = 160;
 
+function normalizeMediaUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    parsed.hash = '';
+    if (/tenor|giphy/i.test(parsed.hostname)) {
+      parsed.search = '';
+    }
+    return parsed.toString();
+  } catch {
+    return String(url || '');
+  }
+}
+
 function createBaseContainer(accentColor) {
   return new ContainerBuilder().setAccentColor(accentColor);
 }
@@ -197,6 +210,37 @@ function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls =
     return;
   }
 
+  const previewMediaUrls = Array.isArray(socialPreview.mediaUrls) && socialPreview.mediaUrls.length
+    ? socialPreview.mediaUrls
+    : Array.isArray(socialPreview.imageUrls)
+      ? socialPreview.imageUrls
+      : [socialPreview.imageUrl].filter(Boolean);
+  const existingNormalized = new Set(existingMediaUrls.map((url) => normalizeMediaUrl(url)));
+  const dedupedPreviewImages = previewMediaUrls.filter((imageUrl, index, array) => {
+    if (!imageUrl) {
+      return false;
+    }
+
+    const normalized = normalizeMediaUrl(imageUrl);
+    return (
+      array.findIndex((entry) => normalizeMediaUrl(entry) === normalized) === index &&
+      !existingNormalized.has(normalized)
+    );
+  });
+
+  if (socialPreview.isGifShare) {
+    if (dedupedPreviewImages.length) {
+      const gallery = new MediaGalleryBuilder();
+
+      for (const mediaUrl of dedupedPreviewImages.slice(0, MAX_MEDIA_ITEMS)) {
+        gallery.addItems(new MediaGalleryItemBuilder().setURL(mediaUrl));
+      }
+
+      container.addMediaGalleryComponents(gallery);
+    }
+    return;
+  }
+
   const lines = [];
   lines.push('**リンクプレビュー**');
 
@@ -216,13 +260,6 @@ function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls =
     new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
   );
   container.addTextDisplayComponents(new TextDisplayBuilder().setContent(lines.join('\n')));
-
-  const previewImageUrls = Array.isArray(socialPreview.imageUrls)
-    ? socialPreview.imageUrls
-    : [socialPreview.imageUrl].filter(Boolean);
-  const dedupedPreviewImages = previewImageUrls.filter(
-    (imageUrl, index) => imageUrl && previewImageUrls.indexOf(imageUrl) === index && !existingMediaUrls.includes(imageUrl)
-  );
 
   if (dedupedPreviewImages.length) {
     const gallery = new MediaGalleryBuilder();
@@ -348,7 +385,8 @@ function buildTweetTimelineMessage({ post, config }) {
     ...(Array.isArray(post.imageUrls) ? post.imageUrls : []),
     post.firstImageUrl,
     post.generatedVideoThumbnailUrl,
-    post.musicLink?.artworkUrl
+    post.musicLink?.artworkUrl,
+    ...(Array.isArray(post.mediaGalleryItems) ? post.mediaGalleryItems.map((item) => item.url) : [])
   ].filter(Boolean))];
 
   container.addSectionComponents(
@@ -360,7 +398,7 @@ function buildTweetTimelineMessage({ post, config }) {
   addReplyContextIfPresent(container, post);
   if (body) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent(body));
-  } else if (!addAttachmentNamesSection(container, post, { showOnlyAsFallback: true })) {
+  } else if (!addAttachmentNamesSection(container, post, { showOnlyAsFallback: true }) && !post.socialPreview?.isGifShare) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent('（本文はまだありません）'));
   }
   addBotHashtagSection(container, post);

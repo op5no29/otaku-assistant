@@ -82,6 +82,7 @@ function sanitizeDisplayFileName(value) {
   const normalized = String(value || 'attachment')
     .replace(/[\/\\]/g, '_')
     .replace(/[\u0000-\u001f\u007f]/g, '')
+    .replace(/\s+/g, ' ')
     .trim();
 
   return normalized || 'attachment';
@@ -121,6 +122,19 @@ function isImageAttachment(attachment) {
 
   const lowerName = attachment.name?.toLowerCase() || '';
   return /\.(png|jpe?g|gif|webp)$/i.test(lowerName);
+}
+
+function isGifAttachment(attachment) {
+  if (!attachment) {
+    return false;
+  }
+
+  if (attachment.contentType === 'image/gif') {
+    return true;
+  }
+
+  const lowerName = attachment.name?.toLowerCase() || '';
+  return /\.gif$/i.test(lowerName);
 }
 
 function findImageAttachments(attachments) {
@@ -195,6 +209,7 @@ function normalizeAttachment(attachment) {
 
   const lowerName = attachment.name?.toLowerCase() || '';
   const isImage = isImageAttachment(attachment);
+  const isGif = isGifAttachment(attachment);
   const isVideo = isVideoAttachment(attachment);
   const isAudio = isAudioAttachment(attachment);
   const isPdf = isPdfAttachment(attachment);
@@ -208,10 +223,11 @@ function normalizeAttachment(attachment) {
     contentType: attachment.contentType || null,
     size: Number(attachment.size || 0),
     isImage,
+    isGif,
     isVideo,
     isAudio,
     isPdf,
-    isPreviewableUpload: isVideo || isAudio || isPdf
+    isPreviewableUpload: true
   };
 }
 
@@ -235,6 +251,7 @@ module.exports = {
   findImageAttachments,
   findFirstImageAttachment,
   findFirstVideoAttachment,
+  isGifAttachment,
   isAudioAttachment,
   isPdfAttachment,
   normalizeAttachments

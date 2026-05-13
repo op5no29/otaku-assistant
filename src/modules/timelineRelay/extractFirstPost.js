@@ -74,6 +74,28 @@ function detectSocialLink(content) {
   return match?.[0] || null;
 }
 
+function isGifProviderUrl(url) {
+  return /https?:\/\/(?:www\.)?(?:tenor\.com|media\.tenor\.com|giphy\.com|media\d*\.giphy\.com)\//i.test(String(url || ''));
+}
+
+function looksLikeAnimatedMediaUrl(url) {
+  return /^https?:\/\//i.test(String(url || '')) &&
+    (/\.(gif|mp4|webm)(?:[?#].*)?$/i.test(url) || /tenor|giphy/i.test(url));
+}
+
+function normalizeMediaUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    parsed.hash = '';
+    if (/tenor|giphy/i.test(parsed.hostname)) {
+      parsed.search = '';
+    }
+    return parsed.toString();
+  } catch {
+    return String(url || '');
+  }
+}
+
 function pickPreviewImage(embed) {
   return embed.image?.url || embed.thumbnail?.url || null;
 }
@@ -121,16 +143,51 @@ function collectPreviewImageUrlsFromRawEmbed(value, collector, context = { key: 
   }
 }
 
-function extractSocialPreviewFromEmbeds(embeds) {
+function collectPreviewMediaUrlsFromRawEmbed(value, collector, context = { key: '' }) {
+  if (!value) {
+    return;
+  }
+
+  if (typeof value === 'string') {
+    if (
+      /(image|images|thumbnail|thumbnails|photo|photos|media|video|videos|gif|gifs|proxy)/i.test(context.key) &&
+      (looksLikePreviewImageUrl(value) || looksLikeAnimatedMediaUrl(value))
+    ) {
+      collector.add(value);
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      collectPreviewMediaUrlsFromRawEmbed(entry, collector, context);
+    }
+    return;
+  }
+
+  if (typeof value === 'object') {
+    for (const [key, entry] of Object.entries(value)) {
+      collectPreviewMediaUrlsFromRawEmbed(entry, collector, {
+        key: `${context.key}.${key}`
+      });
+    }
+  }
+}
+
+function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null) {
   const imageUrls = [];
+  const mediaUrls = [];
   let primaryPreview = null;
+  let duplicateCount = 0;
+  const seenNormalized = new Set();
 
   for (const embed of embeds || []) {
     const rawImageUrls = new Set();
+    const rawMediaUrls = new Set();
     const imageUrl = pickPreviewImage(embed);
     const description = embed.description?.trim() || null;
     const title = embed.title?.trim() || embed.author?.name?.trim() || null;
-    const sourceUrl = embed.url || null;
+    const embedSourceUrl = embed.url || null;
     const siteName = embed.provider?.name || embed.author?.name || null;
 
     if (imageUrl) {
@@ -138,26 +195,42 @@ function extractSocialPreviewFromEmbeds(embeds) {
     }
 
     collectPreviewImageUrlsFromRawEmbed(embed.data || embed, rawImageUrls);
+    collectPreviewMediaUrlsFromRawEmbed(embed.data || embed, rawMediaUrls);
 
     for (const collectedImageUrl of rawImageUrls) {
-      if (collectedImageUrl && !imageUrls.includes(collectedImageUrl)) {
+      const normalized = normalizeMediaUrl(collectedImageUrl);
+      if (collectedImageUrl && !seenNormalized.has(normalized)) {
+        seenNormalized.add(normalized);
         imageUrls.push(collectedImageUrl);
+        mediaUrls.push(collectedImageUrl);
+      } else if (collectedImageUrl) {
+        duplicateCount += 1;
       }
     }
 
-    if (!primaryPreview && (title || description || imageUrls.length)) {
+    for (const collectedMediaUrl of rawMediaUrls) {
+      const normalized = normalizeMediaUrl(collectedMediaUrl);
+      if (collectedMediaUrl && !seenNormalized.has(normalized)) {
+        seenNormalized.add(normalized);
+        mediaUrls.push(collectedMediaUrl);
+      } else if (collectedMediaUrl) {
+        duplicateCount += 1;
+      }
+    }
+
+    if (!primaryPreview && (title || description || mediaUrls.length)) {
       primaryPreview = {
         title,
         description,
         imageUrl: imageUrl || imageUrls[0] || null,
         imageUrls: [],
-        sourceUrl,
+        sourceUrl: embedSourceUrl,
         siteName
       };
     }
   }
 
-  if (!primaryPreview && !imageUrls.length) {
+  if (!primaryPreview && !mediaUrls.length) {
     return null;
   }
 
@@ -166,8 +239,11 @@ function extractSocialPreviewFromEmbeds(embeds) {
     description: primaryPreview?.description || null,
     imageUrl: primaryPreview?.imageUrl || imageUrls[0] || null,
     imageUrls,
+    mediaUrls,
     sourceUrl: primaryPreview?.sourceUrl || null,
-    siteName: primaryPreview?.siteName || null
+    siteName: primaryPreview?.siteName || null,
+    isGifShare: isGifProviderUrl(sourceUrl) || mediaUrls.some((url) => looksLikeAnimatedMediaUrl(url)),
+    duplicateCount
   };
 }
 
@@ -186,7 +262,7 @@ async function getSocialPreviewData(message, logger, attempts = 3, retryDelayMs 
   let workingMessage = message;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-    const preview = extractSocialPreviewFromEmbeds(workingMessage.embeds);
+    const preview = extractSocialPreviewFromEmbeds(workingMessage.embeds, socialLink);
 
     if (preview) {
       logger.info('Link preview embed data found', {
@@ -194,9 +270,21 @@ async function getSocialPreviewData(message, logger, attempts = 3, retryDelayMs 
         attempt,
         hasImage: Boolean(preview.imageUrl),
         imageCount: Array.isArray(preview.imageUrls) ? preview.imageUrls.length : 0,
+        mediaCount: Array.isArray(preview.mediaUrls) ? preview.mediaUrls.length : 0,
         hasTitle: Boolean(preview.title),
         hasDescription: Boolean(preview.description)
       });
+
+      if (preview.isGifShare) {
+        logger.info('GIF preview extracted', {
+          sourceMessageId: message.id,
+          detectedGifProvider: new URL(socialLink).hostname,
+          originalLink: socialLink,
+          extractedMediaUrl: preview.mediaUrls?.[0] || preview.imageUrls?.[0] || null,
+          acceptedMediaCount: preview.mediaUrls?.length || 0,
+          rejectedDuplicateCount: preview.duplicateCount || 0
+        });
+      }
 
       if (/https?:\/\/(?:www\.)?(x\.com|twitter\.com)\//i.test(socialLink)) {
         if ((preview.imageUrls || []).length <= 1) {
@@ -249,8 +337,30 @@ async function getSocialPreviewData(message, logger, attempts = 3, retryDelayMs 
     description: null,
     imageUrl: null,
     imageUrls: [],
+    mediaUrls: [],
     sourceUrl: socialLink,
-    siteName: null
+    siteName: null,
+    isGifShare: isGifProviderUrl(socialLink),
+    duplicateCount: 0
+  };
+}
+
+function stripPreviewedGifLinks(content, socialPreview) {
+  const rawContent = String(content || '');
+  if (!rawContent || !socialPreview?.isGifShare) {
+    return {
+      content: rawContent,
+      bodyUrlHidden: false
+    };
+  }
+
+  const lines = rawContent.split(/\r?\n/);
+  const keptLines = lines.filter((line) => !isGifProviderUrl(line.trim()));
+  const bodyUrlHidden = keptLines.length !== lines.length;
+
+  return {
+    content: keptLines.join('\n').trim(),
+    bodyUrlHidden
   };
 }
 
@@ -515,12 +625,21 @@ async function extractThreadMessagePost(message, config, logger = null) {
   const socialPreview = logger ? await getSocialPreviewData(message, logger) : null;
   const threadOwnerInfo = await getThreadOwnerInfo(thread, logger);
   const hashtagRouting = parseBotHashtagRoutes(message.content || '', config.botHashtagRoutes);
+  const strippedContent = stripPreviewedGifLinks(hashtagRouting.content, socialPreview);
   const { referencedSourceMessageId, replyContext } = await getReplyContext(message, logger);
   const displayName =
     guildMember?.displayName ||
     message.author?.globalName ||
     message.author?.username ||
     '不明なユーザー';
+
+  logger?.info?.('Message content prepared for relay', {
+    sourceMessageId: message.id,
+    contentSource: 'message.content',
+    bodyUrlHidden: strippedContent.bodyUrlHidden,
+    customEmojiTokensPreserved: /<a?:\w+:\d+>/.test(message.content || ''),
+    originalContentHadCustomEmojiToken: /<a?:\w+:\d+>/.test(message.content || '')
+  });
 
   return {
     message,
@@ -542,7 +661,7 @@ async function extractThreadMessagePost(message, config, logger = null) {
     title: '',
     rawTitle: thread.name || '',
     isResolved: false,
-    content: hashtagRouting.content,
+    content: strippedContent.content,
     matchedBotHashtagRoutes: hashtagRouting.matchedRoutes,
     displayBotHashtags: hashtagRouting.displayTags,
     jumpUrl: getMessageJumpUrl({

@@ -78,7 +78,7 @@ function formatDownloadLabel(attachment, index, total) {
   }
 
   if (total === 1) {
-    const label = `${attachment.displayName || attachment.name} をダウンロード`;
+    const label = `${attachment.displayName || attachment.originalFileName || attachment.name} をダウンロード`;
     return label.length <= 80 ? label : '添付ファイルをダウンロード';
   }
 
@@ -86,12 +86,12 @@ function formatDownloadLabel(attachment, index, total) {
 }
 
 function buildAttachmentDisplayLine(attachment) {
-  if (attachment.reuploadSkippedReason === 'file_too_large' && attachment.isVideo) {
-    return `${attachment.displayName}（データ容量が大きいため、元メッセージから確認してください）`;
+  if (attachment.reuploadSkippedReason === 'file_too_large') {
+    return `${attachment.displayName}（容量が大きいため再アップロードできませんでした。元メッセージから確認してください）`;
   }
 
-  if (attachment.reuploadSkippedReason === 'video_reupload_failed' && attachment.isVideo) {
-    return `${attachment.displayName}（動画の再アップロードに失敗しました。元メッセージから確認してください）`;
+  if (attachment.reuploadSkippedReason === 'upload_failed') {
+    return `${attachment.displayName}（再アップロードに失敗しました。元メッセージから確認してください）`;
   }
 
   return attachment.displayName;
@@ -115,16 +115,19 @@ async function prepareAttachmentRelay(post, config, logger) {
   const maxReuploadBytes = Number(config?.mediaRelay?.maxReuploadBytes ?? 25_000_000);
   const tempDir = getTempDirectory(config);
   const normalizedAttachments = attachments.map((attachment) => {
-    const displayName = createUniqueDisplayFileName(attachment.originalName || attachment.name, usedDisplayNames);
+    const originalFileName = attachment.originalName || attachment.name || 'attachment';
+    const displayName = createUniqueDisplayFileName(originalFileName, usedDisplayNames);
     return {
       ...attachment,
+      originalFileName,
       displayName,
+      uploadFileName: displayName,
       displayLine: displayName,
       reuploadSucceeded: false,
       reuploadSkippedReason: null
     };
   });
-  const nonImageAttachments = normalizedAttachments.filter((attachment) => !attachment.isImage);
+  const nonImageAttachments = normalizedAttachments.filter((attachment) => !attachment.isImage || attachment.isGif);
 
   if (!nonImageAttachments.length) {
     return {
@@ -143,29 +146,21 @@ async function prepareAttachmentRelay(post, config, logger) {
     const fileKind = detectFileKind(attachment);
     const context = {
       sourceMessageId: post.messageId,
-      attachmentName: attachment.originalName || attachment.name,
+      attachmentId: attachment.id,
+      originalFileName: attachment.originalFileName,
+      safeTempFileName: null,
+      displayFileName: attachment.displayName,
+      uploadFileName: attachment.uploadFileName,
       attachmentSize: attachment.size,
-      fileKind
+      contentType: attachment.contentType,
+      fileKind,
+      maxBytes: maxReuploadBytes
     };
 
     logger.info('Attachment detected for relay', {
       ...context,
       previewableUpload: attachment.isPreviewableUpload
     });
-
-    if (!attachment.isPreviewableUpload) {
-      logger.info('Attachment re-upload skipped; unsupported preview type', {
-        ...context,
-        fallbackReason: 'unsupported_preview_type'
-      });
-      downloadableAttachments.push({
-        name: attachment.displayName,
-        url: attachment.url,
-        label: formatDownloadLabel(attachment, index, nonImageAttachments.length),
-        isVideo: attachment.isVideo
-      });
-      continue;
-    }
 
     if (attachment.size > maxReuploadBytes) {
       attachment.reuploadSkippedReason = 'file_too_large';
@@ -200,9 +195,10 @@ async function prepareAttachmentRelay(post, config, logger) {
       continue;
     }
 
-    const extension = path.extname(attachment.displayName || attachment.name || '');
+    const extension = path.extname(attachment.originalFileName || attachment.name || '');
     const tempName = `${sanitizeTempName(post.messageId)}-${sanitizeTempName(attachment.id || `${index}`)}${extension}`;
     const filePath = path.join(tempDir, tempName);
+    context.safeTempFileName = tempName;
 
     try {
       logger.info('Attachment download started', context);
@@ -212,7 +208,8 @@ async function prepareAttachmentRelay(post, config, logger) {
 
       logger.info('Attachment re-upload attempted', {
         ...context,
-        displayFileName: attachment.displayName
+        displayFileName: attachment.displayName,
+        uploadFileName: attachment.uploadFileName
       });
       attachment.reuploadSucceeded = true;
       attachment.displayLine = attachment.displayName;
@@ -241,17 +238,35 @@ async function prepareAttachmentRelay(post, config, logger) {
           ...context,
           displayFileName: attachment.displayName
         });
+      } else if (attachment.isGif) {
+        const attachmentUrl = `attachment://${attachment.uploadFileName}`;
+        componentFiles.push({
+          attachment: filePath,
+          name: attachment.uploadFileName
+        });
+        mediaGalleryItems.push({
+          url: attachmentUrl,
+          description: attachment.displayName
+        });
+        logger.info('GIF reupload mode selected', {
+          ...context,
+          mode: 'media-gallery',
+          displayFileName: attachment.displayName,
+          uploadFileName: attachment.uploadFileName,
+          attachmentUrl
+        });
       } else {
         componentFiles.push({
           attachment: filePath,
-          name: attachment.displayName
+          name: attachment.uploadFileName
         });
-        fileComponentUrls.push(`attachment://${attachment.displayName}`);
+        fileComponentUrls.push(`attachment://${attachment.uploadFileName}`);
       }
 
       logger.info('Attachment re-upload succeeded', {
         ...context,
-        displayFileName: attachment.displayName
+        displayFileName: attachment.displayName,
+        uploadFileName: attachment.uploadFileName
       });
     } catch (error) {
       logger.warn('Attachment re-upload failed; using fallback', {
@@ -259,10 +274,8 @@ async function prepareAttachmentRelay(post, config, logger) {
         error: error.message,
         fallbackReason: 'download_or_upload_failed'
       });
-      if (attachment.isVideo) {
-        attachment.reuploadSkippedReason = 'video_reupload_failed';
-        attachment.displayLine = buildAttachmentDisplayLine(attachment);
-      }
+      attachment.reuploadSkippedReason = 'upload_failed';
+      attachment.displayLine = buildAttachmentDisplayLine(attachment);
       await removeFile(filePath, logger, context);
       downloadableAttachments.push({
         name: attachment.displayName,
@@ -298,6 +311,13 @@ async function prepareAttachmentRelay(post, config, logger) {
     post: {
       ...post,
       attachments: normalizedAttachments,
+      imageUrls: (Array.isArray(post.imageUrls) ? post.imageUrls : []).filter(
+        (url) => !normalizedAttachments.some((attachment) => attachment.isGif && attachment.reuploadSucceeded && attachment.url === url)
+      ),
+      firstImageUrl:
+        normalizedAttachments.some((attachment) => attachment.isGif && attachment.reuploadSucceeded && attachment.url === post.firstImageUrl)
+          ? null
+          : post.firstImageUrl,
       componentFiles,
       fileComponentUrls,
       downloadableAttachments,
