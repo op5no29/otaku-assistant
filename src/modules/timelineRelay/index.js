@@ -8,6 +8,7 @@ const { enrichPostWithMusicLink } = require('./musicLinks');
 const { applyQuestionStatusTag } = require('../questionResolver/threadTags');
 const { getRecentArchivedMessages } = require('../messageArchive');
 const { getMessageJumpUrl } = require('../../services/discordLinks');
+const { parseRelayHashtagPrefixes } = require('../../utils/text');
 
 function buildQuestionGuideMessage(timelineMessageUrl = null) {
   return [
@@ -570,6 +571,40 @@ function getTweetDestinationTargets(post, config) {
   return uniqueTargets;
 }
 
+function getGlobalRouteDestinationTargets(post, config, sourceChannelId = '') {
+  const targets = [];
+
+  for (const routeKey of post.matchedGlobalHashtagRoutes || []) {
+    const route = config.globalHashtagRoutes?.[routeKey];
+    if (route?.channelId) {
+      targets.push({
+        destinationChannelId: String(route.channelId),
+        relayKind: `global_hashtag:${routeKey}`
+      });
+    }
+
+    if (route?.alsoTimeline && config.timelineChannelId) {
+      targets.push({
+        destinationChannelId: String(config.timelineChannelId),
+        relayKind: 'timeline'
+      });
+    }
+  }
+
+  const uniqueTargets = [];
+  const seenChannelIds = new Set();
+  for (const target of targets) {
+    if (!target.destinationChannelId || target.destinationChannelId === String(sourceChannelId || '') || seenChannelIds.has(target.destinationChannelId)) {
+      continue;
+    }
+
+    seenChannelIds.add(target.destinationChannelId);
+    uniqueTargets.push(target);
+  }
+
+  return uniqueTargets;
+}
+
 function buildRelaySendPurpose(message, target) {
   if (target.relayKind?.startsWith('hashtag:')) {
     return 'timeline:hashtag-card-send';
@@ -1048,6 +1083,15 @@ async function relayTweetMessage(message, { config, db, logger }) {
           ...payload,
           ...(reply ? { reply } : {})
         };
+        logger.info('relay hashtag transform applied', {
+          sourceMessageId: message.id,
+          rawContent: String(message.content || '').slice(0, 500),
+          cleanedContent: String(post.content || '').slice(0, 500),
+          displayHashtags: post.displayBotHashtags || [],
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
+          rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
+        });
         const sentMessage = await sendRelayMessage(destinationChannel, sendPayload, logger, {
           sourceMessageId: message.id,
           destinationChannelId: target.destinationChannelId,
@@ -1183,10 +1227,17 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
 
   const extractedPost = await extractThreadMessagePost(message, config, logger);
   const post = await enrichPostWithMusicLink(extractedPost, { db, logger });
-  const desiredTargets = getTweetDestinationTargets(post, config);
-  const desiredTargetByChannelId = new Map(
-    desiredTargets.map((target) => [String(target.destinationChannelId), target])
-  );
+  const desiredTargets = [
+    ...getTweetDestinationTargets(post, config),
+    ...getGlobalRouteDestinationTargets(post, config, message.channelId)
+  ];
+  const desiredTargetByChannelId = new Map();
+  for (const target of desiredTargets) {
+    if (!target?.destinationChannelId || desiredTargetByChannelId.has(String(target.destinationChannelId))) {
+      continue;
+    }
+    desiredTargetByChannelId.set(String(target.destinationChannelId), target);
+  }
   const { payload, cleanup } = await buildTimelinePayload(post, {
     config,
     forumType: 'tweet',
@@ -1227,6 +1278,16 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
         });
         continue;
       }
+
+      logger.info('relay hashtag transform applied', {
+        sourceMessageId: message.id,
+        rawContent: String(message.content || '').slice(0, 500),
+        cleanedContent: String(post.content || '').slice(0, 500),
+        displayHashtags: post.displayBotHashtags || [],
+        destinationChannelId: relayTarget.destinationChannelId,
+        relayKind: currentTarget?.relayKind || relayTarget.relayKind || 'timeline_update',
+        rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
+      });
 
       await timelineMessage.edit({
         ...payload,
@@ -1298,6 +1359,16 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
         if (mergedResult?.merged) {
           continue;
         }
+
+        logger.info('relay hashtag transform applied', {
+          sourceMessageId: message.id,
+          rawContent: String(message.content || '').slice(0, 500),
+          cleanedContent: String(post.content || '').slice(0, 500),
+          displayHashtags: post.displayBotHashtags || [],
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
+          rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
+        });
 
         sentMessage = await sendRelayMessage(destinationChannel, {
           ...payload,
@@ -1427,6 +1498,11 @@ function detectGlobalHashtagMatches(content, globalHashtagRoutes) {
   }
 
   return matched;
+}
+
+function diffAddedRoutes(previous = [], next = []) {
+  const previousSet = new Set((Array.isArray(previous) ? previous : []).map(String));
+  return (Array.isArray(next) ? next : []).filter((value) => !previousSet.has(String(value)));
 }
 
 async function relayGlobalHashtagMessage(message, { config, db, logger }) {
@@ -1618,7 +1694,10 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
         logger.info('global hashtag relay send started', {
           sourceMessageId: message.id,
           destinationChannelId: target.destinationChannelId,
-          relayKind: target.relayKind
+          relayKind: target.relayKind,
+          cleanedContent: String(post.content || '').slice(0, 500),
+          displayHashtags: post.displayBotHashtags || [],
+          rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
         });
 
         const sentMessage = await sendRelayMessage(destinationChannel, payload, logger, {
@@ -1659,7 +1738,10 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
           sourceMessageId: message.id,
           destinationChannelId: target.destinationChannelId,
           relayKind: target.relayKind,
-          returnedMessageId: sentMessage.id
+          returnedMessageId: sentMessage.id,
+          cleanedContent: String(post.content || '').slice(0, 500),
+          displayHashtags: post.displayBotHashtags || [],
+          rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
         });
       } catch (error) {
         logger.error('target global hashtag relay send failed', {
@@ -1678,10 +1760,83 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
   }
 }
 
+async function handleRouteAddedOnMessageUpdate(oldMessage, newMessage, { config, db, logger }) {
+  const message = newMessage.partial ? await newMessage.fetch().catch(() => null) : newMessage;
+  if (!message?.inGuild() || message.author?.bot) {
+    return;
+  }
+
+  const oldContent = String(oldMessage?.content || '');
+  const newContent = String(message.content || '');
+  const oldRouting = parseRelayHashtagPrefixes(oldContent, {
+    globalRoutes: config.globalHashtagRoutes,
+    botRoutes: config.botHashtagRoutes
+  });
+  const newRouting = parseRelayHashtagPrefixes(newContent, {
+    globalRoutes: config.globalHashtagRoutes,
+    botRoutes: config.botHashtagRoutes
+  });
+  const addedGlobalRoutes = diffAddedRoutes(oldRouting.globalMatchedRoutes, newRouting.globalMatchedRoutes);
+  const addedBotRoutes = diffAddedRoutes(oldRouting.botMatchedRoutes, newRouting.botMatchedRoutes);
+  const routeAdded = addedGlobalRoutes.length > 0 || addedBotRoutes.length > 0;
+  const existingTimelineRelay = Boolean(
+    db.relays.getMessageRelayTarget(message.id, String(config.timelineChannelId || ''))?.relayedMessageId ||
+    db.relays.getMessageRelay(message.id)?.timelineMessageId
+  );
+
+  logger.info('message update route evaluated', {
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    oldHashtags: oldRouting.displayTags,
+    newHashtags: newRouting.displayTags,
+    oldGlobalRoutes: oldRouting.globalMatchedRoutes,
+    newGlobalRoutes: newRouting.globalMatchedRoutes,
+    oldBotRoutes: oldRouting.botMatchedRoutes,
+    newBotRoutes: newRouting.botMatchedRoutes,
+    routeAdded,
+    existingTimelineRelayFound: existingTimelineRelay
+  });
+
+  if (!routeAdded) {
+    return;
+  }
+
+  const isTweetThread = Boolean(message.channel?.isThread?.() && getForumType(message.channel.parentId, config) === 'tweet');
+  const isVcListenOnly = (config.vcListenOnlyChannelIds || []).includes(String(message.channelId || ''));
+  const shouldRelayTweetRoutes = isTweetThread && addedBotRoutes.length > 0;
+  const shouldRelayGlobalRoutes = addedGlobalRoutes.length > 0 || (isVcListenOnly && addedBotRoutes.length > 0);
+
+  logger.info('message update route destination computed', {
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    routeAdded,
+    shouldRelayTweetRoutes,
+    shouldRelayGlobalRoutes,
+    existingTimelineRelayFound: existingTimelineRelay,
+    existingTimelineCardUpdated: isTweetThread && existingTimelineRelay && newRouting.displayTags.length > 0
+  });
+
+  if (shouldRelayTweetRoutes) {
+    await relayTweetMessage(message, { config, db, logger });
+  }
+
+  if (shouldRelayGlobalRoutes) {
+    await relayGlobalHashtagMessage(message, { config, db, logger });
+  }
+
+  logger.info('route relay sent', {
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    addedGlobalRoutes,
+    addedBotRoutes
+  });
+}
+
 module.exports = {
   relayForumThread,
   relayTweetMessage,
   updateTweetTimelineCard,
   updateQuestionTimelineCard,
-  relayGlobalHashtagMessage
+  relayGlobalHashtagMessage,
+  handleRouteAddedOnMessageUpdate
 };

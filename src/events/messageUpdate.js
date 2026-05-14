@@ -1,4 +1,4 @@
-const { updateTweetTimelineCard } = require('../modules/timelineRelay');
+const { updateTweetTimelineCard, handleRouteAddedOnMessageUpdate } = require('../modules/timelineRelay');
 const { saveMessageToArchive } = require('../modules/messageArchive');
 const { saveIntroProfileFromMessage } = require('../modules/introProfiles');
 
@@ -29,6 +29,20 @@ module.exports = {
         messageId: newMessage.id,
         channelId: newMessage.channelId,
         parentId: String(newMessage.channel?.parentId || ''),
+        error: error.message
+      });
+    }
+
+    try {
+      await handleRouteAddedOnMessageUpdate(oldMessage, newMessage, {
+        config: client.appConfig,
+        db: client.db,
+        logger: client.logger
+      });
+    } catch (error) {
+      client.logger.error('Failed to handle messageUpdate route-added relay', {
+        messageId: newMessage.id,
+        channelId: newMessage.channelId,
         error: error.message
       });
     }

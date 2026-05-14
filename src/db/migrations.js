@@ -95,6 +95,17 @@ function runMigrations(database) {
       PRIMARY KEY (guild_id, emoji_key)
     );
 
+    CREATE TABLE IF NOT EXISTS intro_reactions (
+      guild_id TEXT NOT NULL,
+      emoji_key TEXT NOT NULL,
+      emoji_name TEXT,
+      emoji_id TEXT,
+      animated INTEGER NOT NULL DEFAULT 0,
+      sort_order INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, emoji_key)
+    );
+
     CREATE TABLE IF NOT EXISTS archived_messages (
       message_id TEXT PRIMARY KEY,
       guild_id TEXT,
@@ -135,6 +146,25 @@ function runMigrations(database) {
       PRIMARY KEY (guild_id, user_id, prompt_type)
     );
 
+    CREATE TABLE IF NOT EXISTS intro_dm_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      prompt_type TEXT NOT NULL,
+      reason TEXT,
+      scheduled_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_intro_dm_queue_status_scheduled
+      ON intro_dm_queue (status, scheduled_at);
+    CREATE INDEX IF NOT EXISTS idx_intro_dm_queue_guild_prompt
+      ON intro_dm_queue (guild_id, prompt_type);
+
     CREATE TABLE IF NOT EXISTS intro_profiles (
       guild_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
@@ -162,6 +192,30 @@ function runMigrations(database) {
       ON intro_profiles (guild_id, display_name);
     CREATE INDEX IF NOT EXISTS idx_intro_profiles_guild_username
       ON intro_profiles (guild_id, username);
+
+    CREATE TABLE IF NOT EXISTS guild_members (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      username TEXT,
+      global_name TEXT,
+      display_name TEXT,
+      nickname TEXT,
+      joined_at TEXT,
+      is_bot INTEGER NOT NULL DEFAULT 0,
+      left_at TEXT,
+      last_seen_at TEXT,
+      last_vc_joined_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_guild_members_joined_at
+      ON guild_members (guild_id, joined_at);
+    CREATE INDEX IF NOT EXISTS idx_guild_members_left_at
+      ON guild_members (guild_id, left_at);
+    CREATE INDEX IF NOT EXISTS idx_guild_members_is_bot
+      ON guild_members (guild_id, is_bot);
 
     CREATE TABLE IF NOT EXISTS user_llm_memories (
       guild_id TEXT NOT NULL,

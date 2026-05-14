@@ -1,4 +1,5 @@
 const { handleWelcomeReactionSetup } = require('../modules/welcomeReactions');
+const { handleIntroReactionSetup } = require('../modules/introReactions');
 
 module.exports = {
   async execute(reaction, user) {
@@ -8,6 +9,17 @@ module.exports = {
       await handleWelcomeReactionSetup(reaction, user);
     } catch (error) {
       client?.logger?.error?.('Failed to handle messageReactionAdd', {
+        messageId: reaction.message?.id || null,
+        channelId: reaction.message?.channelId || null,
+        userId: user?.id || null,
+        error: error.message
+      });
+    }
+
+    try {
+      await handleIntroReactionSetup(reaction, user);
+    } catch (error) {
+      client?.logger?.error?.('Failed to handle intro messageReactionAdd', {
         messageId: reaction.message?.id || null,
         channelId: reaction.message?.channelId || null,
         userId: user?.id || null,

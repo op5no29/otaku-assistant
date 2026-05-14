@@ -136,15 +136,21 @@ function ensureOpsConfig(value) {
   };
 }
 
-function ensureIntroDmConfig(value) {
+function ensureIntroDmConfig(value, introChannelId = '') {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
       enabled: false,
       devTestMode: true,
       devUserId: '323041740963446785',
+      introChannelId: String(introChannelId || '1503672008930623508'),
+      logChannelId: '1224747669604536385',
       vcReminderCooldownDays: 7,
       joinReminderHours: 48,
-      maxLlmReplies: 2,
+      joinReminderQueueEnabled: true,
+      joinReminderBatchSize: 3,
+      joinReminderMinDelayMinutes: 5,
+      joinReminderMaxDelayMinutes: 30,
+      maxLlmReplies: 3,
       llmRepliesEnabled: false
     };
   }
@@ -153,9 +159,15 @@ function ensureIntroDmConfig(value) {
     enabled: value.enabled === true,
     devTestMode: value.devTestMode !== false,
     devUserId: String(value.devUserId || '323041740963446785'),
+    introChannelId: String(value.introChannelId || introChannelId || '1503672008930623508'),
+    logChannelId: String(value.logChannelId || value.botLogChannelId || '1224747669604536385'),
     vcReminderCooldownDays: Number(value.vcReminderCooldownDays ?? 7),
     joinReminderHours: Number(value.joinReminderHours ?? 48),
-    maxLlmReplies: Number(value.maxLlmReplies ?? 2),
+    joinReminderQueueEnabled: value.joinReminderQueueEnabled !== false,
+    joinReminderBatchSize: Number(value.joinReminderBatchSize ?? 3),
+    joinReminderMinDelayMinutes: Number(value.joinReminderMinDelayMinutes ?? 5),
+    joinReminderMaxDelayMinutes: Number(value.joinReminderMaxDelayMinutes ?? 30),
+    maxLlmReplies: Number(value.maxLlmReplies ?? 3),
     llmRepliesEnabled: value.llmRepliesEnabled === true
   };
 }
@@ -186,6 +198,7 @@ function loadConfig(configPath) {
     introChannelId: String(parsed.introChannelId || ''),
     welcomeChannelId: String(parsed.welcomeChannelId || ''),
     welcomeReactionsMax: Number(parsed.welcomeReactionsMax ?? 5),
+    introReactionsMax: Number(parsed.introReactionsMax ?? parsed.introReactions?.max ?? 5),
     watchedForums: {
       question: ensureArray(parsed.watchedForums?.question || [], 'watchedForums.question'),
       tweet: ensureArray(parsed.watchedForums?.tweet || [], 'watchedForums.tweet'),
@@ -254,7 +267,7 @@ function loadConfig(configPath) {
       ),
       moderatorRoleIds: ensureArray(parsed.questions?.moderatorRoleIds || [], 'questions.moderatorRoleIds')
     },
-    introDm: ensureIntroDmConfig(parsed.introDm),
+    introDm: ensureIntroDmConfig(parsed.introDm, parsed.introChannelId),
     ops: ensureOpsConfig(parsed.ops),
     questionForumTags: ensureTagMap(parsed.questionForumTags, 'questionForumTags'),
     botHashtagRoutes: ensureBotHashtagRoutes(parsed.botHashtagRoutes, 'botHashtagRoutes'),

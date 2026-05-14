@@ -4,6 +4,7 @@
   "introChannelId": "YOUR_INTRO_CHANNEL_ID",
   "welcomeChannelId": "YOUR_WELCOME_CHANNEL_ID",
   "welcomeReactionsMax": 5,
+  "introReactionsMax": 5,
   "watchedForums": {
     "question": [
       "YOUR_QUESTION_FORUM_ID_1",
@@ -89,9 +90,15 @@
     "enabled": false,
     "devTestMode": true,
     "devUserId": "323041740963446785",
+    "introChannelId": "YOUR_INTRO_CHANNEL_ID",
+    "logChannelId": "1224747669604536385",
     "vcReminderCooldownDays": 7,
     "joinReminderHours": 48,
-    "maxLlmReplies": 2,
+    "joinReminderQueueEnabled": true,
+    "joinReminderBatchSize": 3,
+    "joinReminderMinDelayMinutes": 5,
+    "joinReminderMaxDelayMinutes": 30,
+    "maxLlmReplies": 3,
     "llmRepliesEnabled": false
   },
   "ops": {
@@ -127,6 +134,18 @@
       "displayTag": "技術",
       "displayMode": "matchedTag",
       "destinationChannelId": "YOUR_TECH_SHARING_CHANNEL_ID",
+      "alsoTimeline": true
+    },
+    {
+      "tags": ["アニメ", "anime", "Anime", "ANIME"],
+      "displayMode": "matchedTag",
+      "destinationChannelId": "YOUR_ANIME_CHANNEL_ID",
+      "alsoTimeline": true
+    },
+    {
+      "tags": ["飯", "ご飯", "ごはん", "meshi", "food", "Food", "FOOD", "ラーメン", "ramen", "Ramen", "RAMEN"],
+      "displayMode": "matchedTag",
+      "destinationChannelId": "YOUR_FOOD_CHANNEL_ID",
       "alsoTimeline": true
     }
   ]

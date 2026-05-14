@@ -180,6 +180,21 @@ function parseGlobalHashtagRoutes(content, routeConfig = {}) {
   };
 }
 
+function parseRelayHashtagPrefixes(content, options = {}) {
+  const rawContent = String(content || '');
+  const globalRouting = parseGlobalHashtagRoutes(rawContent, options.globalRoutes || {});
+  const botRouting = parseBotHashtagRoutes(globalRouting.content, options.botRoutes || {});
+
+  return {
+    rawContent,
+    content: botRouting.content,
+    globalMatchedRoutes: globalRouting.matchedRoutes,
+    globalDetectedTags: globalRouting.detectedTags,
+    botMatchedRoutes: botRouting.matchedRoutes,
+    displayTags: [...new Set([...(globalRouting.displayTags || []), ...(botRouting.displayTags || [])])]
+  };
+}
+
 function splitFileName(fileName) {
   const value = String(fileName || 'attachment');
   const extensionIndex = value.lastIndexOf('.');
@@ -206,6 +221,25 @@ function sanitizeDisplayFileName(value) {
     .trim();
 
   return normalized || 'attachment';
+}
+
+function hasSpoilerPrefix(value) {
+  return /^SPOILER_/iu.test(String(value || ''));
+}
+
+function stripSpoilerPrefix(value) {
+  return String(value || '').replace(/^SPOILER_/iu, '');
+}
+
+function ensureSpoilerFileName(value) {
+  const sanitized = sanitizeDisplayFileName(value);
+  if (!sanitized) {
+    return 'SPOILER_attachment';
+  }
+  if (hasSpoilerPrefix(sanitized)) {
+    return sanitized;
+  }
+  return `SPOILER_${sanitized}`;
 }
 
 function decodeUrlFileName(url) {
@@ -498,6 +532,11 @@ function normalizeAttachment(attachment) {
 
   const originalDiscordNameRaw = String(attachment.name || attachment.filename || '');
   const originalFileName = resolveBestAttachmentFileName(attachment);
+  const isSpoiler = Boolean(
+    attachment.spoiler ||
+    hasSpoilerPrefix(originalDiscordNameRaw) ||
+    hasSpoilerPrefix(originalFileName)
+  );
 
   return {
     id: String(attachment.id || ''),
@@ -506,7 +545,7 @@ function normalizeAttachment(attachment) {
     originalName: originalFileName,
     originalFileName,
     displayFileName: originalFileName,
-    uploadFileName: originalFileName,
+    uploadFileName: isSpoiler ? ensureSpoilerFileName(originalFileName) : originalFileName,
     name: originalFileName,
     lowerName,
     url: attachment.url,
@@ -525,6 +564,7 @@ function normalizeAttachment(attachment) {
     isVideo,
     isAudio,
     isPdf,
+    isSpoiler,
     isPreviewableUpload: true
   };
 }
@@ -549,6 +589,11 @@ function normalizeAttachments(attachments) {
       const isPdf = isPdfAttachment(attachment);
       const originalDiscordNameRaw = String(attachment.name || attachment.filename || '');
       const originalFileName = resolveBestAttachmentFileName(attachment, options);
+      const isSpoiler = Boolean(
+        attachment.spoiler ||
+        hasSpoilerPrefix(originalDiscordNameRaw) ||
+        hasSpoilerPrefix(originalFileName)
+      );
 
       return {
         id: String(attachment.id || ''),
@@ -557,7 +602,7 @@ function normalizeAttachments(attachments) {
         originalName: originalFileName,
         originalFileName,
         displayFileName: originalFileName,
-        uploadFileName: originalFileName,
+        uploadFileName: isSpoiler ? ensureSpoilerFileName(originalFileName) : originalFileName,
         name: originalFileName,
         lowerName,
         url: attachment.url,
@@ -576,6 +621,7 @@ function normalizeAttachments(attachments) {
         isVideo,
         isAudio,
         isPdf,
+        isSpoiler,
         isPreviewableUpload: true
       };
     })
@@ -602,7 +648,11 @@ module.exports = {
   truncateText,
   parseBotHashtagRoutes,
   parseGlobalHashtagRoutes,
+  parseRelayHashtagPrefixes,
   sanitizeDisplayFileName,
+  hasSpoilerPrefix,
+  stripSpoilerPrefix,
+  ensureSpoilerFileName,
   resolveBestAttachmentFileName,
   createUniqueDisplayFileName,
   addPrefix,

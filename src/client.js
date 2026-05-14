@@ -10,6 +10,8 @@ const messageReactionAddEvent = require('./events/messageReactionAdd');
 const messageReactionRemoveEvent = require('./events/messageReactionRemove');
 const interactionCreateEvent = require('./events/interactionCreate');
 const voiceStateUpdateEvent = require('./events/voiceStateUpdate');
+const guildMemberAddEvent = require('./events/guildMemberAdd');
+const guildMemberRemoveEvent = require('./events/guildMemberRemove');
 
 function createBotClient({ appConfig, database, logger }) {
   const client = new Client({
@@ -17,6 +19,7 @@ function createBotClient({ appConfig, database, logger }) {
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.GuildMessageReactions,
+      GatewayIntentBits.GuildMembers,
       GatewayIntentBits.DirectMessages,
       GatewayIntentBits.MessageContent,
       GatewayIntentBits.GuildVoiceStates
@@ -42,6 +45,7 @@ function createBotClient({ appConfig, database, logger }) {
   client.timelineRelayMessageInFlight = new Set();
   client.recentInteractionExecutions = new Map();
   client.activeWelcomeReactionSetups = new Map();
+  client.activeIntroReactionSetups = new Map();
   client.activeLlmUsers = new Set();
   client.llmGlobalRequestActive = false;
   client.questionResolveLocks = new Set();
@@ -56,6 +60,8 @@ function createBotClient({ appConfig, database, logger }) {
   client.on('messageReactionRemove', (...args) => messageReactionRemoveEvent.execute(...args));
   client.on('interactionCreate', (...args) => interactionCreateEvent.execute(...args));
   client.on('voiceStateUpdate', (...args) => voiceStateUpdateEvent.execute(...args));
+  client.on('guildMemberAdd', (...args) => guildMemberAddEvent.execute(...args));
+  client.on('guildMemberRemove', (...args) => guildMemberRemoveEvent.execute(...args));
 
   return client;
 }

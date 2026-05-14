@@ -5,8 +5,7 @@ const {
   findFirstImageAttachment,
   findFirstVideoAttachment,
   normalizeAttachments,
-  parseBotHashtagRoutes,
-  parseGlobalHashtagRoutes,
+  parseRelayHashtagPrefixes,
   restoreCustomEmojiTokens
 } = require('../../utils/text');
 
@@ -1010,8 +1009,11 @@ async function extractThreadMessagePost(message, config, logger = null) {
   const socialPreview = logger ? await getSocialPreviewData(canonicalMessage, logger) : null;
   const threadOwnerInfo = await getThreadOwnerInfo(thread, logger);
   const restoredContent = restoreCustomEmojiTokens(canonicalMessage.content || message.content || '', thread.guild);
-  const hashtagRouting = parseBotHashtagRoutes(restoredContent, config.botHashtagRoutes);
-  const strippedContent = stripPreviewedGifLinks(hashtagRouting.content, socialPreview);
+  const relayHashtagRouting = parseRelayHashtagPrefixes(restoredContent, {
+    globalRoutes: config.globalHashtagRoutes,
+    botRoutes: config.botHashtagRoutes
+  });
+  const strippedContent = stripPreviewedGifLinks(relayHashtagRouting.content, socialPreview);
   const customEmojiMedia = extractCustomEmojiMedia(strippedContent.content);
   const { referencedSourceMessageId, replyContext } = await getReplyContext(message, logger);
   const displayName =
@@ -1023,10 +1025,10 @@ async function extractThreadMessagePost(message, config, logger = null) {
   logger?.info?.('Message content prepared for relay', {
     sourceMessageId: message.id,
     contentSource: 'message.content',
-    rawContent: String(canonicalMessage.content || message.content || '').slice(0, 500),
-    cleanContent: String(canonicalMessage.cleanContent || message.cleanContent || '').slice(0, 500),
-    extractedBodyText: String(hashtagRouting.content || '').slice(0, 500),
-    finalBodyText: String(strippedContent.content || '').slice(0, 500),
+      rawContent: String(canonicalMessage.content || message.content || '').slice(0, 500),
+      cleanContent: String(canonicalMessage.cleanContent || message.cleanContent || '').slice(0, 500),
+      extractedBodyText: String(relayHashtagRouting.content || '').slice(0, 500),
+      finalBodyText: String(strippedContent.content || '').slice(0, 500),
     finalBodyTextAfterEmojiProcessing: String(customEmojiMedia.content || '').slice(0, 500),
     bodyUrlHidden: strippedContent.bodyUrlHidden,
     customEmojiTokensFound: customEmojiMedia.tokens.map((token) => token.token),
@@ -1038,7 +1040,16 @@ async function extractThreadMessagePost(message, config, logger = null) {
     removedEmojiTokensFromBody: customEmojiMedia.tokens.length > 0,
     customEmojiTokensPreserved: /<a?:\w+:\d+>/.test(strippedContent.content || ''),
     originalContentHadCustomEmojiToken: /<a?:\w+:\d+>/.test(canonicalMessage.content || message.content || ''),
-    usedCleanContent: false
+      usedCleanContent: false
+    });
+
+  logger?.info?.('relay hashtag transform applied', {
+    sourceMessageId: canonicalMessage.id,
+    rawContent: String(restoredContent || '').slice(0, 500),
+    cleanedContent: String(customEmojiMedia.content || '').slice(0, 500),
+    displayHashtags: relayHashtagRouting.displayTags,
+    relayKind: 'tweet_thread_extract',
+    rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(customEmojiMedia.content || ''))
   });
 
   return {
@@ -1063,8 +1074,10 @@ async function extractThreadMessagePost(message, config, logger = null) {
     isResolved: false,
     content: customEmojiMedia.content,
     customEmojiMediaItems: customEmojiMedia.mediaItems,
-    matchedBotHashtagRoutes: hashtagRouting.matchedRoutes,
-    displayBotHashtags: hashtagRouting.displayTags,
+    matchedBotHashtagRoutes: relayHashtagRouting.botMatchedRoutes,
+    matchedGlobalHashtagRoutes: relayHashtagRouting.globalMatchedRoutes,
+    detectedGlobalHashtags: relayHashtagRouting.globalDetectedTags,
+    displayBotHashtags: relayHashtagRouting.displayTags,
     jumpUrl: getMessageJumpUrl({
       guildId: thread.guildId,
       channelId: thread.id,
@@ -1105,9 +1118,11 @@ async function extractPlainMessagePost(message, config, logger = null) {
   const firstVideo = findFirstVideoAttachment(canonicalMessage.attachments);
   const socialPreview = logger ? await getSocialPreviewData(canonicalMessage, logger) : null;
   const restoredContent = restoreCustomEmojiTokens(canonicalMessage.content || message.content || '', guild);
-  const globalRouting = parseGlobalHashtagRoutes(restoredContent, config.globalHashtagRoutes);
-  const hashtagRouting = parseBotHashtagRoutes(globalRouting.content, config.botHashtagRoutes);
-  const strippedContent = stripPreviewedGifLinks(hashtagRouting.content, socialPreview);
+  const relayHashtagRouting = parseRelayHashtagPrefixes(restoredContent, {
+    globalRoutes: config.globalHashtagRoutes,
+    botRoutes: config.botHashtagRoutes
+  });
+  const strippedContent = stripPreviewedGifLinks(relayHashtagRouting.content, socialPreview);
   const customEmojiMedia = extractCustomEmojiMedia(strippedContent.content);
   const displayName =
     guildMember?.displayName ||
@@ -1115,19 +1130,28 @@ async function extractPlainMessagePost(message, config, logger = null) {
     canonicalMessage.author?.username ||
     '不明なユーザー';
 
-  const displayBotHashtags = [...new Set([...(globalRouting.displayTags || []), ...(hashtagRouting.displayTags || [])])];
-  if (logger && globalRouting.displayTags.length) {
+  const displayBotHashtags = relayHashtagRouting.displayTags;
+  if (logger && displayBotHashtags.length) {
     logger.info('route display tag resolved', {
       sourceMessageId: canonicalMessage.id,
-      detectedTags: globalRouting.detectedTags,
-      normalizedDisplayTags: globalRouting.displayTags,
-      displayMode: Array.from(new Set(globalRouting.matchedRoutes.map((routeKey) => config.globalHashtagRoutes?.[routeKey]?.displayMode || 'displayTag'))),
-      rawPrefixRemoved: globalRouting.content !== restoredContent,
+      detectedTags: relayHashtagRouting.globalDetectedTags,
+      normalizedDisplayTags: displayBotHashtags,
+      displayMode: Array.from(new Set(relayHashtagRouting.globalMatchedRoutes.map((routeKey) => config.globalHashtagRoutes?.[routeKey]?.displayMode || 'displayTag'))),
+      rawPrefixRemoved: relayHashtagRouting.content !== restoredContent,
       normalizedHashtagInserted: true,
       finalBodyText: String(customEmojiMedia.content || '').slice(0, 500),
       finalDisplayBotHashtags: displayBotHashtags
     });
   }
+
+  logger?.info?.('relay hashtag transform applied', {
+    sourceMessageId: canonicalMessage.id,
+    rawContent: String(restoredContent || '').slice(0, 500),
+    cleanedContent: String(customEmojiMedia.content || '').slice(0, 500),
+    displayHashtags: displayBotHashtags,
+    relayKind: 'plain_extract',
+    rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(customEmojiMedia.content || ''))
+  });
 
   return {
     message: canonicalMessage,
@@ -1147,7 +1171,9 @@ async function extractPlainMessagePost(message, config, logger = null) {
     isResolved: false,
     content: customEmojiMedia.content,
     customEmojiMediaItems: customEmojiMedia.mediaItems,
-    matchedBotHashtagRoutes: hashtagRouting.matchedRoutes,
+    matchedBotHashtagRoutes: relayHashtagRouting.botMatchedRoutes,
+    matchedGlobalHashtagRoutes: relayHashtagRouting.globalMatchedRoutes,
+    detectedGlobalHashtags: relayHashtagRouting.globalDetectedTags,
     displayBotHashtags,
     jumpUrl: getMessageJumpUrl({
       guildId: canonicalMessage.guildId || (guild ? guild.id : ''),

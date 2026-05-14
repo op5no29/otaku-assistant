@@ -621,6 +621,106 @@ function createDatabase(databasePath) {
       FROM intro_dm_state
       WHERE opt_out = 1
     `),
+    insertIntroDmQueue: sqlite.prepare(`
+      INSERT INTO intro_dm_queue (
+        guild_id,
+        user_id,
+        prompt_type,
+        reason,
+        scheduled_at,
+        status,
+        attempts,
+        last_error,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `),
+    listIntroDmQueueDue: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        user_id AS userId,
+        prompt_type AS promptType,
+        reason,
+        scheduled_at AS scheduledAt,
+        status,
+        attempts,
+        last_error AS lastError,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM intro_dm_queue
+      WHERE guild_id = ?
+        AND status = 'pending'
+        AND datetime(scheduled_at) <= datetime(?)
+      ORDER BY datetime(scheduled_at) ASC, id ASC
+      LIMIT ?
+    `),
+    updateIntroDmQueueStatus: sqlite.prepare(`
+      UPDATE intro_dm_queue
+      SET status = ?,
+          attempts = ?,
+          last_error = ?,
+          updated_at = ?
+      WHERE id = ?
+    `),
+    countIntroDmQueueByStatus: sqlite.prepare(`
+      SELECT
+        status,
+        COUNT(*) AS count
+      FROM intro_dm_queue
+      GROUP BY status
+    `),
+    getPendingIntroDmQueueForUserPrompt: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        user_id AS userId,
+        prompt_type AS promptType,
+        reason,
+        scheduled_at AS scheduledAt,
+        status,
+        attempts,
+        last_error AS lastError,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM intro_dm_queue
+      WHERE guild_id = ? AND user_id = ? AND prompt_type = ? AND status = 'pending'
+      ORDER BY datetime(scheduled_at) ASC, id ASC
+      LIMIT 1
+    `),
+    insertIntroReaction: sqlite.prepare(`
+      INSERT INTO intro_reactions (
+        guild_id,
+        emoji_key,
+        emoji_name,
+        emoji_id,
+        animated,
+        sort_order,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `),
+    listIntroReactions: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        emoji_key AS emojiKey,
+        emoji_name AS emojiName,
+        emoji_id AS emojiId,
+        animated,
+        sort_order AS sortOrder,
+        created_at AS createdAt
+      FROM intro_reactions
+      WHERE guild_id = ?
+      ORDER BY sort_order ASC, created_at ASC
+    `),
+    clearIntroReactions: sqlite.prepare(`
+      DELETE FROM intro_reactions
+      WHERE guild_id = ?
+    `),
+    countIntroReactions: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM intro_reactions
+      WHERE guild_id = ?
+    `),
     upsertIntroProfile: sqlite.prepare(`
       INSERT INTO intro_profiles (
         guild_id,
@@ -665,6 +765,10 @@ function createDatabase(databasePath) {
       DELETE FROM intro_profiles
       WHERE guild_id = ? AND user_id = ? AND intro_channel_id = ?
     `),
+    deleteIntroProfilesByChannel: sqlite.prepare(`
+      DELETE FROM intro_profiles
+      WHERE guild_id = ? AND intro_channel_id = ?
+    `),
     getLatestIntroProfileByUser: sqlite.prepare(`
       SELECT
         guild_id AS guildId,
@@ -685,7 +789,7 @@ function createDatabase(databasePath) {
         archived_at AS archivedAt
       FROM intro_profiles
       WHERE guild_id = ? AND user_id = ? AND intro_channel_id = ?
-      ORDER BY datetime(COALESCE(updated_at, posted_at)) DESC, intro_message_id DESC
+      ORDER BY datetime(COALESCE(posted_at, updated_at)) ASC, intro_message_id ASC
       LIMIT 1
     `),
     listIntroProfilesByUser: sqlite.prepare(`
@@ -749,6 +853,139 @@ function createDatabase(databasePath) {
       SELECT MAX(COALESCE(updated_at, posted_at)) AS latestDate
       FROM intro_profiles
       WHERE guild_id = ? AND intro_channel_id = ?
+    `),
+    listIntroProfilesByChannel: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        intro_channel_id AS introChannelId,
+        intro_message_id AS introMessageId,
+        display_name AS displayName,
+        username,
+        global_name AS globalName,
+        nickname,
+        intro_text AS introText,
+        links_json AS linksJson,
+        embeds_json AS embedsJson,
+        attachments_json AS attachmentsJson,
+        search_aliases_json AS searchAliasesJson,
+        posted_at AS postedAt,
+        updated_at AS updatedAt,
+        archived_at AS archivedAt
+      FROM intro_profiles
+      WHERE guild_id = ? AND intro_channel_id = ?
+      ORDER BY datetime(COALESCE(updated_at, posted_at)) DESC, intro_message_id DESC
+      LIMIT ?
+    `),
+    upsertGuildMember: sqlite.prepare(`
+      INSERT INTO guild_members (
+        guild_id,
+        user_id,
+        username,
+        global_name,
+        display_name,
+        nickname,
+        joined_at,
+        is_bot,
+        left_at,
+        last_seen_at,
+        last_vc_joined_at,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, user_id) DO UPDATE SET
+        username = excluded.username,
+        global_name = excluded.global_name,
+        display_name = excluded.display_name,
+        nickname = excluded.nickname,
+        joined_at = COALESCE(excluded.joined_at, guild_members.joined_at),
+        is_bot = excluded.is_bot,
+        left_at = excluded.left_at,
+        last_seen_at = excluded.last_seen_at,
+        last_vc_joined_at = COALESCE(excluded.last_vc_joined_at, guild_members.last_vc_joined_at),
+        updated_at = excluded.updated_at
+    `),
+    markGuildMemberLeft: sqlite.prepare(`
+      UPDATE guild_members
+      SET left_at = ?,
+          updated_at = ?
+      WHERE guild_id = ? AND user_id = ?
+    `),
+    updateGuildMemberVcJoined: sqlite.prepare(`
+      UPDATE guild_members
+      SET last_vc_joined_at = ?,
+          last_seen_at = ?,
+          updated_at = ?
+      WHERE guild_id = ? AND user_id = ?
+    `),
+    getGuildMember: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        username,
+        global_name AS globalName,
+        display_name AS displayName,
+        nickname,
+        joined_at AS joinedAt,
+        is_bot AS isBot,
+        left_at AS leftAt,
+        last_seen_at AS lastSeenAt,
+        last_vc_joined_at AS lastVcJoinedAt,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM guild_members
+      WHERE guild_id = ? AND user_id = ?
+      LIMIT 1
+    `),
+    listGuildMembersWithoutIntroOlderThan: sqlite.prepare(`
+      SELECT
+        gm.guild_id AS guildId,
+        gm.user_id AS userId,
+        gm.username,
+        gm.global_name AS globalName,
+        gm.display_name AS displayName,
+        gm.nickname,
+        gm.joined_at AS joinedAt,
+        gm.is_bot AS isBot,
+        gm.left_at AS leftAt,
+        gm.last_seen_at AS lastSeenAt,
+        gm.last_vc_joined_at AS lastVcJoinedAt,
+        gm.created_at AS createdAt,
+        gm.updated_at AS updatedAt
+      FROM guild_members gm
+      WHERE gm.guild_id = ?
+        AND gm.is_bot = 0
+        AND gm.left_at IS NULL
+        AND gm.joined_at IS NOT NULL
+        AND datetime(gm.joined_at) <= datetime(?)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM intro_profiles ip
+          WHERE ip.guild_id = gm.guild_id
+            AND ip.user_id = gm.user_id
+            AND ip.intro_channel_id = ?
+        )
+      ORDER BY datetime(gm.joined_at) ASC, gm.user_id ASC
+      LIMIT ?
+    `),
+    countGuildMembers: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM guild_members
+      WHERE guild_id = ?
+    `),
+    countGuildMembersWithoutIntro: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM guild_members gm
+      WHERE gm.guild_id = ?
+        AND gm.is_bot = 0
+        AND gm.left_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1
+          FROM intro_profiles ip
+          WHERE ip.guild_id = gm.guild_id
+            AND ip.user_id = gm.user_id
+            AND ip.intro_channel_id = ?
+        )
     `),
     getTimelineMergeState: sqlite.prepare(`
       SELECT
@@ -1162,6 +1399,35 @@ function createDatabase(databasePath) {
         return Number(statements.countIntroDmOptOutStates.get()?.count || 0);
       }
     },
+    introDmQueue: {
+      enqueue({ guildId, userId, promptType, reason, scheduledAt, status = 'pending', attempts = 0, lastError = null }) {
+        const now = new Date().toISOString();
+        statements.insertIntroDmQueue.run(
+          guildId,
+          userId,
+          promptType,
+          reason || null,
+          scheduledAt,
+          status,
+          attempts,
+          lastError,
+          now,
+          now
+        );
+      },
+      getPendingForUserPrompt(guildId, userId, promptType) {
+        return statements.getPendingIntroDmQueueForUserPrompt.get(guildId, userId, promptType) || null;
+      },
+      listDue(guildId, dueAtIso, limit = 10) {
+        return statements.listIntroDmQueueDue.all(guildId, dueAtIso, limit);
+      },
+      updateStatus(id, { status, attempts = 0, lastError = null }) {
+        statements.updateIntroDmQueueStatus.run(status, attempts, lastError, new Date().toISOString(), id);
+      },
+      countByStatus() {
+        return statements.countIntroDmQueueByStatus.all();
+      }
+    },
     introProfiles: {
       upsert(record) {
         statements.upsertIntroProfile.run(
@@ -1189,6 +1455,9 @@ function createDatabase(databasePath) {
       deleteByUserInChannel(guildId, userId, introChannelId) {
         statements.deleteIntroProfileByUserInChannel.run(guildId, userId, introChannelId);
       },
+      deleteByChannel(guildId, introChannelId) {
+        statements.deleteIntroProfilesByChannel.run(guildId, introChannelId);
+      },
       getLatestByUser(guildId, userId, introChannelId) {
         return statements.getLatestIntroProfileByUser.get(guildId, userId, introChannelId) || null;
       },
@@ -1204,6 +1473,69 @@ function createDatabase(databasePath) {
       },
       getLatestDate(guildId, introChannelId) {
         return statements.getLatestIntroProfileDate.get(guildId, introChannelId)?.latestDate || null;
+      },
+      listByChannel(guildId, introChannelId, limit = 1000) {
+        return statements.listIntroProfilesByChannel.all(guildId, introChannelId, limit);
+      }
+    },
+    introReactions: {
+      insert({ guildId, emojiKey, emojiName, emojiId, animated = false, sortOrder }) {
+        statements.insertIntroReaction.run(
+          guildId,
+          emojiKey,
+          emojiName,
+          emojiId,
+          animated ? 1 : 0,
+          sortOrder,
+          new Date().toISOString()
+        );
+      },
+      list(guildId) {
+        return statements.listIntroReactions.all(guildId);
+      },
+      clear(guildId) {
+        statements.clearIntroReactions.run(guildId);
+      },
+      count(guildId) {
+        return Number(statements.countIntroReactions.get(guildId)?.count || 0);
+      }
+    },
+    guildMembers: {
+      upsert(record) {
+        const now = new Date().toISOString();
+        statements.upsertGuildMember.run(
+          record.guildId,
+          record.userId,
+          record.username || null,
+          record.globalName || null,
+          record.displayName || null,
+          record.nickname || null,
+          record.joinedAt || null,
+          record.isBot ? 1 : 0,
+          record.leftAt || null,
+          record.lastSeenAt || now,
+          record.lastVcJoinedAt || null,
+          record.createdAt || now,
+          now
+        );
+      },
+      markLeft(guildId, userId, leftAt = new Date().toISOString()) {
+        statements.markGuildMemberLeft.run(leftAt, new Date().toISOString(), guildId, userId);
+      },
+      updateVcJoined(guildId, userId, joinedAt = new Date().toISOString()) {
+        statements.updateGuildMemberVcJoined.run(joinedAt, joinedAt, new Date().toISOString(), guildId, userId);
+      },
+      get(guildId, userId) {
+        return statements.getGuildMember.get(guildId, userId) || null;
+      },
+      getWithoutIntroOlderThan(guildId, olderThanIso, introChannelId, limit = 20) {
+        return statements.listGuildMembersWithoutIntroOlderThan.all(guildId, olderThanIso, introChannelId, limit);
+      },
+      count(guildId) {
+        return Number(statements.countGuildMembers.get(guildId)?.count || 0);
+      },
+      countWithoutIntro(guildId, introChannelId) {
+        return Number(statements.countGuildMembersWithoutIntro.get(guildId, introChannelId)?.count || 0);
       }
     },
     timelineMerge: {

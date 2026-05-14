@@ -1,6 +1,10 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { createUniqueDisplayFileName } = require('../../utils/text');
+const {
+  createUniqueDisplayFileName,
+  ensureSpoilerFileName,
+  stripSpoilerPrefix
+} = require('../../utils/text');
 
 const DEFAULT_TEMP_DIR = path.resolve(__dirname, '../../../tmp/relay-media');
 const MAX_DOWNLOAD_BUTTONS = 4;
@@ -98,8 +102,8 @@ function buildAttachmentDisplayLine(attachment) {
 }
 
 function buildVideoUploadName(index, attachment) {
-  const extension = path.extname(attachment.displayName || attachment.name || '') || '.mp4';
-  return `video-${index + 1}${extension.toLowerCase()}`;
+  const baseName = attachment.uploadFileName || attachment.displayName || attachment.name || `video-${index + 1}.mp4`;
+  return attachment.isSpoiler ? ensureSpoilerFileName(baseName) : baseName;
 }
 
 async function prepareAttachmentRelay(post, config, logger) {
@@ -117,17 +121,30 @@ async function prepareAttachmentRelay(post, config, logger) {
   const normalizedAttachments = attachments.map((attachment) => {
     const originalFileName = attachment.originalName || attachment.name || 'attachment';
     const displayName = createUniqueDisplayFileName(originalFileName, usedDisplayNames);
+    const normalizedDisplayName = attachment.isSpoiler ? stripSpoilerPrefix(displayName) : displayName;
+    const uploadFileName = attachment.isSpoiler ? ensureSpoilerFileName(displayName) : displayName;
+
+    logger?.info?.('attachment spoiler detected', {
+      sourceMessageId: post.messageId,
+      attachmentId: attachment.id,
+      originalFileName,
+      displayName: normalizedDisplayName,
+      uploadFileName,
+      spoilerDetected: attachment.isSpoiler === true
+    });
     return {
       ...attachment,
       originalFileName,
-      displayName,
-      uploadFileName: displayName,
-      displayLine: displayName,
+      displayName: normalizedDisplayName,
+      uploadFileName,
+      displayLine: normalizedDisplayName,
       reuploadSucceeded: false,
       reuploadSkippedReason: null
     };
   });
-  const nonImageAttachments = normalizedAttachments.filter((attachment) => !attachment.isImage || attachment.isGif);
+  const nonImageAttachments = normalizedAttachments.filter(
+    (attachment) => !attachment.isImage || attachment.isGif || attachment.isSpoiler
+  );
 
   if (!nonImageAttachments.length) {
     return {
@@ -227,6 +244,12 @@ async function prepareAttachmentRelay(post, config, logger) {
           url: attachmentUrl,
           description: attachment.displayName
         });
+        logger.info('media gallery spoiler item', {
+          ...context,
+          uploadFileName: uploadName,
+          spoilerPreserved: attachment.isSpoiler === true,
+          mode: 'video'
+        });
         logger.info('Video reupload mode selected', {
           ...context,
           mode: 'media-gallery',
@@ -238,7 +261,7 @@ async function prepareAttachmentRelay(post, config, logger) {
           ...context,
           displayFileName: attachment.displayName
         });
-      } else if (attachment.isGif) {
+      } else if (attachment.isGif || attachment.isImage) {
         const attachmentUrl = `attachment://${attachment.uploadFileName}`;
         componentFiles.push({
           attachment: filePath,
@@ -248,9 +271,15 @@ async function prepareAttachmentRelay(post, config, logger) {
           url: attachmentUrl,
           description: attachment.displayName
         });
+        logger.info('media gallery spoiler item', {
+          ...context,
+          uploadFileName: attachment.uploadFileName,
+          spoilerPreserved: attachment.isSpoiler === true,
+          mode: 'gif'
+        });
         logger.info('GIF reupload mode selected', {
           ...context,
-          mode: 'media-gallery',
+          mode: attachment.isGif ? 'media-gallery' : 'spoiler-image-media-gallery',
           displayFileName: attachment.displayName,
           uploadFileName: attachment.uploadFileName,
           attachmentUrl
@@ -261,6 +290,11 @@ async function prepareAttachmentRelay(post, config, logger) {
           name: attachment.uploadFileName
         });
         fileComponentUrls.push(`attachment://${attachment.uploadFileName}`);
+        logger.info('upload filename spoiler adjusted', {
+          ...context,
+          uploadFileName: attachment.uploadFileName,
+          spoilerPreserved: attachment.isSpoiler === true
+        });
       }
 
       logger.info('Attachment re-upload succeeded', {
@@ -312,10 +346,14 @@ async function prepareAttachmentRelay(post, config, logger) {
       ...post,
       attachments: normalizedAttachments,
       imageUrls: (Array.isArray(post.imageUrls) ? post.imageUrls : []).filter(
-        (url) => !normalizedAttachments.some((attachment) => attachment.isGif && attachment.reuploadSucceeded && attachment.url === url)
+        (url) => !normalizedAttachments.some(
+          (attachment) => attachment.reuploadSucceeded && (attachment.isGif || attachment.isImage) && attachment.url === url
+        )
       ),
       firstImageUrl:
-        normalizedAttachments.some((attachment) => attachment.isGif && attachment.reuploadSucceeded && attachment.url === post.firstImageUrl)
+        normalizedAttachments.some(
+          (attachment) => attachment.reuploadSucceeded && (attachment.isGif || attachment.isImage) && attachment.url === post.firstImageUrl
+        )
           ? null
           : post.firstImageUrl,
       componentFiles,

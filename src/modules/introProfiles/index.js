@@ -7,8 +7,36 @@ function parseJsonArray(value) {
   }
 }
 
+function getIntroChannelId(client) {
+  return String(client.appConfig.introDm?.introChannelId || client.appConfig.introChannelId || '');
+}
+
 function extractUrls(text) {
   return Array.from(String(text || '').matchAll(/https?:\/\/[^\s>]+/giu)).map((match) => match[0]);
+}
+
+function getIntroProfileSkipReason(client, message) {
+  if (!message?.inGuild?.()) {
+    return 'not_guild';
+  }
+  if (message.author?.bot) {
+    return 'bot';
+  }
+  if (String(message.channelId || '') !== getIntroChannelId(client)) {
+    return 'not_intro_channel';
+  }
+  if (message.reference?.messageId) {
+    return 'reply';
+  }
+  const hasSubstance = Boolean(
+    String(message.content || '').trim() ||
+    message.attachments?.size ||
+    message.embeds?.length
+  );
+  if (!hasSubstance) {
+    return 'empty';
+  }
+  return null;
 }
 
 function buildSearchAliases(message, links) {
@@ -62,12 +90,13 @@ function buildIntroProfileRecord(client, message) {
   return {
     guildId: message.guildId,
     userId: message.author.id,
-    introChannelId: client.appConfig.introChannelId,
+    introChannelId: getIntroChannelId(client),
     introMessageId: message.id,
     displayName: message.member?.displayName || message.author?.globalName || message.author?.username || null,
     username: message.author?.username || null,
     globalName: message.author?.globalName || null,
     nickname: message.member?.nickname || null,
+    sourceType: 'first_top_level_message',
     introText,
     linksJson: JSON.stringify(links),
     embedsJson: JSON.stringify(embedObjects),
@@ -79,27 +108,73 @@ function buildIntroProfileRecord(client, message) {
 }
 
 function isIntroProfileMessage(client, message) {
-  return Boolean(
-    message?.inGuild?.() &&
-    !message.author?.bot &&
-    String(message.channelId || '') === String(client.appConfig.introChannelId || '')
-  );
+  return getIntroProfileSkipReason(client, message) === null;
 }
 
 async function saveIntroProfileFromMessage(client, message) {
-  if (!isIntroProfileMessage(client, message)) {
-    return false;
+  const skipReason = getIntroProfileSkipReason(client, message);
+  if (skipReason) {
+    if (skipReason === 'reply') {
+      client.logger.info('intro profile save skipped reply', {
+        guildId: message.guildId || null,
+        userId: message.author?.id || null,
+        introMessageId: message.id
+      });
+    }
+    if (skipReason === 'reply' || skipReason === 'empty') {
+      client.logger.info('intro profile false-positive guard triggered', {
+        guildId: message.guildId || null,
+        userId: message.author?.id || null,
+        introMessageId: message.id,
+        skipReason
+      });
+    }
+    return {
+      saved: false,
+      skippedReason: skipReason
+    };
+  }
+
+  const existingProfile = getLatestIntroProfileByUser(client, message.guildId, message.author.id);
+  if (existingProfile && existingProfile.introMessageId !== message.id) {
+    client.logger.info('duplicate/additional intro-channel post', {
+      guildId: message.guildId,
+      userId: message.author.id,
+      introMessageId: message.id,
+      currentIntroMessageId: existingProfile.introMessageId
+    });
+    return {
+      saved: false,
+      skippedReason: 'duplicate_user_intro'
+    };
   }
 
   const record = buildIntroProfileRecord(client, message);
   client.db.introProfiles.upsert(record);
-  client.logger.info('Intro profile saved', {
+  client.logger.info(existingProfile ? 'intro profile updated' : 'Intro profile saved', {
     guildId: record.guildId,
     userId: record.userId,
     introMessageId: record.introMessageId,
     introChannelId: record.introChannelId
   });
-  return true;
+  if (!existingProfile || existingProfile.introMessageId === message.id) {
+    try {
+      await require('../introReactions').applyIntroReactionsToMessage(message);
+    } catch (error) {
+      client.logger.warn('failed to apply intro reactions after save', {
+        guildId: record.guildId,
+        userId: record.userId,
+        introMessageId: record.introMessageId,
+        error: error.message
+      });
+    }
+  }
+  return {
+    saved: true,
+    skippedReason: null,
+    updatedExisting: Boolean(existingProfile),
+    introMessageId: record.introMessageId
+  };
 }
 
 function deleteIntroProfileByMessageId(client, messageId) {
@@ -121,11 +196,11 @@ function normalizeProfile(row) {
 }
 
 function getLatestIntroProfileByUser(client, guildId, userId) {
-  return normalizeProfile(client.db.introProfiles.getLatestByUser(guildId, userId, client.appConfig.introChannelId));
+  return normalizeProfile(client.db.introProfiles.getLatestByUser(guildId, userId, getIntroChannelId(client)));
 }
 
 function searchIntroProfiles(client, guildId, query, limit = 3) {
-  return client.db.introProfiles.search(guildId, client.appConfig.introChannelId, query, limit).map(normalizeProfile);
+  return client.db.introProfiles.search(guildId, getIntroChannelId(client), query, limit).map(normalizeProfile);
 }
 
 function scoreProfileMatch(profile, query) {
@@ -171,7 +246,7 @@ function scoreProfileMatch(profile, query) {
 function searchIntroProfilesScored(client, guildId, query, limit = 3) {
   const raw = client.db.introProfiles.search(
     guildId,
-    client.appConfig.introChannelId,
+    getIntroChannelId(client),
     query,
     Math.min(limit * 4, 20)
   ).map(normalizeProfile);
@@ -197,8 +272,8 @@ function hasUserIntro(client, guildId, userId) {
 
 async function backfillIntroProfiles(client, guildId, limit = 500) {
   const logger = client.logger;
-  const channelId = client.appConfig.introChannelId;
-  const introChannel = await client.channels.fetch(channelId).catch(() => null);
+  const introChannelId = getIntroChannelId(client);
+  const introChannel = await client.channels.fetch(introChannelId).catch(() => null);
   if (!introChannel?.isTextBased?.()) {
     return {
       skippedReason: 'intro_channel_unavailable',
@@ -211,15 +286,18 @@ async function backfillIntroProfiles(client, guildId, limit = 500) {
 
   logger.info('Intro profile backfill started', {
     guildId,
-    introChannelId: channelId,
+    introChannelId,
     requestedLimit: limit
   });
 
   let scannedCount = 0;
   let savedCount = 0;
   let skippedBotCount = 0;
+  let skippedReplyCount = 0;
+  let skippedEmptyCount = 0;
   let failedCount = 0;
   let before = null;
+  const collectedMessages = [];
 
   while (scannedCount < limit) {
     const batchSize = Math.min(100, limit - scannedCount);
@@ -231,31 +309,43 @@ async function backfillIntroProfiles(client, guildId, limit = 500) {
     for (const message of batch.values()) {
       scannedCount += 1;
       before = message.id;
-      if (message.author?.bot) {
-        skippedBotCount += 1;
-        continue;
-      }
+      collectedMessages.push(message);
+    }
+  }
 
-      try {
-        await saveIntroProfileFromMessage(client, message);
+  for (const message of collectedMessages.reverse()) {
+    if (message.author?.bot) {
+      skippedBotCount += 1;
+      continue;
+    }
+
+    try {
+      const result = await saveIntroProfileFromMessage(client, message);
+      if (result?.saved) {
         savedCount += 1;
-      } catch (error) {
-        failedCount += 1;
-        logger.warn('Intro profile backfill save failed', {
-          messageId: message.id,
-          channelId,
-          error: error.message
-        });
+      } else if (result?.skippedReason === 'reply') {
+        skippedReplyCount += 1;
+      } else if (result?.skippedReason === 'empty') {
+        skippedEmptyCount += 1;
       }
+    } catch (error) {
+      failedCount += 1;
+      logger.warn('Intro profile backfill save failed', {
+        messageId: message.id,
+        channelId: introChannelId,
+        error: error.message
+      });
     }
   }
 
   logger.info('Intro profile backfill finished', {
     guildId,
-    introChannelId: channelId,
+    introChannelId,
     scannedCount,
     savedCount,
     skippedBotCount,
+    skippedReplyCount,
+    skippedEmptyCount,
     failedCount
   });
 
@@ -263,41 +353,161 @@ async function backfillIntroProfiles(client, guildId, limit = 500) {
     scannedCount,
     savedCount,
     skippedBotCount,
+    skippedReplyCount,
+    skippedGreetingLikeCount: 0,
+    skippedEmptyCount,
     failedCount
+  };
+}
+
+async function rebuildIntroProfiles(client, guildId, { dryRun = true, limit = 1000 } = {}) {
+  const logger = client.logger;
+  const introChannelId = getIntroChannelId(client);
+  const introChannel = await client.channels.fetch(introChannelId).catch(() => null);
+  if (!introChannel?.isTextBased?.()) {
+    return {
+      scannedCount: 0,
+      selectedIntroCount: 0,
+      skippedReplyCount: 0,
+      skippedDuplicateUserCount: 0,
+      skippedBotCount: 0,
+      skippedEmptyCount: 0,
+      failedCount: 0,
+      skippedReason: 'intro_channel_unavailable'
+    };
+  }
+
+  const targetLimit = Math.max(1, Math.min(Number(limit) || 1000, 2000));
+  const collected = [];
+  let before;
+  while (collected.length < targetLimit) {
+    const batchSize = Math.min(100, targetLimit - collected.length);
+    const batch = await introChannel.messages.fetch(before ? { limit: batchSize, before } : { limit: batchSize }).catch(() => null);
+    if (!batch?.size) {
+      break;
+    }
+    const ordered = Array.from(batch.values());
+    collected.push(...ordered);
+    before = ordered[ordered.length - 1]?.id;
+    if (batch.size < batchSize) {
+      break;
+    }
+  }
+
+  const orderedMessages = collected.slice(0, targetLimit).reverse();
+  const selectedRecords = [];
+  const selectedUserIds = new Set();
+  let skippedReplyCount = 0;
+  let skippedDuplicateUserCount = 0;
+  let skippedBotCount = 0;
+  let skippedEmptyCount = 0;
+  let failedCount = 0;
+
+  for (const message of orderedMessages) {
+    try {
+      if (message.author?.bot) {
+        skippedBotCount += 1;
+        continue;
+      }
+      if (message.reference?.messageId) {
+        skippedReplyCount += 1;
+        continue;
+      }
+      const hasSubstance = Boolean(
+        String(message.content || '').trim() ||
+        message.attachments.size ||
+        message.embeds.length
+      );
+      if (!hasSubstance) {
+        skippedEmptyCount += 1;
+        continue;
+      }
+      if (selectedUserIds.has(message.author.id)) {
+        skippedDuplicateUserCount += 1;
+        continue;
+      }
+      selectedUserIds.add(message.author.id);
+      selectedRecords.push(buildIntroProfileRecord(client, message));
+    } catch (error) {
+      failedCount += 1;
+      logger.warn('intro profile rebuild candidate failed', {
+        guildId,
+        messageId: message.id,
+        error: error.message
+      });
+    }
+  }
+
+  if (!dryRun) {
+    client.db.introProfiles.deleteByChannel(guildId, introChannelId);
+    for (const record of selectedRecords) {
+      client.db.introProfiles.upsert(record);
+    }
+  }
+
+  return {
+    scannedCount: orderedMessages.length,
+    selectedIntroCount: selectedRecords.length,
+    skippedReplyCount,
+    skippedDuplicateUserCount,
+    skippedBotCount,
+    skippedEmptyCount,
+    failedCount,
+    skippedReason: null
   };
 }
 
 function getIntroProfileStatus(client, guildId) {
   return {
-    introChannelId: client.appConfig.introChannelId,
-    savedProfileCount: client.db.introProfiles.count(guildId, client.appConfig.introChannelId),
-    latestArchivedProfileDate: client.db.introProfiles.getLatestDate(guildId, client.appConfig.introChannelId)
+    introChannelId: getIntroChannelId(client),
+    savedProfileCount: client.db.introProfiles.count(guildId, getIntroChannelId(client)),
+    latestArchivedProfileDate: client.db.introProfiles.getLatestDate(guildId, getIntroChannelId(client))
   };
 }
 
 async function getMembersWithoutIntroOlderThan(guild, hours, client) {
-  const config = client.appConfig.introDm;
-  const devUserId = config.devUserId;
-  if (config.devTestMode) {
-    const member = await guild.members.fetch(devUserId).catch(() => null);
-    return member ? [member] : [];
+  return require('../guildMembers').getUsersWithoutIntroOlderThan(client, guild.id, hours, 20);
+}
+
+async function cleanupIntroProfiles(client, guildId, { dryRun = true, limit = 1000 } = {}) {
+  const introChannelId = getIntroChannelId(client);
+  const introChannel = await client.channels.fetch(introChannelId).catch(() => null);
+  const rows = client.db.introProfiles.listByChannel(guildId, introChannelId, limit);
+  let removedCount = 0;
+  let replyCount = 0;
+
+  for (const row of rows) {
+    let shouldRemove = false;
+    let removeReason = null;
+
+    if (introChannel?.isTextBased?.()) {
+      const sourceMessage = await introChannel.messages.fetch(row.introMessageId).catch(() => null);
+      if (sourceMessage?.reference?.messageId) {
+        shouldRemove = true;
+        removeReason = 'reply';
+      }
+    }
+
+    if (!shouldRemove) {
+      continue;
+    }
+
+    if (removeReason === 'reply') {
+      replyCount += 1;
+    }
+    if (!dryRun) {
+      client.db.introProfiles.deleteByMessageId(row.introMessageId);
+    }
+    removedCount += 1;
   }
 
-  const cutoff = Date.now() - (Number(hours || 48) * 60 * 60 * 1000);
-  const members = await guild.members.fetch().catch(() => null);
-  if (!members) {
-    return [];
-  }
-
-  return members.filter((member) => {
-    if (member.user?.bot) {
-      return false;
-    }
-    if (!member.joinedTimestamp || member.joinedTimestamp > cutoff) {
-      return false;
-    }
-    return !hasUserIntro(client, guild.id, member.id);
-  }).map((entry) => entry);
+  return {
+    dryRun,
+    scannedCount: rows.length,
+    removedCount,
+    replyCount,
+    greetingLikeCount: 0
+  };
 }
 
 module.exports = {
@@ -309,5 +519,7 @@ module.exports = {
   hasUserIntro,
   getMembersWithoutIntroOlderThan,
   backfillIntroProfiles,
-  getIntroProfileStatus
+  getIntroProfileStatus,
+  cleanupIntroProfiles,
+  rebuildIntroProfiles
 };

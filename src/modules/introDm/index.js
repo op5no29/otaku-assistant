@@ -1,4 +1,5 @@
 const { requestOllamaChat } = require('../llm/ollamaClient');
+const { hasUserIntro } = require('../guildMembers');
 
 const PROMPT_TYPES = {
   VC_NO_INTRO: 'vc_no_intro',
@@ -161,15 +162,101 @@ function getIntroDmConfig(client) {
     enabled: false,
     devTestMode: true,
     devUserId: '323041740963446785',
+    introChannelId: client.appConfig.introChannelId || '1503672008930623508',
+    logChannelId: '1224747669604536385',
     vcReminderCooldownDays: 7,
     joinReminderHours: 48,
-    maxLlmReplies: 2,
+    joinReminderQueueEnabled: true,
+    joinReminderBatchSize: 3,
+    joinReminderMinDelayMinutes: 5,
+    joinReminderMaxDelayMinutes: 30,
+    maxLlmReplies: 3,
     llmRepliesEnabled: false
   };
 }
 
+function getIntroChannelId(client) {
+  return String(getIntroDmConfig(client).introChannelId || client.appConfig.introChannelId || '');
+}
+
 function getIntroDmGuildId(client) {
   return process.env.GUILD_ID || '';
+}
+
+function getIntroDmReasonLabel(promptType) {
+  if (promptType === PROMPT_TYPES.JOIN_NO_INTRO) {
+    return '参加から一定時間経過しても自己紹介が見つからなかったため';
+  }
+  return '通話参加時に自己紹介が見つからなかったため';
+}
+
+async function sendIntroDmReport(client, {
+  userId,
+  promptType,
+  success,
+  reason,
+  errorMessage = null
+}) {
+  const config = getIntroDmConfig(client);
+  const channelId = config.logChannelId;
+  if (!channelId) {
+    return null;
+  }
+
+  const content = success
+    ? [
+        '自己紹介DMを送信しました。',
+        `対象: <@${userId}> (\`${userId}\`)`,
+        `種類: \`${promptType}\``,
+        `理由: ${reason}`,
+        `devTestMode: ${config.devTestMode ? 'true' : 'false'}`,
+        `時刻: ${new Date().toISOString()}`
+      ].join('\n')
+    : [
+        '自己紹介DMの送信に失敗しました。',
+        `対象: <@${userId}> (\`${userId}\`)`,
+        `種類: \`${promptType}\``,
+        `理由: ${reason}`,
+        `devTestMode: ${config.devTestMode ? 'true' : 'false'}`,
+        `エラー: ${errorMessage || 'unknown'}`,
+        `時刻: ${new Date().toISOString()}`
+      ].join('\n');
+
+  try {
+    const channel = client.channels.cache.get(channelId) || await client.channels.fetch(channelId);
+    if (!channel?.isTextBased?.()) {
+      client.logger.warn('intro DM report failed', {
+        channelId,
+        reason: 'not_text_based'
+      });
+      return null;
+    }
+
+    const sent = await channel.send({
+      content,
+      allowedMentions: {
+        parse: [],
+        repliedUser: false
+      }
+    });
+    client.logger.info('intro DM report sent', {
+      channelId,
+      userId,
+      promptType,
+      success,
+      reportMessageId: sent.id
+    });
+    return sent;
+  } catch (error) {
+    client.logger.warn('intro DM report failed', {
+      channelId,
+      userId,
+      promptType,
+      success,
+      error: error.message
+    });
+    return null;
+  }
 }
 
 function isAllowedTargetUser(client, userId) {
@@ -181,10 +268,10 @@ function isAllowedTargetUser(client, userId) {
   return String(userId) === String(config.devUserId);
 }
 
-async function sendIntroDm(client, { userId, promptType }) {
+async function sendIntroDm(client, { guildId: providedGuildId, userId, promptType }) {
   const config = getIntroDmConfig(client);
   const logger = client.logger;
-  const guildId = getIntroDmGuildId(client);
+  const guildId = providedGuildId || getIntroDmGuildId(client);
 
   if (!config.enabled && !config.devTestMode) {
     logger.info('Intro DM skipped because disabled', {
@@ -225,8 +312,8 @@ async function sendIntroDm(client, { userId, promptType }) {
   }
 
   const content = promptType === PROMPT_TYPES.JOIN_NO_INTRO
-    ? buildJoinReminderMessage(client.appConfig.introChannelId)
-    : buildVcReminderMessage(client.appConfig.introChannelId);
+    ? buildJoinReminderMessage(getIntroChannelId(client))
+    : buildVcReminderMessage(getIntroChannelId(client));
 
   logger.info('Intro DM test started', {
     guildId,
@@ -258,6 +345,12 @@ async function sendIntroDm(client, { userId, promptType }) {
       promptType,
       dmMessageId: dmMessage.id
     });
+    await sendIntroDmReport(client, {
+      userId,
+      promptType,
+      success: true,
+      reason: getIntroDmReasonLabel(promptType)
+    });
 
     return {
       ok: true,
@@ -276,6 +369,13 @@ async function sendIntroDm(client, { userId, promptType }) {
       userId,
       promptType,
       error: error.message
+    });
+    await sendIntroDmReport(client, {
+      userId,
+      promptType,
+      success: false,
+      reason: getIntroDmReasonLabel(promptType),
+      errorMessage: error.message
     });
 
     return {
@@ -360,7 +460,7 @@ async function handleIntroDmMessage(message) {
         '返信ありがとうございます！',
         '自己紹介は短くて大丈夫です。たとえば「呼び方 / 興味のある分野 / 最近やっていること」を一言ずつ書いてもらえれば十分です。',
         'よければ自己紹介チャンネルに投稿してみてください。',
-        `<#${client.appConfig.introChannelId}>`
+        `<#${getIntroChannelId(client)}>`
       ].join('\n'),
       allowedMentions: { repliedUser: false, parse: [] }
     }).catch(() => null);
@@ -440,7 +540,208 @@ function getIntroDmStatus(client) {
     enabled: config.enabled,
     devTestMode: config.devTestMode,
     devUserId: config.devUserId,
+    introChannelId: getIntroChannelId(client),
     stateCount: client.db.introDm.countStates()
+  };
+}
+
+function shouldSkipByCooldown(client, guildId, userId, promptType, cooldownDays) {
+  const state = client.db.introDm.getState(guildId, userId, promptType);
+  if (!state) {
+    return false;
+  }
+  if (state.optOut) {
+    return 'opt_out';
+  }
+  if (!state.sentAt) {
+    return false;
+  }
+  const cutoffMs = Date.now() - (Number(cooldownDays || 7) * 24 * 60 * 60 * 1000);
+  return new Date(state.sentAt).getTime() >= cutoffMs ? 'cooldown' : false;
+}
+
+async function maybeSendVcNoIntroDm(client, member) {
+  const config = getIntroDmConfig(client);
+  const logger = client.logger;
+  const guildId = member.guild.id;
+  logger.info('VC intro check started', {
+    guildId,
+    userId: member.id,
+    channelId: member.voice?.channelId || null
+  });
+
+  if (member.user?.bot) {
+    logger.info('skipped bot', { guildId, userId: member.id });
+    return { ok: false, skippedReason: 'bot' };
+  }
+
+  const introExists = hasUserIntro(client, guildId, member.id);
+  if (introExists && !(config.devTestMode && String(member.id) === String(config.devUserId))) {
+    logger.info('skipped has intro', { guildId, userId: member.id });
+    return { ok: false, skippedReason: 'has_intro' };
+  }
+
+  if (config.devTestMode && String(member.id) !== String(config.devUserId)) {
+    logger.info('skipped devTest non-dev', { guildId, userId: member.id });
+    return { ok: false, skippedReason: 'not_dev_user' };
+  }
+
+  if (!config.enabled && !config.devTestMode) {
+    logger.info('skipped because disabled', { guildId, userId: member.id });
+    return { ok: false, skippedReason: 'disabled' };
+  }
+
+  const cooldownState = shouldSkipByCooldown(
+    client,
+    guildId,
+    member.id,
+    PROMPT_TYPES.VC_NO_INTRO,
+    config.vcReminderCooldownDays
+  );
+  if (cooldownState) {
+    logger.info(`skipped ${cooldownState}`, {
+      guildId,
+      userId: member.id,
+      promptType: PROMPT_TYPES.VC_NO_INTRO
+    });
+    return { ok: false, skippedReason: cooldownState };
+  }
+
+  const result = await sendIntroDm(client, {
+    guildId,
+    userId: member.id,
+    promptType: PROMPT_TYPES.VC_NO_INTRO
+  });
+
+  if (result.ok) {
+    logger.info('intro DM sent vc_no_intro', {
+      guildId,
+      userId: member.id
+    });
+  } else {
+    logger.warn('intro DM failed', {
+      guildId,
+      userId: member.id,
+      promptType: PROMPT_TYPES.VC_NO_INTRO,
+      skippedReason: result.skippedReason || result.error?.message || 'unknown'
+    });
+  }
+
+  return result;
+}
+
+function randomIntInclusive(min, max) {
+  const lower = Math.min(min, max);
+  const upper = Math.max(min, max);
+  return Math.floor(Math.random() * (upper - lower + 1)) + lower;
+}
+
+function enqueueJoinIntroDmCandidates(client, guildId, candidates) {
+  const config = getIntroDmConfig(client);
+  if (!config.joinReminderQueueEnabled) {
+    return {
+      queuedCount: 0,
+      skippedExistingCount: 0,
+      skippedReason: 'queue_disabled'
+    };
+  }
+  const now = Date.now();
+  let offsetMinutes = 0;
+  let queuedCount = 0;
+  let skippedExistingCount = 0;
+
+  for (const candidate of candidates) {
+    if (config.devTestMode && String(candidate.userId) !== String(config.devUserId)) {
+      continue;
+    }
+    if (client.db.introDmQueue.getPendingForUserPrompt(guildId, candidate.userId, PROMPT_TYPES.JOIN_NO_INTRO)) {
+      skippedExistingCount += 1;
+      continue;
+    }
+    const delayMinutes = randomIntInclusive(
+      Number(config.joinReminderMinDelayMinutes || 5),
+      Number(config.joinReminderMaxDelayMinutes || 30)
+    );
+    offsetMinutes += delayMinutes;
+    client.db.introDmQueue.enqueue({
+      guildId,
+      userId: candidate.userId,
+      promptType: PROMPT_TYPES.JOIN_NO_INTRO,
+      reason: getIntroDmReasonLabel(PROMPT_TYPES.JOIN_NO_INTRO),
+      scheduledAt: new Date(now + (offsetMinutes * 60 * 1000)).toISOString()
+    });
+    queuedCount += 1;
+  }
+
+  return {
+    queuedCount,
+    skippedExistingCount
+  };
+}
+
+async function processIntroDmQueue(client, guildId, limit = null) {
+  const config = getIntroDmConfig(client);
+  if (!config.joinReminderQueueEnabled) {
+    return {
+      dueCount: 0,
+      sentCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+      skippedReason: 'queue_disabled'
+    };
+  }
+  const batchSize = Number(limit || config.joinReminderBatchSize || 3);
+  const dueItems = client.db.introDmQueue.listDue(guildId, new Date().toISOString(), batchSize);
+  let sentCount = 0;
+  let failedCount = 0;
+  let skippedCount = 0;
+
+  for (const item of dueItems) {
+    if (config.devTestMode && String(item.userId) !== String(config.devUserId)) {
+      client.db.introDmQueue.updateStatus(item.id, {
+        status: 'skipped',
+        attempts: Number(item.attempts || 0) + 1,
+        lastError: 'not_dev_user'
+      });
+      skippedCount += 1;
+      continue;
+    }
+
+    const result = await sendIntroDm(client, {
+      guildId,
+      userId: item.userId,
+      promptType: item.promptType
+    });
+
+    if (result.ok) {
+      client.db.introDmQueue.updateStatus(item.id, {
+        status: 'sent',
+        attempts: Number(item.attempts || 0) + 1,
+        lastError: null
+      });
+      sentCount += 1;
+    } else if (result.skippedReason === 'not_dev_user' || result.skippedReason === 'disabled') {
+      client.db.introDmQueue.updateStatus(item.id, {
+        status: 'skipped',
+        attempts: Number(item.attempts || 0) + 1,
+        lastError: result.skippedReason
+      });
+      skippedCount += 1;
+    } else {
+      client.db.introDmQueue.updateStatus(item.id, {
+        status: 'failed',
+        attempts: Number(item.attempts || 0) + 1,
+        lastError: result.error?.message || result.skippedReason || 'send_failed'
+      });
+      failedCount += 1;
+    }
+  }
+
+  return {
+    dueCount: dueItems.length,
+    sentCount,
+    failedCount,
+    skippedCount
   };
 }
 
@@ -448,5 +749,8 @@ module.exports = {
   PROMPT_TYPES,
   sendIntroDm,
   handleIntroDmMessage,
-  getIntroDmStatus
+  getIntroDmStatus,
+  maybeSendVcNoIntroDm,
+  enqueueJoinIntroDmCandidates,
+  processIntroDmQueue
 };
