@@ -2,6 +2,7 @@ const { initializeVoiceProfileMappings, rebuildVoiceProfileState } = require('..
 const pkg = require('../../package.json');
 const { getBotHealth } = require('../modules/ops/health');
 const { notifyOpsChannel } = require('../modules/ops/notify');
+const { startIntroDmQueueProcessor } = require('../modules/introDm');
 
 module.exports = {
   async execute(client) {
@@ -40,6 +41,8 @@ module.exports = {
       windowSeconds: client.appConfig.timeline.shortMergeWindowSeconds,
       maxParts: client.appConfig.timeline.shortMergeMaxParts
     });
+
+    startIntroDmQueueProcessor(client);
 
     await notifyOpsChannel(client, [
       '✅ Otaku Assistant started / ready',

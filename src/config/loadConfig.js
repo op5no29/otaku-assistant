@@ -150,6 +150,8 @@ function ensureIntroDmConfig(value, introChannelId = '') {
       joinReminderBatchSize: 3,
       joinReminderMinDelayMinutes: 5,
       joinReminderMaxDelayMinutes: 30,
+      queueAutoProcessEnabled: false,
+      queueProcessIntervalMinutes: 5,
       maxLlmReplies: 3,
       llmRepliesEnabled: false
     };
@@ -167,6 +169,8 @@ function ensureIntroDmConfig(value, introChannelId = '') {
     joinReminderBatchSize: Number(value.joinReminderBatchSize ?? 3),
     joinReminderMinDelayMinutes: Number(value.joinReminderMinDelayMinutes ?? 5),
     joinReminderMaxDelayMinutes: Number(value.joinReminderMaxDelayMinutes ?? 30),
+    queueAutoProcessEnabled: value.queueAutoProcessEnabled === true,
+    queueProcessIntervalMinutes: Number(value.queueProcessIntervalMinutes ?? 5),
     maxLlmReplies: Number(value.maxLlmReplies ?? 3),
     llmRepliesEnabled: value.llmRepliesEnabled === true
   };

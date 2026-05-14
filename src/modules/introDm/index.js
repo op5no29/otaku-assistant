@@ -170,6 +170,8 @@ function getIntroDmConfig(client) {
     joinReminderBatchSize: 3,
     joinReminderMinDelayMinutes: 5,
     joinReminderMaxDelayMinutes: 30,
+    queueAutoProcessEnabled: false,
+    queueProcessIntervalMinutes: 5,
     maxLlmReplies: 3,
     llmRepliesEnabled: false
   };
@@ -188,6 +190,16 @@ function getIntroDmReasonLabel(promptType) {
     return '参加から一定時間経過しても自己紹介が見つからなかったため';
   }
   return '通話参加時に自己紹介が見つからなかったため';
+}
+
+function isPermanentIntroDmFailure(errorOrMessage) {
+  const message = String(errorOrMessage?.message || errorOrMessage || '').toLowerCase();
+  return [
+    'cannot send messages to this user due to having no mutual guilds',
+    'cannot send messages to this user',
+    'missing access',
+    'unknown user'
+  ].some((needle) => message.includes(needle));
 }
 
 async function sendIntroDmReport(client, {
@@ -357,6 +369,7 @@ async function sendIntroDm(client, { guildId: providedGuildId, userId, promptTyp
       dmMessage
     };
   } catch (error) {
+    const permanentFailure = isPermanentIntroDmFailure(error);
     client.db.introDm.upsertState({
       guildId,
       userId,
@@ -381,7 +394,8 @@ async function sendIntroDm(client, { guildId: providedGuildId, userId, promptTyp
     return {
       ok: false,
       skippedReason: 'send_failed',
-      error
+      error,
+      permanentFailure
     };
   }
 }
@@ -679,24 +693,91 @@ function enqueueJoinIntroDmCandidates(client, guildId, candidates) {
   };
 }
 
-async function processIntroDmQueue(client, guildId, limit = null) {
+async function processIntroDmQueue(client, guildId = null, limit = null, options = {}) {
   const config = getIntroDmConfig(client);
+  const logger = client.logger;
+  const processorLabel = options.processorLabel || 'manual';
+
   if (!config.joinReminderQueueEnabled) {
+    logger.info('intro DM queue processing skipped because queue is disabled', {
+      processorLabel,
+      guildId
+    });
     return {
       dueCount: 0,
       sentCount: 0,
       failedCount: 0,
       skippedCount: 0,
+      remainingPendingCount: client.db.introDmQueue.countByStatus().find((entry) => entry.status === 'pending')?.count || 0,
       skippedReason: 'queue_disabled'
     };
   }
+
+  if (options.requireEnabled === true && !config.enabled) {
+    logger.info('auto queue skipped because disabled', {
+      processorLabel,
+      guildId
+    });
+    return {
+      dueCount: 0,
+      sentCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+      remainingPendingCount: client.db.introDmQueue.countByStatus().find((entry) => entry.status === 'pending')?.count || 0,
+      skippedReason: 'disabled'
+    };
+  }
+
+  if (client.introDmQueueProcessing) {
+    logger.info(options.isAutomatic ? 'auto queue skipped because already processing' : 'intro DM queue processor already running', {
+      processorLabel,
+      guildId
+    });
+    return {
+      dueCount: 0,
+      sentCount: 0,
+      failedCount: 0,
+      skippedCount: 0,
+      remainingPendingCount: client.db.introDmQueue.countByStatus().find((entry) => entry.status === 'pending')?.count || 0,
+      skippedReason: 'already_processing'
+    };
+  }
+
+  client.introDmQueueProcessing = true;
   const batchSize = Number(limit || config.joinReminderBatchSize || 3);
-  const dueItems = client.db.introDmQueue.listDue(guildId, new Date().toISOString(), batchSize);
+  const nowIso = new Date().toISOString();
+  const staleBeforeIso = new Date(Date.now() - (30 * 60 * 1000)).toISOString();
+  const recoveredCount = client.db.introDmQueue.resetStaleProcessing(staleBeforeIso);
+  if (recoveredCount > 0) {
+    logger.warn('intro DM queue stale processing rows reset', {
+      processorLabel,
+      recoveredCount
+    });
+  }
+
+  try {
+    const allDueCount = guildId
+      ? client.db.introDmQueue.listDue(guildId, nowIso, 1000000).length
+      : client.db.introDmQueue.countDue(nowIso);
+    const dueItems = guildId
+      ? client.db.introDmQueue.listDue(guildId, nowIso, batchSize)
+      : client.db.introDmQueue.listDueAllGuilds(nowIso, batchSize);
+
+    logger.info(options.isAutomatic ? 'intro DM auto queue tick started' : 'intro DM queue processing started', {
+      processorLabel,
+      guildId,
+      dueCount: allDueCount,
+      selectedCount: dueItems.length,
+      batchSize
+    });
+
   let sentCount = 0;
   let failedCount = 0;
   let skippedCount = 0;
 
   for (const item of dueItems) {
+    client.db.introDmQueue.markStatus(item.id, 'processing');
+
     if (config.devTestMode && String(item.userId) !== String(config.devUserId)) {
       client.db.introDmQueue.updateStatus(item.id, {
         status: 'skipped',
@@ -708,7 +789,7 @@ async function processIntroDmQueue(client, guildId, limit = null) {
     }
 
     const result = await sendIntroDm(client, {
-      guildId,
+      guildId: item.guildId || guildId,
       userId: item.userId,
       promptType: item.promptType
     });
@@ -720,7 +801,7 @@ async function processIntroDmQueue(client, guildId, limit = null) {
         lastError: null
       });
       sentCount += 1;
-    } else if (result.skippedReason === 'not_dev_user' || result.skippedReason === 'disabled') {
+    } else if (result.skippedReason === 'not_dev_user' || result.skippedReason === 'disabled' || result.skippedReason === 'cooldown' || result.skippedReason === 'opt_out') {
       client.db.introDmQueue.updateStatus(item.id, {
         status: 'skipped',
         attempts: Number(item.attempts || 0) + 1,
@@ -728,21 +809,94 @@ async function processIntroDmQueue(client, guildId, limit = null) {
       });
       skippedCount += 1;
     } else {
+      const failureReason = result.error?.message || result.skippedReason || 'send_failed';
+      client.logger.warn('intro DM queue send failed', {
+        processorLabel,
+        guildId: item.guildId || guildId,
+        userId: item.userId,
+        promptType: item.promptType,
+        permanentFailure: result.permanentFailure === true,
+        error: failureReason
+      });
       client.db.introDmQueue.updateStatus(item.id, {
         status: 'failed',
         attempts: Number(item.attempts || 0) + 1,
-        lastError: result.error?.message || result.skippedReason || 'send_failed'
+        lastError: failureReason
       });
       failedCount += 1;
     }
   }
 
-  return {
-    dueCount: dueItems.length,
-    sentCount,
-    failedCount,
-    skippedCount
+    const remainingPendingCount = client.db.introDmQueue.countByStatus().find((entry) => entry.status === 'pending')?.count || 0;
+
+    logger.info(options.isAutomatic ? 'intro DM auto queue tick finished' : 'intro DM queue processing finished', {
+      processorLabel,
+      guildId,
+      dueCount: allDueCount,
+      selectedCount: dueItems.length,
+      sentCount,
+      failedCount,
+      skippedCount,
+      remainingPendingCount
+    });
+
+    return {
+      dueCount: allDueCount,
+      selectedCount: dueItems.length,
+      sentCount,
+      failedCount,
+      skippedCount,
+      remainingPendingCount
+    };
+  } finally {
+    client.introDmQueueProcessing = false;
+  }
+}
+
+function startIntroDmQueueProcessor(client) {
+  const config = getIntroDmConfig(client);
+  const intervalMinutes = Number(config.queueProcessIntervalMinutes || 5);
+
+  if (client.introDmQueueInterval) {
+    clearInterval(client.introDmQueueInterval);
+    client.introDmQueueInterval = null;
+  }
+
+  if (!config.queueAutoProcessEnabled) {
+    client.logger.info('intro DM auto queue processor disabled', {
+      intervalMinutes,
+      batchSize: Number(config.joinReminderBatchSize || 3)
+    });
+    return;
+  }
+
+  client.logger.info('intro DM auto queue processor enabled', {
+    intervalMinutes,
+    batchSize: Number(config.joinReminderBatchSize || 3)
+  });
+
+  const runTick = async () => {
+    try {
+      await processIntroDmQueue(client, null, null, {
+        processorLabel: 'auto_interval',
+        isAutomatic: true,
+        requireEnabled: true
+      });
+    } catch (error) {
+      client.logger.error('intro DM auto queue tick failed', {
+        processorLabel: 'auto_interval',
+        error: error.message
+      });
+    }
   };
+
+  client.introDmQueueInterval = setInterval(() => {
+    void runTick();
+  }, Math.max(1, intervalMinutes) * 60 * 1000);
+
+  if (typeof client.introDmQueueInterval.unref === 'function') {
+    client.introDmQueueInterval.unref();
+  }
 }
 
 module.exports = {
@@ -752,5 +906,7 @@ module.exports = {
   getIntroDmStatus,
   maybeSendVcNoIntroDm,
   enqueueJoinIntroDmCandidates,
-  processIntroDmQueue
+  processIntroDmQueue,
+  startIntroDmQueueProcessor,
+  isPermanentIntroDmFailure
 };

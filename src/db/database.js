@@ -655,6 +655,25 @@ function createDatabase(databasePath) {
       ORDER BY datetime(scheduled_at) ASC, id ASC
       LIMIT ?
     `),
+    listIntroDmQueueDueAllGuilds: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        user_id AS userId,
+        prompt_type AS promptType,
+        reason,
+        scheduled_at AS scheduledAt,
+        status,
+        attempts,
+        last_error AS lastError,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM intro_dm_queue
+      WHERE status = 'pending'
+        AND datetime(scheduled_at) <= datetime(?)
+      ORDER BY datetime(scheduled_at) ASC, id ASC
+      LIMIT ?
+    `),
     updateIntroDmQueueStatus: sqlite.prepare(`
       UPDATE intro_dm_queue
       SET status = ?,
@@ -669,6 +688,17 @@ function createDatabase(databasePath) {
         COUNT(*) AS count
       FROM intro_dm_queue
       GROUP BY status
+    `),
+    getIntroDmQueueNextScheduledAt: sqlite.prepare(`
+      SELECT MIN(datetime(scheduled_at)) AS nextScheduledAt
+      FROM intro_dm_queue
+      WHERE status = 'pending'
+    `),
+    countIntroDmQueueDueAllGuilds: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM intro_dm_queue
+      WHERE status = 'pending'
+        AND datetime(scheduled_at) <= datetime(?)
     `),
     getPendingIntroDmQueueForUserPrompt: sqlite.prepare(`
       SELECT
@@ -687,6 +717,19 @@ function createDatabase(databasePath) {
       WHERE guild_id = ? AND user_id = ? AND prompt_type = ? AND status = 'pending'
       ORDER BY datetime(scheduled_at) ASC, id ASC
       LIMIT 1
+    `),
+    markIntroDmQueueStatusById: sqlite.prepare(`
+      UPDATE intro_dm_queue
+      SET status = ?,
+          updated_at = ?
+      WHERE id = ?
+    `),
+    resetStaleIntroDmQueueProcessing: sqlite.prepare(`
+      UPDATE intro_dm_queue
+      SET status = 'pending',
+          updated_at = ?
+      WHERE status = 'processing'
+        AND datetime(updated_at) <= datetime(?)
     `),
     insertIntroReaction: sqlite.prepare(`
       INSERT INTO intro_reactions (
@@ -1421,11 +1464,26 @@ function createDatabase(databasePath) {
       listDue(guildId, dueAtIso, limit = 10) {
         return statements.listIntroDmQueueDue.all(guildId, dueAtIso, limit);
       },
+      listDueAllGuilds(dueAtIso, limit = 10) {
+        return statements.listIntroDmQueueDueAllGuilds.all(dueAtIso, limit);
+      },
       updateStatus(id, { status, attempts = 0, lastError = null }) {
         statements.updateIntroDmQueueStatus.run(status, attempts, lastError, new Date().toISOString(), id);
       },
+      markStatus(id, status) {
+        statements.markIntroDmQueueStatusById.run(status, new Date().toISOString(), id);
+      },
+      resetStaleProcessing(staleBeforeIso) {
+        return statements.resetStaleIntroDmQueueProcessing.run(new Date().toISOString(), staleBeforeIso).changes;
+      },
       countByStatus() {
         return statements.countIntroDmQueueByStatus.all();
+      },
+      getNextScheduledAt() {
+        return statements.getIntroDmQueueNextScheduledAt.get()?.nextScheduledAt || null;
+      },
+      countDue(dueAtIso) {
+        return Number(statements.countIntroDmQueueDueAllGuilds.get(dueAtIso)?.count || 0);
       }
     },
     introProfiles: {

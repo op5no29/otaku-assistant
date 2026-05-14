@@ -98,6 +98,8 @@
     "joinReminderBatchSize": 3,
     "joinReminderMinDelayMinutes": 5,
     "joinReminderMaxDelayMinutes": 30,
+    "queueAutoProcessEnabled": false,
+    "queueProcessIntervalMinutes": 5,
     "maxLlmReplies": 3,
     "llmRepliesEnabled": false
   },

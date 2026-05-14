@@ -228,6 +228,7 @@ module.exports = {
     }
 
     if (subcommand === 'dm-enqueue-join48h') {
+      await interaction.deferReply({ ephemeral: true });
       const members = getUsersWithoutIntroOlderThan(
         interaction.client,
         interaction.guildId,
@@ -235,27 +236,34 @@ module.exports = {
         100
       );
       const result = enqueueJoinIntroDmCandidates(interaction.client, interaction.guildId, members);
-      await interaction.reply({
+      await interaction.editReply({
         content: [
           'join48h intro DM enqueue を実行しました。',
           `candidateCount: ${members.length}`,
           `queuedCount: ${result.queuedCount}`,
           `skippedExistingCount: ${result.skippedExistingCount}${result.skippedReason ? `\nスキップ理由: ${result.skippedReason}` : ''}`
-        ].join('\n'),
-        ephemeral: true
+        ].join('\n')
       });
       return;
     }
 
     if (subcommand === 'dm-queue-status') {
       const queueCounts = interaction.client.db.introDmQueue.countByStatus();
+      const nextScheduledAt = interaction.client.db.introDmQueue.getNextScheduledAt();
+      const nextDueCount = interaction.client.db.introDmQueue.countDue(new Date().toISOString());
+      const introDmConfig = interaction.client.appConfig.introDm;
       await interaction.reply({
         content: [
           'intro DM queue status',
           `pending: ${queueCounts.find((entry) => entry.status === 'pending')?.count || 0}`,
+          `processing: ${queueCounts.find((entry) => entry.status === 'processing')?.count || 0}`,
           `sent: ${queueCounts.find((entry) => entry.status === 'sent')?.count || 0}`,
           `failed: ${queueCounts.find((entry) => entry.status === 'failed')?.count || 0}`,
-          `skipped: ${queueCounts.find((entry) => entry.status === 'skipped')?.count || 0}`
+          `skipped: ${queueCounts.find((entry) => entry.status === 'skipped')?.count || 0}`,
+          `nextScheduledAt: ${nextScheduledAt || 'none'}`,
+          `nextDueCount: ${nextDueCount}`,
+          `queueAutoProcessEnabled: ${introDmConfig.queueAutoProcessEnabled === true}`,
+          `queueProcessIntervalMinutes: ${introDmConfig.queueProcessIntervalMinutes}`
         ].join('\n'),
         ephemeral: true
       });
@@ -263,31 +271,35 @@ module.exports = {
     }
 
     if (subcommand === 'dm-process-queue') {
-      const result = await processIntroDmQueue(interaction.client, interaction.guildId);
-      await interaction.reply({
+      await interaction.deferReply({ ephemeral: true });
+      const result = await processIntroDmQueue(interaction.client, interaction.guildId, null, {
+        processorLabel: 'slash_manual'
+      });
+      await interaction.editReply({
         content: [
           'intro DM queue process を実行しました。',
           `dueCount: ${result.dueCount}`,
+          `selectedCount: ${result.selectedCount ?? 0}`,
           `sentCount: ${result.sentCount}`,
           `failedCount: ${result.failedCount}`,
-          `skippedCount: ${result.skippedCount}${result.skippedReason ? `\nスキップ理由: ${result.skippedReason}` : ''}`
-        ].join('\n'),
-        ephemeral: true
+          `skippedCount: ${result.skippedCount}`,
+          `remainingPendingCount: ${result.remainingPendingCount ?? 0}${result.skippedReason ? `\nスキップ理由: ${result.skippedReason}` : ''}`
+        ].join('\n')
       });
       return;
     }
 
     if (subcommand === 'backfill-guild-members') {
+      await interaction.deferReply({ ephemeral: true });
       const result = await backfillGuildMembers(interaction.client, interaction.guild);
-      await interaction.reply({
+      await interaction.editReply({
         content: [
           'guild member backfill を実行しました。',
           `fetchedCount: ${result.fetchedCount}`,
           `savedCount: ${result.savedCount}`,
           `botCount: ${result.botCount}`,
           `failedCount: ${result.failedCount}`
-        ].join('\n'),
-        ephemeral: true
+        ].join('\n')
       });
       return;
     }
@@ -306,32 +318,33 @@ module.exports = {
     }
 
     if (subcommand === 'cleanup-profiles') {
+      await interaction.deferReply({ ephemeral: true });
       const dryRun = interaction.options.getBoolean('dry_run') !== false;
       const result = await cleanupIntroProfiles(interaction.client, interaction.guildId, {
         dryRun,
         limit: 1000
       });
-      await interaction.reply({
+      await interaction.editReply({
         content: [
           `cleanup intro profiles (${dryRun ? 'dry-run' : 'apply'})`,
           `scannedCount: ${result.scannedCount}`,
           `removedCount: ${result.removedCount}`,
           `replyCount: ${result.replyCount}`,
           `greetingLikeCount: ${result.greetingLikeCount}`
-        ].join('\n'),
-        ephemeral: true
+        ].join('\n')
       });
       return;
     }
 
     if (subcommand === 'rebuild-profiles') {
+      await interaction.deferReply({ ephemeral: true });
       const dryRun = interaction.options.getBoolean('dry_run') !== false;
       const limit = interaction.options.getInteger('limit') ?? 1000;
       const result = await rebuildIntroProfiles(interaction.client, interaction.guildId, {
         dryRun,
         limit
       });
-      await interaction.reply({
+      await interaction.editReply({
         content: [
           `rebuild intro profiles (${dryRun ? 'dry-run' : 'apply'})`,
           `scannedCount: ${result.scannedCount}`,
@@ -341,8 +354,7 @@ module.exports = {
           `skippedBotCount: ${result.skippedBotCount}`,
           `skippedEmptyCount: ${result.skippedEmptyCount}`,
           `failedCount: ${result.failedCount}${result.skippedReason ? `\nスキップ理由: ${result.skippedReason}` : ''}`
-        ].join('\n'),
-        ephemeral: true
+        ].join('\n')
       });
       return;
     }
@@ -380,8 +392,9 @@ module.exports = {
     }
 
     if (subcommand === 'backfill-reactions') {
+      await interaction.deferReply({ ephemeral: true });
       const summary = await backfillIntroReactions(interaction.client, interaction.guildId);
-      await interaction.reply({
+      await interaction.editReply({
         content: [
           '自己紹介リアクションの補完を実行しました。',
           `走査自己紹介数: ${summary.scannedIntroCount}`,
@@ -389,8 +402,7 @@ module.exports = {
           `付与数: ${summary.appliedCount}`,
           `削除した古いBotリアクション数: ${summary.removedOutdatedCount}`,
           `失敗数: ${summary.failedCount}${summary.skippedReason ? `\nスキップ理由: ${summary.skippedReason}` : ''}`
-        ].join('\n'),
-        ephemeral: true
+        ].join('\n')
       });
       return;
     }
