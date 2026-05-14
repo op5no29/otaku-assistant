@@ -9,7 +9,8 @@ const {
   findRegisteredAnime,
   listAnimeIndex,
   getCurrentSeasonAnime,
-  getNextSeasonAnime
+  getNextSeasonAnime,
+  getAnimeById
 } = require('../modules/anime');
 const { buildAnimeLinks, getPreferredAnimeDisplayTitle } = require('../modules/anime/buildAnimeMessages');
 
@@ -205,28 +206,30 @@ module.exports = {
           return;
         }
 
-        let entryResult = null;
-        let registrationLine = null;
-        if (client.appConfig.anime.autoPostOnCastLookup) {
-          entryResult = await postAnimeToChannel(interaction.guild, resolved.media, interaction.user.id);
-          registrationLine = entryResult.created
-            ? 'アニメチャンネルにも作品カードを作成しました。'
-            : '既に登録済みです。';
-        }
+        client.logger.info('anime cast query started', {
+          title,
+          mediaId: resolved.media.providerMediaId || null
+        });
 
-        const castLines = (resolved.media.cast || []).slice(0, client.appConfig.anime.maxCastInCard).map(
+        const detailedMedia = await getAnimeById(client, resolved.media.providerMediaId, Math.max(client.appConfig.anime.maxCastInCard, 10));
+        const castRows = Array.isArray(detailedMedia?.cast) ? detailedMedia.cast : [];
+        client.logger.info('anime cast query finished', {
+          title,
+          mediaId: resolved.media.providerMediaId || null,
+          castCount: castRows.length,
+          hasCharacterFields: castRows.some((row) => row.characterName || row.characterNameNative),
+          hasVoiceActorFields: castRows.some((row) => row.voiceActorName)
+        });
+
+        const castLines = castRows.slice(0, client.appConfig.anime.maxCastInCard).map(
           (row) => `- ${row.characterName || 'キャラ不明'}: ${row.voiceActorName || '声優情報なし'}`
         );
         const ambiguity = resolved.candidates.length > 1 ? `候補が複数ありましたが、先頭候補を採用しました。(${resolved.candidates.length}件)` : null;
-        const links = entryResult?.entry ? buildAnimeLinks(entryResult.entry) : null;
         await interaction.editReply([
-          `**${formatTitle(resolved.media)}**`,
-          formatSeason(resolved.media) ? `- ${formatSeason(resolved.media)} / ${resolved.media.status || '状態不明'}` : null,
-          castLines.length ? castLines.join('\n') : '主要キャストは取得できませんでした。',
+          `**${formatTitle(detailedMedia || resolved.media)}**`,
+          formatSeason(detailedMedia || resolved.media) ? `- ${formatSeason(detailedMedia || resolved.media)} / ${(detailedMedia || resolved.media).status || '状態不明'}` : null,
+          castLines.length ? castLines.join('\n') : 'キャスト情報を取得できませんでした。',
           ambiguity,
-          registrationLine,
-          links?.parentUrl ? `作品カード: ${links.parentUrl}` : null,
-          links?.threadUrl ? `スレッド: ${links.threadUrl}` : null
         ].filter(Boolean).join('\n'));
         return;
       }

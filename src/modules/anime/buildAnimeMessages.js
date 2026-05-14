@@ -209,18 +209,6 @@ function buildAnimeThreadHeaderCard(entry, stats, cast, latestReviews) {
   };
 }
 
-function buildAnimeReviewPrompt(entry, user, reactionType) {
-  const typeLabel = reactionType === 'watched' ? '視聴済み' : '興味あり';
-  return {
-    content: [
-      `<@${user.id}> さんが「${typeLabel}」にしました。`,
-      '感想があれば、このスレッドで `/anime review` を使って投稿できます。',
-      '感想を投稿すると、視聴作品数カウントとロール付与の対象になります。'
-    ].join('\n'),
-    allowedMentions: { users: [user.id], roles: [], parse: [] }
-  };
-}
-
 function buildAnimeLinks(entry) {
   const parentUrl = entry.animeChannelId && entry.animeChannelMessageId
     ? getMessageJumpUrl({
@@ -245,7 +233,6 @@ function buildAnimeLinks(entry) {
 module.exports = {
   buildAnimeChannelCard,
   buildAnimeThreadHeaderCard,
-  buildAnimeReviewPrompt,
   buildAnimeLinks,
   buildReviewPreview,
   getPreferredAnimeDisplayTitle

@@ -107,7 +107,7 @@
     "enabled": true,
     "provider": "anilist",
     "channelId": "YOUR_ANIME_CHANNEL_ID",
-    "autoPostOnCastLookup": true,
+    "autoPostOnCastLookup": false,
     "interestEmoji": "👀",
     "watchedEmoji": "✅",
     "maxCastInCard": 5,
@@ -163,7 +163,8 @@
       "tags": ["アニメ", "anime", "Anime", "ANIME"],
       "displayMode": "matchedTag",
       "destinationChannelId": "YOUR_ANIME_CHANNEL_ID",
-      "alsoTimeline": true
+      "alsoTimeline": true,
+      "relayUserPostToDestination": false
     },
     {
       "tags": ["飯", "ご飯", "ごはん", "meshi", "food", "Food", "FOOD", "ラーメン", "ramen", "Ramen", "RAMEN"],

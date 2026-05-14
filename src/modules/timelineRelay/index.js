@@ -1588,7 +1588,7 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
   };
 
   for (const [routeKey, route] of globalMatches) {
-    if (route.channelId) {
+    if (route.channelId && route.relayUserPostToDestination !== false) {
       const added = addDestination(route.channelId, `global_hashtag:${routeKey}`);
       logger.info('Global hashtag route matched', {
         sourceMessageId: message.id,
@@ -1597,8 +1597,18 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
         matchedRoute: true,
         destinationChannelId: route.channelId,
         routeDestinationChannelId: route.channelId,
+        relayUserPostToDestination: route.relayUserPostToDestination !== false,
         alsoTimeline: route.alsoTimeline === true,
         willRelay: added
+      });
+    } else if (route.channelId) {
+      logger.info('Global hashtag route destination skipped for normal relay', {
+        sourceMessageId: message.id,
+        routeKey,
+        detectedTag,
+        destinationChannelId: route.channelId,
+        relayUserPostToDestination: false,
+        reason: 'route_disabled_destination_relay'
       });
     }
 

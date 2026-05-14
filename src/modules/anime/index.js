@@ -8,7 +8,6 @@ const {
 const {
   buildAnimeChannelCard,
   buildAnimeThreadHeaderCard,
-  buildAnimeReviewPrompt,
   buildAnimeLinks,
   buildReviewPreview,
   getPreferredAnimeDisplayTitle
@@ -107,6 +106,27 @@ async function safeFetchMessage(channel, messageId) {
     return null;
   }
   return channel.messages.fetch(messageId).catch(() => null);
+}
+
+async function findExistingThreadHeaderMessage(thread, client, animeEntryId) {
+  const recent = await thread.messages.fetch({ limit: 15 }).catch(() => null);
+  if (!recent?.size) {
+    return null;
+  }
+
+  for (const message of recent.values()) {
+    if (message.author?.id !== client.user?.id) {
+      continue;
+    }
+    const firstText = Array.isArray(message.components)
+      ? message.components.flatMap((component) => component.components || []).find((component) => component?.type === 10)?.content || ''
+      : '';
+    if (/メインキャスト|最新感想|作品カードへ飛ぶ|AniListで開く/u.test(String(firstText || ''))) {
+      return message;
+    }
+  }
+
+  return null;
 }
 
 async function searchAnime(client, title) {
@@ -242,14 +262,36 @@ async function updateAnimeThreadHeader(client, entry) {
   let headerMessage = null;
   if (normalizedEntry.threadCardMessageId) {
     headerMessage = await safeFetchMessage(thread, normalizedEntry.threadCardMessageId);
+    if (headerMessage) {
+      client.logger.info('anime thread header create skipped existing', {
+        animeEntryId: normalizedEntry.id,
+        threadId: normalizedEntry.threadId,
+        threadCardMessageId: headerMessage.id
+      });
+    }
+  }
+
+  if (!headerMessage) {
+    const discoveredMessage = await findExistingThreadHeaderMessage(thread, client, normalizedEntry.id);
+    if (discoveredMessage) {
+      client.db.anime.updateBindings(normalizedEntry.id, {
+        threadCardMessageId: discoveredMessage.id
+      });
+      headerMessage = discoveredMessage;
+      client.logger.info('anime thread header duplicate prevented', {
+        animeEntryId: normalizedEntry.id,
+        threadId: normalizedEntry.threadId,
+        threadCardMessageId: discoveredMessage.id
+      });
+    }
   }
 
   if (headerMessage) {
     await headerMessage.edit(payload);
-    client.logger.info('anime thread header updated', {
+    client.logger.info('anime thread header edited', {
       animeEntryId: normalizedEntry.id,
       threadId: normalizedEntry.threadId,
-      threadCardMessageId: normalizedEntry.threadCardMessageId
+      threadCardMessageId: headerMessage.id
     });
     return headerMessage;
   }
@@ -258,7 +300,7 @@ async function updateAnimeThreadHeader(client, entry) {
   client.db.anime.updateBindings(normalizedEntry.id, {
     threadCardMessageId: headerMessage.id
   });
-  client.logger.info('anime thread header sent', {
+  client.logger.info('anime thread header created', {
     animeEntryId: normalizedEntry.id,
     threadId: normalizedEntry.threadId,
     threadCardMessageId: headerMessage.id
@@ -321,7 +363,7 @@ async function postAnimeToChannel(guild, media, createdByUserId) {
 
   const refreshedEntry = normalizeEntry(client.db.anime.getEntryById(entry.id));
   const thread = await createAnimeThread(sentMessage, refreshedEntry);
-  await updateAnimeThreadHeader(client, normalizeEntry(client.db.anime.getEntryById(entry.id)));
+  await createOrUpdateThreadHeader(client, normalizeEntry(client.db.anime.getEntryById(entry.id)));
   await updateAnimeChannelCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id)));
 
   return {
@@ -487,12 +529,6 @@ async function handleAnimeReactionAdd(reaction, user) {
     reactionType: interestedMatch ? 'interested' : 'watched'
   });
 
-  if (watchedMatch && entry.threadId) {
-    const thread = await safeFetchChannel(client, entry.threadId);
-    if (thread?.isTextBased?.()) {
-      await thread.send(buildAnimeReviewPrompt(entry, user, 'watched')).catch(() => null);
-    }
-  }
 }
 
 async function handleAnimeReactionRemove(reaction, user) {

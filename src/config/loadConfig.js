@@ -46,7 +46,8 @@ function ensureGlobalHashtagRoutes(value, label) {
       channelId: String(route.destinationChannelId || route.channelId || ''),
       displayTag: String(route.displayTag || route.display || route.tags?.[0] || ''),
       displayMode: String(route.displayMode || 'displayTag'),
-      alsoTimeline: route.alsoTimeline === true
+      alsoTimeline: route.alsoTimeline === true,
+      relayUserPostToDestination: route.relayUserPostToDestination !== false
     };
   };
 
@@ -191,7 +192,7 @@ function ensureAnimeConfig(value) {
       enabled: true,
       provider: 'anilist',
       channelId: '1504329024460296232',
-      autoPostOnCastLookup: true,
+      autoPostOnCastLookup: false,
       interestEmoji: '👀',
       watchedEmoji: '✅',
       maxCastInCard: 5,
@@ -207,7 +208,7 @@ function ensureAnimeConfig(value) {
     enabled: value.enabled !== false,
     provider: String(value.provider || 'anilist'),
     channelId: String(value.channelId || '1504329024460296232'),
-    autoPostOnCastLookup: value.autoPostOnCastLookup !== false,
+    autoPostOnCastLookup: value.autoPostOnCastLookup === true,
     interestEmoji: String(value.interestEmoji || '👀'),
     watchedEmoji: String(value.watchedEmoji || '✅'),
     maxCastInCard: Number(value.maxCastInCard ?? 5),

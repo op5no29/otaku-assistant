@@ -91,6 +91,9 @@ function stripNoiseTokens(value) {
       .replace(/\b公式\b/giu, ' ')
       .replace(/\bノンクレジット\b/giu, ' ')
       .replace(/\bノンテロップ\b/giu, ' ')
+      .replace(/\bオープニングムービー完全版\b/giu, ' ')
+      .replace(/\bオープニングムービー\b/giu, ' ')
+      .replace(/\bOpening Movie\b/giu, ' ')
       .replace(/\bNCOP\b/giu, ' ')
       .replace(/\bNCED\b/giu, ' ')
       .replace(/\bOPテーマ\b/giu, ' ')
@@ -155,7 +158,10 @@ function normalizeAnimeCandidateTitle(rawTitle) {
 
   const bracketPatterns = [
     /(?:TVアニメ|アニメ|anime)[「『【]([^」』】]+)[」』】]/iu,
+    /(?:TVアニメ|アニメ|anime)[「『【]([^「『【|｜\n\r]+)$/iu,
+    /(?:TVアニメ|アニメ|anime)\s+(.+?)\s*(?:OP|ED|Opening|Ending|PV|MV|CM|Trailer|Teaser|主題歌|オープニング|エンディング|ノンクレジット|ノンテロップ|$)/iu,
     /[【『「]([^】』」]+)[】』」]\s*(?:第\s*\d+\s*期|\d+\s*期|Season\s*\d+|\d+(?:st|nd|rd|th)\s+Season)?\s*(?:OP|ED|Opening|Ending|PV|MV|CM|Trailer|Teaser|主題歌|オープニング|エンディング)/iu,
+    /[【『「]([^】』」|｜\n\r]+)(?:$|\s*(?:OP|ED|Opening|Ending|PV|MV|CM|Trailer|Teaser|主題歌|オープニング|エンディング))/iu,
     /^(.*?)\s*(?:Opening|Ending|OP|ED)\b/iu
   ];
 
