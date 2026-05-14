@@ -3,8 +3,18 @@ const unresolveCommand = require('./unresolve');
 const profileCommand = require('./profile');
 const guidePostCommand = require('./guidePost');
 const maintenanceCommand = require('./maintenance');
+const welcomeCommand = require('./welcome');
+const introCommand = require('./intro');
 
-const list = [resolveCommand, unresolveCommand, profileCommand, guidePostCommand, maintenanceCommand];
+const list = [
+  resolveCommand,
+  unresolveCommand,
+  profileCommand,
+  guidePostCommand,
+  maintenanceCommand,
+  welcomeCommand,
+  introCommand
+];
 
 module.exports = {
   list,

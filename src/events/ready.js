@@ -24,6 +24,7 @@ module.exports = {
           routeKey,
           tags: route.tags || [],
           destinationChannelId: route.channelId || '',
+          displayMode: route.displayMode || 'displayTag',
           alsoTimeline: route.alsoTimeline === true
         }))
       });

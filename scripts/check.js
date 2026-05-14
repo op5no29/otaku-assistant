@@ -35,11 +35,19 @@ for (const filePath of files) {
 }
 
 const { createDatabase } = require(path.join(projectRoot, 'src', 'db', 'database'));
+const commands = require(path.join(projectRoot, 'src', 'commands'));
 const tempDatabasePath = path.join(os.tmpdir(), `otaku-assistant-check-${process.pid}.db`);
 const database = createDatabase(tempDatabasePath);
 database.sqlite.close();
 fs.rmSync(tempDatabasePath, { force: true });
 fs.rmSync(`${tempDatabasePath}-shm`, { force: true });
 fs.rmSync(`${tempDatabasePath}-wal`, { force: true });
+
+for (const command of commands.list.filter((entry) => entry.enabled !== false)) {
+  const optionCount = Array.isArray(command?.data?.options) ? command.data.options.length : 0;
+  if (optionCount > 25) {
+    throw new Error(`Command ${command.data?.name || 'unknown'} has too many top-level options: ${optionCount}`);
+  }
+}
 
 console.log(`Checked ${files.length} JavaScript files.`);
