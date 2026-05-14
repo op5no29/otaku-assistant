@@ -42,6 +42,15 @@ module.exports = {
       maxParts: client.appConfig.timeline.shortMergeMaxParts
     });
 
+    client.logger.info('anime config loaded', {
+      enabled: client.appConfig.anime.enabled,
+      provider: client.appConfig.anime.provider,
+      channelId: client.appConfig.anime.channelId,
+      autoPostOnCastLookup: client.appConfig.anime.autoPostOnCastLookup,
+      interestEmoji: client.appConfig.anime.interestEmoji,
+      watchedEmoji: client.appConfig.anime.watchedEmoji
+    });
+
     startIntroDmQueueProcessor(client);
 
     await notifyOpsChannel(client, [

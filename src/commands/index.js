@@ -5,6 +5,7 @@ const guidePostCommand = require('./guidePost');
 const maintenanceCommand = require('./maintenance');
 const welcomeCommand = require('./welcome');
 const introCommand = require('./intro');
+const animeCommand = require('./anime');
 
 const list = [
   resolveCommand,
@@ -13,7 +14,8 @@ const list = [
   guidePostCommand,
   maintenanceCommand,
   welcomeCommand,
-  introCommand
+  introCommand,
+  animeCommand
 ];
 
 module.exports = {

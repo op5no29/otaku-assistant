@@ -217,6 +217,105 @@ function runMigrations(database) {
     CREATE INDEX IF NOT EXISTS idx_guild_members_is_bot
       ON guild_members (guild_id, is_bot);
 
+    CREATE TABLE IF NOT EXISTS anime_entries (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      provider TEXT NOT NULL,
+      provider_media_id TEXT NOT NULL,
+      title_native TEXT,
+      title_romaji TEXT,
+      title_english TEXT,
+      title_user_preferred TEXT,
+      aliases_json TEXT,
+      description TEXT,
+      site_url TEXT,
+      official_site_url TEXT,
+      cover_image_url TEXT,
+      banner_image_url TEXT,
+      season TEXT,
+      season_year INTEGER,
+      status TEXT,
+      episodes INTEGER,
+      duration INTEGER,
+      next_airing_at TEXT,
+      anime_channel_id TEXT,
+      anime_channel_message_id TEXT,
+      thread_id TEXT,
+      thread_card_message_id TEXT,
+      has_spoiler_reviews INTEGER NOT NULL DEFAULT 0,
+      created_by_user_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(guild_id, provider, provider_media_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_anime_entries_guild_message
+      ON anime_entries (guild_id, anime_channel_message_id);
+    CREATE INDEX IF NOT EXISTS idx_anime_entries_guild_thread
+      ON anime_entries (guild_id, thread_id);
+    CREATE INDEX IF NOT EXISTS idx_anime_entries_guild_title
+      ON anime_entries (guild_id, title_user_preferred, title_romaji, title_native, title_english);
+
+    CREATE TABLE IF NOT EXISTS anime_cast_cache (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      anime_entry_id INTEGER NOT NULL,
+      character_name TEXT,
+      character_name_native TEXT,
+      character_image_url TEXT,
+      voice_actor_name TEXT,
+      voice_actor_language TEXT,
+      voice_actor_image_url TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_anime_cast_cache_entry
+      ON anime_cast_cache (anime_entry_id, sort_order);
+
+    CREATE TABLE IF NOT EXISTS anime_user_status (
+      guild_id TEXT NOT NULL,
+      anime_entry_id INTEGER NOT NULL,
+      user_id TEXT NOT NULL,
+      interested INTEGER NOT NULL DEFAULT 0,
+      watched INTEGER NOT NULL DEFAULT 0,
+      interested_at TEXT,
+      watched_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, anime_entry_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_anime_user_status_user
+      ON anime_user_status (guild_id, user_id);
+
+    CREATE TABLE IF NOT EXISTS anime_reviews (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      anime_entry_id INTEGER NOT NULL,
+      user_id TEXT NOT NULL,
+      review_text TEXT NOT NULL,
+      spoiler INTEGER NOT NULL DEFAULT 0,
+      source_channel_id TEXT,
+      source_message_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(guild_id, anime_entry_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_anime_reviews_entry
+      ON anime_reviews (guild_id, anime_entry_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_anime_reviews_user
+      ON anime_reviews (guild_id, user_id);
+
+    CREATE TABLE IF NOT EXISTS anime_review_roles (
+      guild_id TEXT NOT NULL,
+      threshold INTEGER NOT NULL,
+      role_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, threshold)
+    );
+
     CREATE TABLE IF NOT EXISTS user_llm_memories (
       guild_id TEXT NOT NULL,
       user_id TEXT NOT NULL,

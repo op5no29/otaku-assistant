@@ -9,6 +9,7 @@ const { applyQuestionStatusTag } = require('../questionResolver/threadTags');
 const { getRecentArchivedMessages } = require('../messageArchive');
 const { getMessageJumpUrl } = require('../../services/discordLinks');
 const { parseRelayHashtagPrefixes } = require('../../utils/text');
+const { handleAnimeHashtagPost } = require('../anime/hashtagIntegration');
 
 function buildQuestionGuideMessage(timelineMessageUrl = null) {
   return [
@@ -1754,6 +1755,20 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
       } finally {
         message.client.timelineRelayMessageInFlight.delete(relayInFlightKey);
       }
+    }
+
+    if (globalMatches.size > 0) {
+      void handleAnimeHashtagPost(message, {
+        matchedRouteKeys: Array.from(globalMatches.keys()),
+        cleanedContent: post.content,
+        displayHashtags: post.displayBotHashtags
+      }).catch((error) => {
+        logger.warn('anime hashtag integration failed', {
+          sourceMessageId: message.id,
+          sourceChannelId,
+          error: error.message
+        });
+      });
     }
   } finally {
     await cleanup();

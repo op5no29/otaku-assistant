@@ -176,6 +176,54 @@ function ensureIntroDmConfig(value, introChannelId = '') {
   };
 }
 
+function ensureAnimeConfig(value) {
+  const defaultReviewRoles = [
+    { threshold: 10, roleId: null },
+    { threshold: 20, roleId: null },
+    { threshold: 50, roleId: null },
+    { threshold: 100, roleId: null },
+    { threshold: 300, roleId: null },
+    { threshold: 500, roleId: null }
+  ];
+
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      enabled: true,
+      provider: 'anilist',
+      channelId: '1504329024460296232',
+      autoPostOnCastLookup: true,
+      interestEmoji: '👀',
+      watchedEmoji: '✅',
+      maxCastInCard: 5,
+      maxReviewsInCard: 5,
+      indexPageSize: 25,
+      apiTimeoutMs: 15_000,
+      apiCacheTtlHours: 24,
+      reviewRoles: defaultReviewRoles
+    };
+  }
+
+  return {
+    enabled: value.enabled !== false,
+    provider: String(value.provider || 'anilist'),
+    channelId: String(value.channelId || '1504329024460296232'),
+    autoPostOnCastLookup: value.autoPostOnCastLookup !== false,
+    interestEmoji: String(value.interestEmoji || '👀'),
+    watchedEmoji: String(value.watchedEmoji || '✅'),
+    maxCastInCard: Number(value.maxCastInCard ?? 5),
+    maxReviewsInCard: Number(value.maxReviewsInCard ?? 5),
+    indexPageSize: Number(value.indexPageSize ?? 25),
+    apiTimeoutMs: Number(value.apiTimeoutMs ?? 15_000),
+    apiCacheTtlHours: Number(value.apiCacheTtlHours ?? 24),
+    reviewRoles: Array.isArray(value.reviewRoles) && value.reviewRoles.length
+      ? value.reviewRoles.map((entry) => ({
+          threshold: Number(entry?.threshold ?? 0),
+          roleId: entry?.roleId ? String(entry.roleId) : null
+        }))
+      : defaultReviewRoles
+  };
+}
+
 function loadConfig(configPath) {
   if (!process.env.DISCORD_TOKEN) {
     throw new Error('DISCORD_TOKEN is missing in .env');
@@ -272,6 +320,7 @@ function loadConfig(configPath) {
       moderatorRoleIds: ensureArray(parsed.questions?.moderatorRoleIds || [], 'questions.moderatorRoleIds')
     },
     introDm: ensureIntroDmConfig(parsed.introDm, parsed.introChannelId),
+    anime: ensureAnimeConfig(parsed.anime),
     ops: ensureOpsConfig(parsed.ops),
     questionForumTags: ensureTagMap(parsed.questionForumTags, 'questionForumTags'),
     botHashtagRoutes: ensureBotHashtagRoutes(parsed.botHashtagRoutes, 'botHashtagRoutes'),

@@ -1,5 +1,6 @@
 const { handleWelcomeReactionSetup } = require('../modules/welcomeReactions');
 const { handleIntroReactionSetup } = require('../modules/introReactions');
+const { handleAnimeReactionAdd } = require('../modules/anime');
 
 module.exports = {
   async execute(reaction, user) {
@@ -20,6 +21,17 @@ module.exports = {
       await handleIntroReactionSetup(reaction, user);
     } catch (error) {
       client?.logger?.error?.('Failed to handle intro messageReactionAdd', {
+        messageId: reaction.message?.id || null,
+        channelId: reaction.message?.channelId || null,
+        userId: user?.id || null,
+        error: error.message
+      });
+    }
+
+    try {
+      await handleAnimeReactionAdd(reaction, user);
+    } catch (error) {
+      client?.logger?.error?.('Failed to handle anime messageReactionAdd', {
         messageId: reaction.message?.id || null,
         channelId: reaction.message?.channelId || null,
         userId: user?.id || null,

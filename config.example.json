@@ -103,6 +103,27 @@
     "maxLlmReplies": 3,
     "llmRepliesEnabled": false
   },
+  "anime": {
+    "enabled": true,
+    "provider": "anilist",
+    "channelId": "YOUR_ANIME_CHANNEL_ID",
+    "autoPostOnCastLookup": true,
+    "interestEmoji": "👀",
+    "watchedEmoji": "✅",
+    "maxCastInCard": 5,
+    "maxReviewsInCard": 5,
+    "indexPageSize": 25,
+    "apiTimeoutMs": 15000,
+    "apiCacheTtlHours": 24,
+    "reviewRoles": [
+      { "threshold": 10, "roleId": null },
+      { "threshold": 20, "roleId": null },
+      { "threshold": 50, "roleId": null },
+      { "threshold": 100, "roleId": null },
+      { "threshold": 300, "roleId": null },
+      { "threshold": 500, "roleId": null }
+    ]
+  },
   "ops": {
     "logChannelId": "YOUR_OPS_LOG_CHANNEL_ID",
     "developerPortalUrl": "https://discord.com/developers/applications/YOUR_APPLICATION_ID/bot",

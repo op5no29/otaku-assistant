@@ -1030,6 +1030,471 @@ function createDatabase(databasePath) {
             AND ip.intro_channel_id = ?
         )
     `),
+    upsertAnimeEntry: sqlite.prepare(`
+      INSERT INTO anime_entries (
+        guild_id,
+        provider,
+        provider_media_id,
+        title_native,
+        title_romaji,
+        title_english,
+        title_user_preferred,
+        aliases_json,
+        description,
+        site_url,
+        official_site_url,
+        cover_image_url,
+        banner_image_url,
+        season,
+        season_year,
+        status,
+        episodes,
+        duration,
+        next_airing_at,
+        anime_channel_id,
+        anime_channel_message_id,
+        thread_id,
+        thread_card_message_id,
+        has_spoiler_reviews,
+        created_by_user_id,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, provider, provider_media_id) DO UPDATE SET
+        title_native = excluded.title_native,
+        title_romaji = excluded.title_romaji,
+        title_english = excluded.title_english,
+        title_user_preferred = excluded.title_user_preferred,
+        aliases_json = excluded.aliases_json,
+        description = excluded.description,
+        site_url = excluded.site_url,
+        official_site_url = excluded.official_site_url,
+        cover_image_url = excluded.cover_image_url,
+        banner_image_url = excluded.banner_image_url,
+        season = excluded.season,
+        season_year = excluded.season_year,
+        status = excluded.status,
+        episodes = excluded.episodes,
+        duration = excluded.duration,
+        next_airing_at = excluded.next_airing_at,
+        anime_channel_id = COALESCE(excluded.anime_channel_id, anime_entries.anime_channel_id),
+        anime_channel_message_id = COALESCE(excluded.anime_channel_message_id, anime_entries.anime_channel_message_id),
+        thread_id = COALESCE(excluded.thread_id, anime_entries.thread_id),
+        thread_card_message_id = COALESCE(excluded.thread_card_message_id, anime_entries.thread_card_message_id),
+        has_spoiler_reviews = excluded.has_spoiler_reviews,
+        created_by_user_id = COALESCE(excluded.created_by_user_id, anime_entries.created_by_user_id),
+        updated_at = excluded.updated_at
+    `),
+    getAnimeEntryByProviderMediaId: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        provider,
+        provider_media_id AS providerMediaId,
+        title_native AS titleNative,
+        title_romaji AS titleRomaji,
+        title_english AS titleEnglish,
+        title_user_preferred AS titleUserPreferred,
+        aliases_json AS aliasesJson,
+        description,
+        site_url AS siteUrl,
+        official_site_url AS officialSiteUrl,
+        cover_image_url AS coverImageUrl,
+        banner_image_url AS bannerImageUrl,
+        season,
+        season_year AS seasonYear,
+        status,
+        episodes,
+        duration,
+        next_airing_at AS nextAiringAt,
+        anime_channel_id AS animeChannelId,
+        anime_channel_message_id AS animeChannelMessageId,
+        thread_id AS threadId,
+        thread_card_message_id AS threadCardMessageId,
+        has_spoiler_reviews AS hasSpoilerReviews,
+        created_by_user_id AS createdByUserId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM anime_entries
+      WHERE guild_id = ? AND provider = ? AND provider_media_id = ?
+      LIMIT 1
+    `),
+    getAnimeEntryById: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        provider,
+        provider_media_id AS providerMediaId,
+        title_native AS titleNative,
+        title_romaji AS titleRomaji,
+        title_english AS titleEnglish,
+        title_user_preferred AS titleUserPreferred,
+        aliases_json AS aliasesJson,
+        description,
+        site_url AS siteUrl,
+        official_site_url AS officialSiteUrl,
+        cover_image_url AS coverImageUrl,
+        banner_image_url AS bannerImageUrl,
+        season,
+        season_year AS seasonYear,
+        status,
+        episodes,
+        duration,
+        next_airing_at AS nextAiringAt,
+        anime_channel_id AS animeChannelId,
+        anime_channel_message_id AS animeChannelMessageId,
+        thread_id AS threadId,
+        thread_card_message_id AS threadCardMessageId,
+        has_spoiler_reviews AS hasSpoilerReviews,
+        created_by_user_id AS createdByUserId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM anime_entries
+      WHERE id = ?
+      LIMIT 1
+    `),
+    getAnimeEntryByThreadId: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        provider,
+        provider_media_id AS providerMediaId,
+        title_native AS titleNative,
+        title_romaji AS titleRomaji,
+        title_english AS titleEnglish,
+        title_user_preferred AS titleUserPreferred,
+        aliases_json AS aliasesJson,
+        description,
+        site_url AS siteUrl,
+        official_site_url AS officialSiteUrl,
+        cover_image_url AS coverImageUrl,
+        banner_image_url AS bannerImageUrl,
+        season,
+        season_year AS seasonYear,
+        status,
+        episodes,
+        duration,
+        next_airing_at AS nextAiringAt,
+        anime_channel_id AS animeChannelId,
+        anime_channel_message_id AS animeChannelMessageId,
+        thread_id AS threadId,
+        thread_card_message_id AS threadCardMessageId,
+        has_spoiler_reviews AS hasSpoilerReviews,
+        created_by_user_id AS createdByUserId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM anime_entries
+      WHERE guild_id = ? AND thread_id = ?
+      LIMIT 1
+    `),
+    getAnimeEntryByChannelMessageId: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        provider,
+        provider_media_id AS providerMediaId,
+        title_native AS titleNative,
+        title_romaji AS titleRomaji,
+        title_english AS titleEnglish,
+        title_user_preferred AS titleUserPreferred,
+        aliases_json AS aliasesJson,
+        description,
+        site_url AS siteUrl,
+        official_site_url AS officialSiteUrl,
+        cover_image_url AS coverImageUrl,
+        banner_image_url AS bannerImageUrl,
+        season,
+        season_year AS seasonYear,
+        status,
+        episodes,
+        duration,
+        next_airing_at AS nextAiringAt,
+        anime_channel_id AS animeChannelId,
+        anime_channel_message_id AS animeChannelMessageId,
+        thread_id AS threadId,
+        thread_card_message_id AS threadCardMessageId,
+        has_spoiler_reviews AS hasSpoilerReviews,
+        created_by_user_id AS createdByUserId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM anime_entries
+      WHERE guild_id = ? AND anime_channel_message_id = ?
+      LIMIT 1
+    `),
+    listAnimeEntriesPage: sqlite.prepare(`
+      SELECT
+        e.id,
+        e.guild_id AS guildId,
+        e.provider,
+        e.provider_media_id AS providerMediaId,
+        e.title_native AS titleNative,
+        e.title_romaji AS titleRomaji,
+        e.title_english AS titleEnglish,
+        e.title_user_preferred AS titleUserPreferred,
+        e.aliases_json AS aliasesJson,
+        e.description,
+        e.site_url AS siteUrl,
+        e.official_site_url AS officialSiteUrl,
+        e.cover_image_url AS coverImageUrl,
+        e.banner_image_url AS bannerImageUrl,
+        e.season,
+        e.season_year AS seasonYear,
+        e.status,
+        e.episodes,
+        e.duration,
+        e.next_airing_at AS nextAiringAt,
+        e.anime_channel_id AS animeChannelId,
+        e.anime_channel_message_id AS animeChannelMessageId,
+        e.thread_id AS threadId,
+        e.thread_card_message_id AS threadCardMessageId,
+        e.has_spoiler_reviews AS hasSpoilerReviews,
+        e.created_by_user_id AS createdByUserId,
+        e.created_at AS createdAt,
+        e.updated_at AS updatedAt
+      FROM anime_entries e
+      WHERE e.guild_id = ?
+      ORDER BY COALESCE(e.season_year, 0) DESC, COALESCE(e.title_user_preferred, e.title_romaji, e.title_native, e.title_english) ASC
+      LIMIT ? OFFSET ?
+    `),
+    countAnimeEntries: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM anime_entries
+      WHERE guild_id = ?
+    `),
+    searchAnimeEntriesLocal: sqlite.prepare(`
+      SELECT
+        e.id,
+        e.guild_id AS guildId,
+        e.provider,
+        e.provider_media_id AS providerMediaId,
+        e.title_native AS titleNative,
+        e.title_romaji AS titleRomaji,
+        e.title_english AS titleEnglish,
+        e.title_user_preferred AS titleUserPreferred,
+        e.aliases_json AS aliasesJson,
+        e.description,
+        e.site_url AS siteUrl,
+        e.official_site_url AS officialSiteUrl,
+        e.cover_image_url AS coverImageUrl,
+        e.banner_image_url AS bannerImageUrl,
+        e.season,
+        e.season_year AS seasonYear,
+        e.status,
+        e.episodes,
+        e.duration,
+        e.next_airing_at AS nextAiringAt,
+        e.anime_channel_id AS animeChannelId,
+        e.anime_channel_message_id AS animeChannelMessageId,
+        e.thread_id AS threadId,
+        e.thread_card_message_id AS threadCardMessageId,
+        e.has_spoiler_reviews AS hasSpoilerReviews,
+        e.created_by_user_id AS createdByUserId,
+        e.created_at AS createdAt,
+        e.updated_at AS updatedAt
+      FROM anime_entries e
+      WHERE e.guild_id = ?
+        AND (
+          LOWER(COALESCE(e.title_user_preferred, '')) LIKE ?
+          OR LOWER(COALESCE(e.title_romaji, '')) LIKE ?
+          OR LOWER(COALESCE(e.title_native, '')) LIKE ?
+          OR LOWER(COALESCE(e.title_english, '')) LIKE ?
+          OR LOWER(COALESCE(e.aliases_json, '')) LIKE ?
+        )
+      ORDER BY COALESCE(e.updated_at, e.created_at) DESC
+      LIMIT ?
+    `),
+    replaceAnimeEntrySpoilerFlag: sqlite.prepare(`
+      UPDATE anime_entries
+      SET has_spoiler_reviews = ?,
+          updated_at = ?
+      WHERE id = ?
+    `),
+    updateAnimeEntryMessageBindings: sqlite.prepare(`
+      UPDATE anime_entries
+      SET anime_channel_id = COALESCE(?, anime_channel_id),
+          anime_channel_message_id = COALESCE(?, anime_channel_message_id),
+          thread_id = COALESCE(?, thread_id),
+          thread_card_message_id = COALESCE(?, thread_card_message_id),
+          updated_at = ?
+      WHERE id = ?
+    `),
+    deleteAnimeCastByEntryId: sqlite.prepare(`
+      DELETE FROM anime_cast_cache
+      WHERE anime_entry_id = ?
+    `),
+    insertAnimeCastRow: sqlite.prepare(`
+      INSERT INTO anime_cast_cache (
+        anime_entry_id,
+        character_name,
+        character_name_native,
+        character_image_url,
+        voice_actor_name,
+        voice_actor_language,
+        voice_actor_image_url,
+        sort_order,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `),
+    listAnimeCastByEntryId: sqlite.prepare(`
+      SELECT
+        id,
+        anime_entry_id AS animeEntryId,
+        character_name AS characterName,
+        character_name_native AS characterNameNative,
+        character_image_url AS characterImageUrl,
+        voice_actor_name AS voiceActorName,
+        voice_actor_language AS voiceActorLanguage,
+        voice_actor_image_url AS voiceActorImageUrl,
+        sort_order AS sortOrder,
+        created_at AS createdAt
+      FROM anime_cast_cache
+      WHERE anime_entry_id = ?
+      ORDER BY sort_order ASC, id ASC
+    `),
+    upsertAnimeUserStatus: sqlite.prepare(`
+      INSERT INTO anime_user_status (
+        guild_id,
+        anime_entry_id,
+        user_id,
+        interested,
+        watched,
+        interested_at,
+        watched_at,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, anime_entry_id, user_id) DO UPDATE SET
+        interested = excluded.interested,
+        watched = excluded.watched,
+        interested_at = excluded.interested_at,
+        watched_at = excluded.watched_at,
+        updated_at = excluded.updated_at
+    `),
+    getAnimeUserStatus: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        anime_entry_id AS animeEntryId,
+        user_id AS userId,
+        interested,
+        watched,
+        interested_at AS interestedAt,
+        watched_at AS watchedAt,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM anime_user_status
+      WHERE guild_id = ? AND anime_entry_id = ? AND user_id = ?
+      LIMIT 1
+    `),
+    countAnimeInterestedUsers: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM anime_user_status
+      WHERE guild_id = ? AND anime_entry_id = ? AND interested = 1
+    `),
+    countAnimeWatchedUsers: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM anime_user_status
+      WHERE guild_id = ? AND anime_entry_id = ? AND watched = 1
+    `),
+    countAnimeUserInterested: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM anime_user_status
+      WHERE guild_id = ? AND user_id = ? AND interested = 1
+    `),
+    countAnimeUserWatched: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM anime_user_status
+      WHERE guild_id = ? AND user_id = ? AND watched = 1
+    `),
+    upsertAnimeReview: sqlite.prepare(`
+      INSERT INTO anime_reviews (
+        guild_id,
+        anime_entry_id,
+        user_id,
+        review_text,
+        spoiler,
+        source_channel_id,
+        source_message_id,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, anime_entry_id, user_id) DO UPDATE SET
+        review_text = excluded.review_text,
+        spoiler = excluded.spoiler,
+        source_channel_id = excluded.source_channel_id,
+        source_message_id = excluded.source_message_id,
+        updated_at = excluded.updated_at
+    `),
+    getAnimeReviewByUser: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        anime_entry_id AS animeEntryId,
+        user_id AS userId,
+        review_text AS reviewText,
+        spoiler,
+        source_channel_id AS sourceChannelId,
+        source_message_id AS sourceMessageId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM anime_reviews
+      WHERE guild_id = ? AND anime_entry_id = ? AND user_id = ?
+      LIMIT 1
+    `),
+    listAnimeReviewsByEntryId: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        anime_entry_id AS animeEntryId,
+        user_id AS userId,
+        review_text AS reviewText,
+        spoiler,
+        source_channel_id AS sourceChannelId,
+        source_message_id AS sourceMessageId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM anime_reviews
+      WHERE guild_id = ? AND anime_entry_id = ?
+      ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, id DESC
+      LIMIT ?
+    `),
+    countAnimeReviewsByEntryId: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM anime_reviews
+      WHERE guild_id = ? AND anime_entry_id = ?
+    `),
+    countAnimeSpoilerReviewsByEntryId: sqlite.prepare(`
+      SELECT COUNT(*) AS count
+      FROM anime_reviews
+      WHERE guild_id = ? AND anime_entry_id = ? AND spoiler = 1
+    `),
+    countAnimeReviewedDistinctByUser: sqlite.prepare(`
+      SELECT COUNT(DISTINCT anime_entry_id) AS count
+      FROM anime_reviews
+      WHERE guild_id = ? AND user_id = ?
+    `),
+    upsertAnimeReviewRole: sqlite.prepare(`
+      INSERT INTO anime_review_roles (
+        guild_id,
+        threshold,
+        role_id,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, threshold) DO UPDATE SET
+        role_id = excluded.role_id,
+        updated_at = excluded.updated_at
+    `),
+    listAnimeReviewRoles: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        threshold,
+        role_id AS roleId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM anime_review_roles
+      WHERE guild_id = ?
+      ORDER BY threshold ASC
+    `),
     getTimelineMergeState: sqlite.prepare(`
       SELECT
         guild_id AS guildId,
@@ -1594,6 +2059,162 @@ function createDatabase(databasePath) {
       },
       countWithoutIntro(guildId, introChannelId) {
         return Number(statements.countGuildMembersWithoutIntro.get(guildId, introChannelId)?.count || 0);
+      }
+    },
+    anime: {
+      upsertEntry(record) {
+        const now = new Date().toISOString();
+        statements.upsertAnimeEntry.run(
+          record.guildId,
+          record.provider,
+          record.providerMediaId,
+          record.titleNative || null,
+          record.titleRomaji || null,
+          record.titleEnglish || null,
+          record.titleUserPreferred || null,
+          record.aliasesJson || null,
+          record.description || null,
+          record.siteUrl || null,
+          record.officialSiteUrl || null,
+          record.coverImageUrl || null,
+          record.bannerImageUrl || null,
+          record.season || null,
+          Number.isFinite(record.seasonYear) ? record.seasonYear : null,
+          record.status || null,
+          Number.isFinite(record.episodes) ? record.episodes : null,
+          Number.isFinite(record.duration) ? record.duration : null,
+          record.nextAiringAt || null,
+          record.animeChannelId || null,
+          record.animeChannelMessageId || null,
+          record.threadId || null,
+          record.threadCardMessageId || null,
+          record.hasSpoilerReviews ? 1 : 0,
+          record.createdByUserId || null,
+          record.createdAt || now,
+          now
+        );
+      },
+      getEntryByProviderMediaId(guildId, provider, providerMediaId) {
+        return statements.getAnimeEntryByProviderMediaId.get(guildId, provider, providerMediaId) || null;
+      },
+      getEntryById(id) {
+        return statements.getAnimeEntryById.get(id) || null;
+      },
+      getEntryByThreadId(guildId, threadId) {
+        return statements.getAnimeEntryByThreadId.get(guildId, threadId) || null;
+      },
+      getEntryByChannelMessageId(guildId, messageId) {
+        return statements.getAnimeEntryByChannelMessageId.get(guildId, messageId) || null;
+      },
+      updateBindings(id, { animeChannelId = null, animeChannelMessageId = null, threadId = null, threadCardMessageId = null }) {
+        statements.updateAnimeEntryMessageBindings.run(
+          animeChannelId,
+          animeChannelMessageId,
+          threadId,
+          threadCardMessageId,
+          new Date().toISOString(),
+          id
+        );
+      },
+      updateSpoilerFlag(id, hasSpoilerReviews) {
+        statements.replaceAnimeEntrySpoilerFlag.run(hasSpoilerReviews ? 1 : 0, new Date().toISOString(), id);
+      },
+      listEntriesPage(guildId, limit = 25, offset = 0) {
+        return statements.listAnimeEntriesPage.all(guildId, limit, offset);
+      },
+      countEntries(guildId) {
+        return Number(statements.countAnimeEntries.get(guildId)?.count || 0);
+      },
+      searchEntries(guildId, query, limit = 10) {
+        const like = `%${String(query || '').toLowerCase()}%`;
+        return statements.searchAnimeEntriesLocal.all(guildId, like, like, like, like, like, limit);
+      },
+      replaceCastCache(animeEntryId, rows = []) {
+        const transaction = sqlite.transaction((entryId, castRows) => {
+          statements.deleteAnimeCastByEntryId.run(entryId);
+          for (const row of castRows) {
+            statements.insertAnimeCastRow.run(
+              entryId,
+              row.characterName || null,
+              row.characterNameNative || null,
+              row.characterImageUrl || null,
+              row.voiceActorName || null,
+              row.voiceActorLanguage || null,
+              row.voiceActorImageUrl || null,
+              row.sortOrder || 0,
+              new Date().toISOString()
+            );
+          }
+        });
+        transaction(animeEntryId, rows);
+      },
+      listCast(animeEntryId) {
+        return statements.listAnimeCastByEntryId.all(animeEntryId);
+      },
+      upsertUserStatus({ guildId, animeEntryId, userId, interested = 0, watched = 0, interestedAt = null, watchedAt = null }) {
+        const now = new Date().toISOString();
+        statements.upsertAnimeUserStatus.run(
+          guildId,
+          animeEntryId,
+          userId,
+          interested ? 1 : 0,
+          watched ? 1 : 0,
+          interestedAt,
+          watchedAt,
+          now,
+          now
+        );
+      },
+      getUserStatus(guildId, animeEntryId, userId) {
+        return statements.getAnimeUserStatus.get(guildId, animeEntryId, userId) || null;
+      },
+      countInterested(guildId, animeEntryId) {
+        return Number(statements.countAnimeInterestedUsers.get(guildId, animeEntryId)?.count || 0);
+      },
+      countWatched(guildId, animeEntryId) {
+        return Number(statements.countAnimeWatchedUsers.get(guildId, animeEntryId)?.count || 0);
+      },
+      countUserInterested(guildId, userId) {
+        return Number(statements.countAnimeUserInterested.get(guildId, userId)?.count || 0);
+      },
+      countUserWatched(guildId, userId) {
+        return Number(statements.countAnimeUserWatched.get(guildId, userId)?.count || 0);
+      },
+      upsertReview({ guildId, animeEntryId, userId, reviewText, spoiler = false, sourceChannelId = null, sourceMessageId = null }) {
+        const now = new Date().toISOString();
+        statements.upsertAnimeReview.run(
+          guildId,
+          animeEntryId,
+          userId,
+          reviewText,
+          spoiler ? 1 : 0,
+          sourceChannelId,
+          sourceMessageId,
+          now,
+          now
+        );
+      },
+      getReviewByUser(guildId, animeEntryId, userId) {
+        return statements.getAnimeReviewByUser.get(guildId, animeEntryId, userId) || null;
+      },
+      listReviews(guildId, animeEntryId, limit = 20) {
+        return statements.listAnimeReviewsByEntryId.all(guildId, animeEntryId, limit);
+      },
+      countReviews(guildId, animeEntryId) {
+        return Number(statements.countAnimeReviewsByEntryId.get(guildId, animeEntryId)?.count || 0);
+      },
+      countSpoilerReviews(guildId, animeEntryId) {
+        return Number(statements.countAnimeSpoilerReviewsByEntryId.get(guildId, animeEntryId)?.count || 0);
+      },
+      countReviewedByUser(guildId, userId) {
+        return Number(statements.countAnimeReviewedDistinctByUser.get(guildId, userId)?.count || 0);
+      },
+      upsertReviewRole({ guildId, threshold, roleId = null }) {
+        const now = new Date().toISOString();
+        statements.upsertAnimeReviewRole.run(guildId, threshold, roleId, now, now);
+      },
+      listReviewRoles(guildId) {
+        return statements.listAnimeReviewRoles.all(guildId);
       }
     },
     timelineMerge: {
