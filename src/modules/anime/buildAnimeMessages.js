@@ -3,8 +3,6 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ContainerBuilder,
-  MediaGalleryBuilder,
-  MediaGalleryItemBuilder,
   MessageFlags,
   SectionBuilder,
   TextDisplayBuilder,
@@ -28,6 +26,29 @@ function getExternalLinkLabel(entry) {
 
 function getPreferredAnimeDisplayTitle(entry) {
   return entry.titleNative || entry.titleUserPreferred || entry.titleRomaji || entry.titleEnglish || 'タイトル不明';
+}
+
+function isUsableImageUrl(value) {
+  const text = String(value || '').trim();
+  if (!/^https:\/\//iu.test(text)) {
+    return false;
+  }
+  if (/\.svg(?:$|\?)/iu.test(text)) {
+    return false;
+  }
+  return true;
+}
+
+function selectAnimeImageUrls(entry) {
+  const coverImageUrl = isUsableImageUrl(entry?.coverImageUrl) ? entry.coverImageUrl : null;
+  const bannerImageUrl = isUsableImageUrl(entry?.bannerImageUrl) ? entry.bannerImageUrl : null;
+  const thumbnailUrl = coverImageUrl || bannerImageUrl || null;
+  return {
+    coverImageUrl,
+    bannerImageUrl,
+    thumbnailUrl,
+    selectedImageSource: thumbnailUrl === coverImageUrl ? 'cover' : (thumbnailUrl === bannerImageUrl ? 'banner' : 'none')
+  };
 }
 
 function formatSeason(entry) {
@@ -106,28 +127,18 @@ function buildLinkRows({ threadUrl, siteUrl, parentUrl, provider = null }) {
   return [new ActionRowBuilder().addComponents(...buttons.slice(0, 5))];
 }
 
-function addPoster(container, entry) {
-  const imageUrl = entry.bannerImageUrl || entry.coverImageUrl;
-  if (!imageUrl) {
-    return;
-  }
-  const gallery = new MediaGalleryBuilder().addItems(
-    new MediaGalleryItemBuilder().setURL(imageUrl)
-  );
-  container.addMediaGalleryComponents(gallery);
-}
-
 function buildAnimeChannelCard(entry, stats, cast = [], latestReviews = []) {
   const container = createContainer(stats?.hasSpoilerReviews ? 0xfca5a5 : ANIME_PARENT_ACCENT);
+  const image = selectAnimeImageUrls(entry);
   const section = new SectionBuilder().addTextDisplayComponents(
     new TextDisplayBuilder().setContent(`### ${getPreferredAnimeDisplayTitle(entry)}`),
     new TextDisplayBuilder().setContent(buildMetadataLines(entry, stats).join('\n'))
   );
 
-  if (entry.coverImageUrl) {
+  if (image.thumbnailUrl) {
     section.setThumbnailAccessory(
       new ThumbnailBuilder()
-        .setURL(entry.coverImageUrl)
+        .setURL(image.thumbnailUrl)
         .setDescription(`${getPreferredAnimeDisplayTitle(entry)} のカバー`)
     );
   }
@@ -148,7 +159,6 @@ function buildAnimeChannelCard(entry, stats, cast = [], latestReviews = []) {
       new TextDisplayBuilder().setContent('⚠️ この作品のスレッドにはネタバレ感想が含まれています。')
     );
   }
-  addPoster(container, entry);
   for (const row of buildLinkRows({
     threadUrl: stats?.threadUrl || null,
     siteUrl: entry.siteUrl || null,
@@ -301,5 +311,7 @@ module.exports = {
   buildAnimeThreadHeaderCard,
   buildAnimeLinks,
   buildReviewPreview,
-  getPreferredAnimeDisplayTitle
+  getPreferredAnimeDisplayTitle,
+  selectAnimeImageUrls,
+  isUsableImageUrl
 };

@@ -15,12 +15,14 @@ const {
 } = require('./annictClient');
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { rankResolvedWorks, normalizeSearchText, extractSearchAliases } = require('./search');
+const { registerDeletableMessage } = require('../deletableMessages');
 const {
   buildAnimeChannelCard,
   buildAnimeReviewUiCard,
   buildAnimeLinks,
   buildReviewPreview,
-  getPreferredAnimeDisplayTitle
+  getPreferredAnimeDisplayTitle,
+  selectAnimeImageUrls
 } = require('./buildAnimeMessages');
 const { buildAnimeRoleAwardDm } = require('./animeQuoteMessages');
 
@@ -317,6 +319,16 @@ async function updateAnimeChannelCard(client, entry) {
   const stats = await getAnimeStats(client, normalizedEntry);
   const cast = client.db.anime.listCast(normalizedEntry.id).slice(0, client.appConfig.anime.maxCastInCard);
   const latestReviews = await getLatestReviewPreviews(client, normalizedEntry, client.appConfig.anime.maxReviewsInCard);
+  const imageChoice = selectAnimeImageUrls(normalizedEntry);
+  client.logger.info('anime image candidates', {
+    animeEntryId: normalizedEntry.id,
+    coverImageUrl: normalizedEntry.coverImageUrl || null,
+    bannerImageUrl: normalizedEntry.bannerImageUrl || null,
+    thumbnailUrl: imageChoice.thumbnailUrl || null,
+    selectedImageSource: imageChoice.selectedImageSource,
+    selectedImageUrl: imageChoice.thumbnailUrl || null,
+    imageOmitted: !imageChoice.thumbnailUrl
+  });
   const payload = buildAnimeChannelCard(normalizedEntry, stats, cast, latestReviews);
   await message.edit(payload);
   client.logger.info('anime parent card updated', {
@@ -474,6 +486,12 @@ async function updateAnimeReviewCard(client, entry) {
 
 async function postAnimeToChannel(guild, media, createdByUserId, additionalAliases = []) {
   const client = guild.client;
+  client.logger.info('anime post started', {
+    guildId: guild.id,
+    provider: media.provider || getConfiguredProvider(client),
+    providerMediaId: media.providerMediaId || media.id,
+    title: buildTitle(media)
+  });
   const entry = await ensureAnimeEntryFromAnilistMedia(guild, media, createdByUserId, additionalAliases);
   if (entry.animeChannelMessageId) {
     if (entry.threadId) {
@@ -494,35 +512,111 @@ async function postAnimeToChannel(guild, media, createdByUserId, additionalAlias
   }
 
   const stats = await getAnimeStats(client, entry);
-  const sentMessage = await channel.send(buildAnimeChannelCard(entry, stats));
-  client.db.anime.updateBindings(entry.id, {
-    animeChannelId,
-    animeChannelMessageId: sentMessage.id
-  });
-  await sentMessage.react(client.appConfig.anime.interestEmoji).catch(() => null);
-  await sentMessage.react(client.appConfig.anime.watchedEmoji).catch(() => null);
-  client.logger.info('anime channel card sent', {
-    animeEntryId: entry.id,
-    messageId: sentMessage.id,
-    channelId: animeChannelId
-  });
+  let sentMessage = null;
+  let thread = null;
+  try {
+    client.logger.info('anime parent card send started', {
+      animeEntryId: entry.id,
+      channelId: animeChannelId
+    });
+    try {
+      sentMessage = await channel.send(buildAnimeChannelCard(entry, stats));
+    } catch (error) {
+      client.logger.error('anime parent card send failed', {
+        animeEntryId: entry.id,
+        channelId: animeChannelId,
+        errorName: error?.name || null,
+        errorMessage: error?.message || null,
+        errorStack: error?.stack || null,
+        errorErrors: error?.errors || null,
+        errorJson: JSON.stringify(error, Object.getOwnPropertyNames(error || {}))
+      });
+      throw error;
+    }
+    client.db.anime.updateBindings(entry.id, {
+      animeChannelId,
+      animeChannelMessageId: sentMessage.id
+    });
+    await sentMessage.react(client.appConfig.anime.interestEmoji).catch(() => null);
+    await sentMessage.react(client.appConfig.anime.watchedEmoji).catch(() => null);
+    client.logger.info('anime channel card sent', {
+      animeEntryId: entry.id,
+      messageId: sentMessage.id,
+      channelId: animeChannelId
+    });
 
-  const refreshedEntry = normalizeEntry(client.db.anime.getEntryById(entry.id));
-  const thread = await createAnimeThread(sentMessage, refreshedEntry);
-  client.logger.info('anime thread created without extra header', {
-    animeEntryId: entry.id,
-    animeChannelMessageId: sentMessage.id,
-    threadId: thread.id
-  });
-  await updateAnimeReviewCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id)));
-  await updateAnimeChannelCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id)));
+    const refreshedEntry = normalizeEntry(client.db.anime.getEntryById(entry.id));
+    client.logger.info('anime thread create started', {
+      animeEntryId: entry.id,
+      animeChannelMessageId: sentMessage.id
+    });
+    try {
+      thread = await createAnimeThread(sentMessage, refreshedEntry);
+    } catch (error) {
+      client.logger.error('anime thread create failed', {
+        animeEntryId: entry.id,
+        animeChannelMessageId: sentMessage.id,
+        errorName: error?.name || null,
+        errorMessage: error?.message || null,
+        errorStack: error?.stack || null,
+        errorErrors: error?.errors || null,
+        errorJson: JSON.stringify(error, Object.getOwnPropertyNames(error || {}))
+      });
+      throw error;
+    }
+    client.logger.info('anime thread created without extra header', {
+      animeEntryId: entry.id,
+      animeChannelMessageId: sentMessage.id,
+      threadId: thread.id
+    });
+    await updateAnimeReviewCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id)));
+    await updateAnimeChannelCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id)));
 
-  return {
-    entry: normalizeEntry(client.db.anime.getEntryById(entry.id)),
-    created: true,
-    thread,
-    links: buildAnimeLinks(normalizeEntry(client.db.anime.getEntryById(entry.id)))
-  };
+    client.logger.info('anime registration completed', {
+      animeEntryId: entry.id,
+      animeChannelMessageId: sentMessage.id,
+      threadId: thread.id
+    });
+    return {
+      entry: normalizeEntry(client.db.anime.getEntryById(entry.id)),
+      created: true,
+      thread,
+      links: buildAnimeLinks(normalizeEntry(client.db.anime.getEntryById(entry.id)))
+    };
+  } catch (error) {
+    client.logger.error('anime registration failed', {
+      animeEntryId: entry.id,
+      providerMediaId: entry.providerMediaId,
+      errorName: error?.name || null,
+      errorMessage: error?.message || null,
+      errorStack: error?.stack || null,
+      errorErrors: error?.errors || null,
+      errorJson: JSON.stringify(error, Object.getOwnPropertyNames(error || {}))
+    });
+    if (thread) {
+      try {
+        await thread.delete('anime_registration_failed');
+      } catch {
+        try {
+          if (typeof thread.setArchived === 'function') {
+            await thread.setArchived(true, 'anime_registration_failed');
+          }
+          if (typeof thread.setLocked === 'function') {
+            await thread.setLocked(true, 'anime_registration_failed');
+          }
+        } catch {}
+      }
+    }
+    if (sentMessage) {
+      await sentMessage.delete().catch(() => null);
+    }
+    client.db.anime.deleteEntryCascade(entry.id);
+    client.logger.warn('anime registration cleanup after failure', {
+      animeEntryId: entry.id,
+      providerMediaId: entry.providerMediaId
+    });
+    throw error;
+  }
 }
 
 function getAnimeByThreadId(guildId, threadId, client) {
@@ -769,16 +863,19 @@ async function handleAnimeReactionAdd(reaction, user) {
     if (!promptState && entry.threadId) {
       const thread = await safeFetchChannel(client, entry.threadId);
       if (thread?.isTextBased?.()) {
-        await thread.send({
+        const promptMessage = await thread.send({
           content: `<@${user.id}> さんが「視聴済み」にしました。\n感想があれば、このスレッドで \`/anime review\` を使って投稿できます。`,
           allowedMentions: { parse: [], users: [user.id] }
         }).catch(() => null);
-        client.db.anime.upsertReviewPromptState({
-          guildId: message.guildId,
-          animeEntryId: entry.id,
-          userId: user.id,
-          promptType: REVIEW_PROMPT_TYPES.WATCHED
-        });
+        if (promptMessage) {
+          await registerDeletableMessage(promptMessage, user.id, 'anime_watched_prompt', 1000 * 60 * 60 * 24 * 30).catch(() => null);
+          client.db.anime.upsertReviewPromptState({
+            guildId: message.guildId,
+            animeEntryId: entry.id,
+            userId: user.id,
+            promptType: REVIEW_PROMPT_TYPES.WATCHED
+          });
+        }
       }
     }
   }
@@ -819,14 +916,32 @@ async function handleAnimeReactionRemove(reaction, user) {
 
 async function findRegisteredAnime(client, guildId, query, limit = 10) {
   const entries = client.db.anime.searchEntries(guildId, query, Math.max(limit, 25)).map(normalizeEntry);
-  return rankResolvedWorks(query, entries).map((row) => row.entry).slice(0, limit);
+  return rankResolvedWorks(query, entries)
+    .map((row) => row.entry)
+    .filter((entry) => entry.animeChannelMessageId && entry.threadId)
+    .slice(0, limit);
 }
 
 async function listAnimeIndex(client, guildId, page = 1) {
   const pageSize = Number(client.appConfig.anime.indexPageSize || 25);
   const safePage = Math.max(1, Number(page || 1));
-  const total = client.db.anime.countEntries(guildId);
-  const entries = client.db.anime.listEntriesPage(guildId, pageSize, (safePage - 1) * pageSize).map(normalizeEntry);
+  const allEntries = client.db.anime.listAllEntries(guildId).map(normalizeEntry);
+  const validEntries = [];
+  for (const entry of allEntries) {
+    if (entry.animeChannelMessageId && entry.threadId) {
+      validEntries.push(entry);
+      continue;
+    }
+    client.logger.warn('anime incomplete registration cleanup candidate', {
+      animeEntryId: entry.id,
+      animeChannelMessageId: entry.animeChannelMessageId || null,
+      threadId: entry.threadId || null,
+      reason: 'incomplete_registration'
+    });
+    client.db.anime.deleteEntryCascade(entry.id);
+  }
+  const total = validEntries.length;
+  const entries = validEntries.slice((safePage - 1) * pageSize, ((safePage - 1) * pageSize) + pageSize);
   return {
     page: safePage,
     pageSize,
@@ -896,6 +1011,16 @@ async function runAnimeOrphanScan(client) {
   const entries = client.db.anime.listAllEntries(guildId);
   for (const rawEntry of entries) {
     const entry = normalizeEntry(rawEntry);
+    if (!entry?.animeChannelMessageId || !entry?.threadId) {
+      client.logger.warn('anime incomplete entry found during orphan scan', {
+        animeEntryId: entry?.id || null,
+        animeChannelMessageId: entry?.animeChannelMessageId || null,
+        threadId: entry?.threadId || null,
+        reason: 'incomplete_registration'
+      });
+      client.db.anime.deleteEntryCascade(entry.id);
+      continue;
+    }
     if (!entry?.animeChannelId || !entry?.animeChannelMessageId) {
       continue;
     }

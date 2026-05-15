@@ -1669,6 +1669,21 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
     for (const target of destinationTargets) {
       const existingRelay = db.relays.getMessageRelayTarget(message.id, target.destinationChannelId);
       if (existingRelay?.relayedMessageId) {
+        if (isAnimeRouteMatched && String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
+          db.anime.upsertHashtagSource({
+            guildId: message.guildId,
+            sourceMessageId: message.id,
+            sourceChannelId: sourceChannelId,
+            sourceAuthorId: message.author?.id || null,
+            relayedTimelineMessageId: existingRelay.relayedMessageId,
+            relayedRouteMessageIdsJson: JSON.stringify({ [target.destinationChannelId]: existingRelay.relayedMessageId }),
+            cleanedContent: String(post.content || ''),
+            displayTagsJson: JSON.stringify(Array.isArray(post.displayBotHashtags) ? post.displayBotHashtags : []),
+            detectedCandidate: null,
+            animeEntryId: null,
+            status: 'pending'
+          });
+        }
         logger.info('Global hashtag relay skipped: destination already relayed', {
           sourceMessageId: message.id,
           destinationChannelId: target.destinationChannelId,

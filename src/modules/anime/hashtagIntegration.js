@@ -170,6 +170,8 @@ function stripNoiseTokens(value) {
       .replace(/\b\d+\s*期\b/giu, ' ')
       .replace(/\bSeason\s*\d+\b/giu, ' ')
       .replace(/\b\d+(?:st|nd|rd|th)\s+Season\b/giu, ' ')
+      .replace(/\b\d+(?:st|nd|rd|th)\s*season\b/giu, ' ')
+      .replace(/\b\d+\s*season\b/giu, ' ')
       .replace(/\bEpisode\b/giu, ' ')
       .replace(/\bEp\.\b/giu, ' ')
       .replace(/第\s*\d+\s*話/giu, ' ')
@@ -188,8 +190,34 @@ function splitLikelyTitleSegments(value) {
     .filter(Boolean);
 }
 
+function extractQuotedOfficialTitle(raw) {
+  const text = String(raw || '');
+  const patterns = [
+    /[「『【]([^」』】]+)[」』】]\s*アニメ公式サイト/iu,
+    /[「『【]([^」』】]+)[」』】]\s*公式サイト/iu,
+    /アニメ[「『【]([^」』】]+)[」』】]\s*公式サイト/iu,
+    /TVアニメ[「『【]([^」』】]+)(?:[」』】]|$)/iu,
+    /アニメ[「『【]([^」』】]+)(?:[」』】]|$)/iu,
+    /[「『【]([^」』】]{2,120})(?:[」』】]|$)/iu
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      return cleanupCandidate(match[1]);
+    }
+  }
+  return null;
+}
+
+function extractUnclosedQuotedTitle(raw) {
+  const text = String(raw || '');
+  const match = text.match(/(?:TVアニメ|アニメ)?[「『【]([^|｜\n\r]+?)(?:公式サイト|公式|OP|ED|Opening|Ending|PV|MV|Trailer|Teaser|主題歌|ノンクレジット|ノンテロップ|$)/iu);
+  return match?.[1] ? cleanupCandidate(match[1]) : null;
+}
+
 function normalizeAnimeCandidateTitle(rawTitle) {
-  const raw = cleanupCandidate(rawTitle);
+  const rawSource = String(rawTitle || '').trim();
+  const raw = cleanupCandidate(rawSource);
   if (!raw) {
     return {
       rawTitle: '',
@@ -210,6 +238,15 @@ function normalizeAnimeCandidateTitle(rawTitle) {
     }
   };
 
+  const quotedOfficialTitle = extractQuotedOfficialTitle(rawSource);
+  if (quotedOfficialTitle) {
+    addCandidate(quotedOfficialTitle, 'quoted_official_title', 70);
+  }
+  const unclosedQuotedTitle = extractUnclosedQuotedTitle(rawSource);
+  if (unclosedQuotedTitle) {
+    addCandidate(unclosedQuotedTitle, 'unclosed_quoted_title', 65);
+  }
+
   const bracketPatterns = [
     /(?:TVアニメ|アニメ|anime)[「『【]([^」』】]+)[」』】]/iu,
     /(?:TVアニメ|アニメ|anime)[「『【]([^|｜\n\r]+)$/iu,
@@ -221,13 +258,13 @@ function normalizeAnimeCandidateTitle(rawTitle) {
   ];
 
   for (const pattern of bracketPatterns) {
-    const match = raw.match(pattern);
+    const match = rawSource.match(pattern);
     if (match?.[1]) {
       addCandidate(match[1], 'pattern_extract', 40);
     }
   }
 
-  const bracketMatches = Array.from(raw.matchAll(/[【『「]([^】』」]{2,120})[】』」]/gu));
+  const bracketMatches = Array.from(rawSource.matchAll(/[【『「]([^】』」]{2,120})[】』」]/gu));
   for (const match of bracketMatches) {
     addCandidate(match[1], 'bracket_extract', 25);
   }
@@ -265,7 +302,8 @@ function extractCandidateFromEmbeds(message) {
     const sources = [
       ['embed_title', cleanupCandidate(embed?.title || '')],
       ['embed_description', cleanupCandidate(embed?.description || '')],
-      ['embed_author', cleanupCandidate(embed?.author?.name || '')]
+      ['embed_author', cleanupCandidate(embed?.author?.name || '')],
+      ['embed_provider', cleanupCandidate(embed?.provider?.name || '')]
     ];
 
     for (const [sourceType, rawTitle] of sources) {
@@ -276,7 +314,9 @@ function extractCandidateFromEmbeds(message) {
         sourceType,
         rawTitle,
         embedUrl: embed?.url || null,
-        embedProvider: cleanupCandidate(embed?.provider?.name || embed?.data?.provider?.name || '')
+        embedProvider: cleanupCandidate(embed?.provider?.name || embed?.data?.provider?.name || ''),
+        embedDescription: cleanupCandidate(embed?.description || ''),
+        embedAuthor: cleanupCandidate(embed?.author?.name || '')
       };
     }
   }
@@ -485,8 +525,8 @@ async function resolveAnimeCandidate(client, candidate) {
 }
 
 async function maybeWaitForYoutubeEmbeds(message, logger) {
-  const hasYoutubeUrl = /https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\//iu.test(String(message.content || ''));
-  if (!hasYoutubeUrl) {
+  const hasUrl = /https?:\/\//iu.test(String(message.content || ''));
+  if (!hasUrl) {
     return message;
   }
 
@@ -580,6 +620,18 @@ async function handleAnimeHashtagPost(message, options = {}) {
     setIntegrationState(client, message.id, {
       attempts: 1,
       lastReason: 'candidate_extraction'
+    });
+    logger.info('anime hashtag source embeds snapshot', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      embedCount: Array.isArray(integrationMessage.embeds) ? integrationMessage.embeds.length : 0,
+      embeds: (Array.isArray(integrationMessage.embeds) ? integrationMessage.embeds : []).slice(0, 3).map((embed) => ({
+        title: embed?.title || null,
+        description: embed?.description || null,
+        author: embed?.author?.name || null,
+        provider: embed?.provider?.name || null,
+        url: embed?.url || null
+      }))
     });
 
     const extracted = extractAnimeCandidateFromHashtagPost(integrationMessage, options);

@@ -16,6 +16,7 @@ const {
 } = require('../modules/anime');
 const { buildAnimeLinks, getPreferredAnimeDisplayTitle } = require('../modules/anime/buildAnimeMessages');
 const { registerDeletableMessage } = require('../modules/deletableMessages');
+const { normalizeSearchText } = require('../modules/anime/search');
 
 function formatTitle(media) {
   return getPreferredAnimeDisplayTitle(media);
@@ -183,6 +184,69 @@ async function sendPublicResult(interaction, payload, purpose) {
   await registerDeletableMessage(sentMessage, interaction.user.id, purpose);
   await interaction.editReply(`結果を投稿しました: ${sentMessage.url}`);
   return sentMessage;
+}
+
+function ensurePostSelectionStore(client) {
+  if (!client.animePostSelectionState) {
+    client.animePostSelectionState = new Map();
+  }
+  return client.animePostSelectionState;
+}
+
+function prunePostSelectionStore(client) {
+  const store = ensurePostSelectionStore(client);
+  const now = Date.now();
+  for (const [key, value] of store.entries()) {
+    if ((value.expiresAt || 0) <= now) {
+      store.delete(key);
+    }
+  }
+}
+
+function buildPostCandidateSelectResponse(title, candidates, token) {
+  const options = candidates.slice(0, 5).map((entry) => ({
+    label: formatTitle(entry).slice(0, 100),
+    description: `${formatSeason(entry) || 'シーズン不明'} / ${entry.status || '状態不明'}`.slice(0, 100),
+    value: `${entry.provider}:${entry.providerMediaId}`
+  }));
+  return {
+    content: [
+      '候補が複数あるため、自動登録を止めました。',
+      `検索語: ${title}`,
+      ...buildCandidateLines(candidates.slice(0, 5))
+    ].join('\n\n'),
+    components: [
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`anime:post:select:${token}`)
+          .setPlaceholder('登録する作品を選択')
+          .addOptions(options)
+      )
+    ]
+  };
+}
+
+function shouldRequirePostSelection(query, candidates = []) {
+  if (!Array.isArray(candidates) || candidates.length <= 1) {
+    return false;
+  }
+  const normalizedQuery = normalizeSearchText(query);
+  const [first, second] = candidates;
+  const firstTitle = normalizeSearchText(formatTitle(first));
+  const secondTitle = normalizeSearchText(formatTitle(second));
+  if (!normalizedQuery) {
+    return true;
+  }
+  if (firstTitle === normalizedQuery) {
+    return false;
+  }
+  if (normalizedQuery.length <= 8) {
+    return true;
+  }
+  if (firstTitle.includes(normalizedQuery) && secondTitle.includes(normalizedQuery)) {
+    return true;
+  }
+  return false;
 }
 
 module.exports = {
@@ -390,6 +454,19 @@ module.exports = {
           await interaction.editReply('アニメ情報の取得に失敗しました。少し後で試してください。');
           return;
         }
+        if (shouldRequirePostSelection(title, resolved.candidates)) {
+          prunePostSelectionStore(client);
+          const token = interaction.id;
+          ensurePostSelectionStore(client).set(token, {
+            userId: interaction.user.id,
+            guildId: interaction.guildId,
+            title,
+            candidates: resolved.candidates.slice(0, 5),
+            expiresAt: Date.now() + (1000 * 60 * 10)
+          });
+          await interaction.editReply(buildPostCandidateSelectResponse(title, resolved.candidates, token));
+          return;
+        }
         const result = await postAnimeToChannel(interaction.guild, resolved.media, interaction.user.id, [title]);
         await maybeLinkRecentAnimeHashtagSource(client, interaction.guildId, interaction.user.id, result.entry.id).catch(() => null);
         const links = buildAnimeLinks(result.entry);
@@ -407,14 +484,14 @@ module.exports = {
         if (buttons.length) {
           components.push(new ActionRowBuilder().addComponents(...buttons.slice(0, 3)));
         }
-        await sendPublicResult(interaction, {
+        await interaction.editReply({
           content: [
             result.created ? '作品カードとスレッドを作成しました。' : '既に登録済みです。',
             `**${formatTitle(result.entry)}**`
           ].join('\n'),
           components,
           allowedMentions: { parse: [] }
-        }, 'anime_post_result');
+        });
         return;
       }
 
@@ -525,7 +602,11 @@ module.exports = {
         subcommand,
         guildId: interaction.guildId,
         userId: interaction.user.id,
-        error: error.message
+        errorName: error?.name || null,
+        errorMessage: error?.message || null,
+        errorStack: error?.stack || null,
+        errorErrors: error?.errors || null,
+        errorJson: JSON.stringify(error, Object.getOwnPropertyNames(error || {}))
       });
       await interaction.editReply(error.code === 'ANNICT_TOKEN_MISSING'
         ? 'Annict APIトークンが設定されていません。'
@@ -571,6 +652,46 @@ module.exports = {
       const currentQuery = interaction.message?.content?.match(/^検索結果: (.+)$/m)?.[1] || '';
       const response = await buildAnimeFindResponse(client, interaction.guildId, currentQuery, selectedEntryId);
       await interaction.editReply(response).catch(() => null);
+      return true;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('anime:post:select:')) {
+      prunePostSelectionStore(client);
+      const token = interaction.customId.split(':').pop();
+      const state = ensurePostSelectionStore(client).get(token);
+      if (!state || String(state.userId) !== String(interaction.user.id)) {
+        await interaction.editReply({ content: 'この候補選択は期限切れか、利用できません。', components: [] }).catch(() => null);
+        return true;
+      }
+      const selected = interaction.values?.[0] || '';
+      const [provider, providerMediaId] = selected.split(':');
+      const media = state.candidates.find((entry) => String(entry.provider) === String(provider) && String(entry.providerMediaId) === String(providerMediaId));
+      if (!media) {
+        await interaction.editReply({ content: '選択された候補が見つかりませんでした。', components: [] }).catch(() => null);
+        return true;
+      }
+      const result = await postAnimeToChannel(interaction.guild, media, interaction.user.id, [state.title]);
+      await maybeLinkRecentAnimeHashtagSource(client, interaction.guildId, interaction.user.id, result.entry.id).catch(() => null);
+      ensurePostSelectionStore(client).delete(token);
+      const links = buildAnimeLinks(result.entry);
+      const buttons = [];
+      if (links.parentUrl) {
+        buttons.push(new ButtonBuilder().setLabel('作品カードへ飛ぶ').setStyle(ButtonStyle.Link).setURL(links.parentUrl));
+      }
+      if (links.threadUrl) {
+        buttons.push(new ButtonBuilder().setLabel('作品スレッドへ飛ぶ').setStyle(ButtonStyle.Link).setURL(links.threadUrl));
+      }
+      if (result.entry.siteUrl) {
+        buttons.push(new ButtonBuilder().setLabel(`${getExternalLabel(result.entry)}で開く`).setStyle(ButtonStyle.Link).setURL(result.entry.siteUrl));
+      }
+      const components = buttons.length ? [new ActionRowBuilder().addComponents(...buttons.slice(0, 3))] : [];
+      await interaction.editReply({
+        content: [
+          result.created ? '作品カードとスレッドを作成しました。' : '既に登録済みです。',
+          `**${formatTitle(result.entry)}**`
+        ].join('\n'),
+        components
+      }).catch(() => null);
       return true;
     }
 

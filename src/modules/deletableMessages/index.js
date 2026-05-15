@@ -33,7 +33,10 @@ async function handleDeletableMessageReaction(reaction, user) {
     return false;
   }
 
-  if (String(record.ownerUserId) !== String(user.id)) {
+  const guild = message.guild || null;
+  const member = guild ? (guild.members.cache.get(user.id) || await guild.members.fetch(user.id).catch(() => null)) : null;
+  const isAdminLike = Boolean(member?.permissions?.has?.('Administrator') || member?.permissions?.has?.('ManageMessages'));
+  if (String(record.ownerUserId) !== String(user.id) && !isAdminLike) {
     return true;
   }
 

@@ -1,0 +1,206 @@
+{
+  "entranceChannelId": "1224770636266868847",
+  "timelineChannelId": "1503666797122031677",
+  "introChannelId": "1503672008930623508",
+  "welcomeChannelId": "1227573832559362048",
+  "welcomeReactionsMax": 5,
+  "introReactionsMax": 5,
+  "watchedForums": {
+    "question": [
+      "1224771331623485440",
+      "1230488742737875005",
+      "1230488769145081916",
+      "1230488840444186714",
+      "1230488869519229009"
+    ],
+    "tweet": [
+      "1503668971520393367"
+    ],
+    "knowledge": [
+      "1503762457779376179"
+    ]
+  },
+  "voiceProfileChannels": [
+    {
+      "name": "通話1",
+      "profileChannelId": "1503671366631559263"
+    },
+    {
+      "name": "通話2",
+      "profileChannelId": "1503671442431148083"
+    }
+  ],
+  "timeline": {
+    "maxContentLength": 800,
+    "includeFirstImage": true,
+    "ignoreBotPosts": true
+  },
+  "timelineShortMergeEnabled": true,
+  "timelineShortMergeMaxChars": 60,
+  "timelineShortMergeWindowSeconds": 180,
+  "timelineShortMergeMaxParts": 5,
+  "voiceProfile": {
+    "ignoreBots": true
+  },
+  "mediaRelay": {
+    "maxReuploadBytes": 25000000,
+    "tempDir": "./tmp/relay-media"
+  },
+  "twitterMedia": {
+    "enabled": true,
+    "videoMode": "preview-only",
+    "maxVideoUploadBytes": 25000000,
+    "suppressDuplicateImages": true,
+    "resolveTimeoutMs": 15000,
+    "ytDlpPath": "yt-dlp"
+  },
+  "llmEnabled": true,
+  "llmContextMessageLimit": 50,
+  "llmShortRequestContextLimit": 2,
+  "llmMentionedUserMessageLimit": 30,
+  "llmIntroProfileCandidateLimit": 3,
+  "llmIncludeIntroProfiles": true,
+  "llmThinkingMessage": "少女祈祷中...",
+  "llmThinkingMessages": [
+    "少女祈祷中...",
+    "応答作成中...",
+    "会話を整理中...",
+    "文脈を読み込み中...",
+    "ローカルLLMが考えています...",
+    "少しお待ちください..."
+  ],
+  "llmBusyMessages": [
+    "回線が混雑しています。少し待ってからもう一度試してください。",
+    "少女が困っています。少し待ってからもう一度試してください。",
+    "ただいま応答処理が詰まっています。少し待ってからもう一度試してください。",
+    "ローカルLLMが別の応答を処理中です。少し待ってからもう一度試してください。"
+  ],
+  "llmNumPredict": 160,
+  "llmNumPredictShort": 48,
+  "llmNumCtx": 1024,
+  "llmTemperature": 0.3,
+  "llmTopP": 0.9,
+  "llmKeepAlive": "30m",
+  "llmMaxReplyChars": 1800,
+  "llmTimeoutMs": 120000,
+  "ollamaBaseUrl": "http://127.0.0.1:11434",
+  "ollamaModel": "gemma3:4b",
+  "questions": {
+    "resolvedPrefix": "[解決済]",
+    "allowResolveBy": [
+      "threadOwner",
+      "administrator"
+    ],
+    "moderatorRoleIds": []
+  },
+  "introDm": {
+    "enabled": false,
+    "devTestMode": true,
+    "devUserId": "323041740963446785",
+    "introChannelId": "1503672008930623508",
+    "logChannelId": "1224747669604536385",
+    "vcReminderCooldownDays": 7,
+    "joinReminderHours": 48,
+    "joinReminderQueueEnabled": true,
+    "joinReminderBatchSize": 3,
+    "joinReminderMinDelayMinutes": 5,
+    "joinReminderMaxDelayMinutes": 30,
+    "queueAutoProcessEnabled": false,
+    "queueProcessIntervalMinutes": 5,
+    "maxLlmReplies": 3,
+    "llmRepliesEnabled": false
+  },
+  "anime": {
+    "enabled": true,
+    "provider": "annict",
+    "channelId": "1504329024460296232",
+    "autoPostOnCastLookup": false,
+    "interestEmoji": "👀",
+    "watchedEmoji": "✅",
+    "maxCastInCard": 5,
+    "maxReviewsInCard": 5,
+    "indexPageSize": 25,
+    "apiTimeoutMs": 15000,
+    "apiCacheTtlHours": 24,
+    "reviewRoles": [
+      { "threshold": 10, "roleId": "1504730447710519386", "name": "アニメ視聴者 Lv.1" },
+      { "threshold": 20, "roleId": "1504730443637854242", "name": "アニメ視聴者 Lv.2" },
+      { "threshold": 50, "roleId": "1504730439502532618", "name": "アニメ語り部" },
+      { "threshold": 100, "roleId": "1504730894383054918", "name": "アニメ仙人" },
+      { "threshold": 300, "roleId": "1504731042697842699", "name": "アニメソムリエ" },
+      { "threshold": 500, "roleId": "1504730319226404864", "name": "オタク" }
+    ]
+  },
+  "annict": {
+    "enabled": true,
+    "baseUrl": "https://api.annict.com/v1",
+    "accessTokenEnv": "ANNICT_ACCESS_TOKEN",
+    "timeoutMs": 15000,
+    "cacheTtlHours": 24
+  },
+  "ops": {
+    "logChannelId": "1224747669604536385",
+    "developerPortalUrl": "https://discord.com/developers/applications/1503681346709491764/bot",
+    "allowRestartCommand": true
+  },
+  "questionForumTags": {
+    "1224771331623485440": {
+      "resolved": "1503808595274240080",
+      "open": "1503808621538971649"
+    },
+    "1230488742737875005": {
+      "resolved": "1503810083165835274",
+      "open": "1503810098357604564"
+    },
+    "1230488769145081916": {
+      "resolved": "1503810224468004925",
+      "open": "1503810238384570521"
+    },
+    "1230488840444186714": {
+      "resolved": "1503810442219360297",
+      "open": "1503810457109008435"
+    },
+    "1230488869519229009": {
+      "resolved": "1503810573555597433",
+      "open": "1503810586595819550"
+    }
+  },
+  "botHashtagRoutes": {
+    "いい映像": {
+      "aliases": ["いい映像", "良い映像"],
+      "display": "#良い映像",
+      "channelId": "1224747669604536386"
+    },
+    "いい音楽": {
+      "aliases": ["いい音楽", "良い音楽"],
+      "display": "#良い音楽",
+      "channelId": "1503813485581045851"
+    }
+  },
+  "vcListenOnlyChannelIds": [
+    "1345363682762293330",
+    "1345744754398330900"
+  ],
+  "globalHashtagRoutes": [
+    {
+      "tags": ["技術", "tech", "Tech", "TECH", "開発", "tips", "tool", "ツール"],
+      "displayTag": "技術",
+      "displayMode": "matchedTag",
+      "destinationChannelId": "1503761498340724806",
+      "alsoTimeline": true
+    },
+    {
+      "tags": ["アニメ", "anime", "Anime", "ANIME"],
+      "displayMode": "matchedTag",
+      "destinationChannelId": "1504329024460296232",
+      "alsoTimeline": true,
+      "relayUserPostToDestination": false
+    },
+    {
+      "tags": ["飯", "ご飯", "ごはん", "meshi", "food", "Food", "FOOD", "ラーメン", "ramen", "Ramen", "RAMEN"],
+      "displayMode": "matchedTag",
+      "destinationChannelId": "1504329174444281886",
+      "alsoTimeline": true
+    }
+  ]
+}
