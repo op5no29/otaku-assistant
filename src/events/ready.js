@@ -29,7 +29,8 @@ module.exports = {
           tags: route.tags || [],
           destinationChannelId: route.channelId || '',
           displayMode: route.displayMode || 'displayTag',
-          alsoTimeline: route.alsoTimeline === true
+          alsoTimeline: route.alsoTimeline === true,
+          relayUserPostToDestination: route.relayUserPostToDestination !== false
         }))
       });
     } else {

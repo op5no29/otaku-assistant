@@ -6,6 +6,7 @@ const {
   linkAnimeHashtagSourceToEntry
 } = require('./index');
 const { buildAnimeLinks, getPreferredAnimeDisplayTitle } = require('./buildAnimeMessages');
+const { registerDeletableMessage } = require('../deletableMessages');
 
 const GENERIC_SHORT_COMMENTS = new Set([
   '見た',
@@ -113,14 +114,53 @@ function cleanupCandidate(value) {
     .trim();
 }
 
+function preserveQuotedCandidateText(value) {
+  return String(value || '')
+    .replace(/\s{2,}/gu, ' ')
+    .trim();
+}
+
 function looksLikeGenericComment(text) {
   const normalized = String(text || '').trim().toLowerCase();
   return GENERIC_SHORT_COMMENTS.has(normalized) || normalized.length <= 3;
 }
 
+function looksLikeWeakAnimeImpression(text) {
+  const normalized = cleanupCandidate(text)
+    .toLowerCase()
+    .replace(/https?:\/\/\S+/giu, ' ')
+    .replace(/[!！?？。、,.\s]/gu, '')
+    .trim();
+
+  if (!normalized) {
+    return true;
+  }
+
+  const weakFragments = [
+    'いい',
+    'すごい',
+    '神',
+    'やばい',
+    '最高',
+    '見て',
+    'みて',
+    'op',
+    'ed',
+    'オープニング',
+    'エンディング',
+    'オープニングムービー',
+    'ノンクレジット'
+  ];
+
+  return weakFragments.some((fragment) => normalized === fragment || normalized.startsWith(fragment));
+}
+
 function looksLikeAnimeTitleCandidate(text) {
   const value = cleanupCandidate(text);
   if (!value || looksLikeGenericComment(value)) {
+    return false;
+  }
+  if (looksLikeWeakAnimeImpression(value)) {
     return false;
   }
   if (/[ぁ-んァ-ヶ一-龠々ー]/u.test(value)) {
@@ -298,29 +338,31 @@ function extractExplicitTitleLine(text) {
 
 function extractCandidateFromEmbeds(message) {
   const embeds = Array.isArray(message.embeds) ? message.embeds : [];
+  const candidates = [];
   for (const embed of embeds) {
     const sources = [
-      ['embed_title', cleanupCandidate(embed?.title || '')],
-      ['embed_description', cleanupCandidate(embed?.description || '')],
-      ['embed_author', cleanupCandidate(embed?.author?.name || '')],
+      ['embed_description', preserveQuotedCandidateText(embed?.description || '')],
+      ['embed_author', preserveQuotedCandidateText(embed?.author?.name || '')],
+      ['embed_title', preserveQuotedCandidateText(embed?.title || '')],
       ['embed_provider', cleanupCandidate(embed?.provider?.name || '')]
     ];
 
-    for (const [sourceType, rawTitle] of sources) {
+    for (const [index, [sourceType, rawTitle]] of sources.entries()) {
       if (!rawTitle) {
         continue;
       }
-      return {
+      candidates.push({
         sourceType,
         rawTitle,
+        priority: 400 - (index * 10),
         embedUrl: embed?.url || null,
         embedProvider: cleanupCandidate(embed?.provider?.name || embed?.data?.provider?.name || ''),
-        embedDescription: cleanupCandidate(embed?.description || ''),
-        embedAuthor: cleanupCandidate(embed?.author?.name || '')
-      };
+        embedDescription: preserveQuotedCandidateText(embed?.description || ''),
+        embedAuthor: preserveQuotedCandidateText(embed?.author?.name || '')
+      });
     }
   }
-  return null;
+  return candidates;
 }
 
 function extractAnimeCandidateFromHashtagPost(message, options = {}) {
@@ -329,45 +371,96 @@ function extractAnimeCandidateFromHashtagPost(message, options = {}) {
     botRoutes: message.client.appConfig.botHashtagRoutes
   });
   const cleanedContent = cleanupCandidate(options.cleanedContent || parsed.content || '');
+  const consideredSources = [];
+  const hasUrl = /https?:\/\//iu.test(String(message.content || ''));
   const providerId = extractProviderIdFromText(message.content || '');
   if (providerId) {
     return {
-      sourceType: `${providerId.provider}_url`,
-      providerMediaId: providerId.providerMediaId,
-      provider: providerId.provider,
-      rawTitle: null,
-      cleanedContent
+      winner: {
+        sourceType: `${providerId.provider}_url`,
+        providerMediaId: providerId.providerMediaId,
+        provider: providerId.provider,
+        rawTitle: null,
+        cleanedContent
+      },
+      consideredSources
     };
   }
 
   const explicitTitle = extractExplicitTitleLine(cleanedContent);
   if (explicitTitle) {
-    return {
+    const winner = {
       sourceType: 'explicit_title_line',
       rawTitle: explicitTitle,
       cleanedContent
     };
+    consideredSources.push({
+      sourceType: winner.sourceType,
+      rawTitle: winner.rawTitle,
+      normalizedCandidate: winner.rawTitle,
+      priority: 500,
+      rejectedReason: null
+    });
+    return { winner, consideredSources };
+  }
+
+  const embedCandidates = extractCandidateFromEmbeds(message);
+  for (const embedCandidate of embedCandidates) {
+    const normalized = normalizeAnimeCandidateTitle(embedCandidate.rawTitle);
+    const rejectedReason = normalized.normalizedCandidate
+      ? null
+      : 'normalized_candidate_missing';
+    consideredSources.push({
+      sourceType: embedCandidate.sourceType,
+      rawTitle: embedCandidate.rawTitle,
+      normalizedCandidate: normalized.normalizedCandidate || null,
+      priority: embedCandidate.priority,
+      rejectedReason,
+      embedUrl: embedCandidate.embedUrl || null,
+      embedProvider: embedCandidate.embedProvider || null
+    });
+    if (!rejectedReason) {
+      return {
+        winner: {
+          ...embedCandidate,
+          cleanedContent,
+          normalizedCandidate: normalized.normalizedCandidate || null,
+          candidateVariants: normalized.candidates || []
+        },
+        consideredSources
+      };
+    }
   }
 
   const lines = cleanedContent.split(/\r?\n/).map(cleanupCandidate).filter(Boolean);
   const firstMeaningfulLine = lines.find((line) => !/^https?:\/\//iu.test(line));
-  if (firstMeaningfulLine && looksLikeAnimeTitleCandidate(firstMeaningfulLine)) {
-    return {
+  if (firstMeaningfulLine) {
+    const rejectedReason = hasUrl
+      ? 'url_post_content_ignored'
+      : (looksLikeAnimeTitleCandidate(firstMeaningfulLine) ? null : 'weak_or_generic_content');
+    consideredSources.push({
       sourceType: 'content_title',
       rawTitle: firstMeaningfulLine,
-      cleanedContent
-    };
+      normalizedCandidate: rejectedReason ? null : normalizeAnimeCandidateTitle(firstMeaningfulLine).normalizedCandidate || null,
+      priority: 100,
+      rejectedReason
+    });
+    if (!rejectedReason) {
+      const normalized = normalizeAnimeCandidateTitle(firstMeaningfulLine);
+      return {
+        winner: {
+          sourceType: 'content_title',
+          rawTitle: firstMeaningfulLine,
+          cleanedContent,
+          normalizedCandidate: normalized.normalizedCandidate || null,
+          candidateVariants: normalized.candidates || []
+        },
+        consideredSources
+      };
+    }
   }
 
-  const embedCandidate = extractCandidateFromEmbeds(message);
-  if (embedCandidate) {
-    return {
-      ...embedCandidate,
-      cleanedContent
-    };
-  }
-
-  return null;
+  return { winner: null, consideredSources };
 }
 
 function canonicalTitle(value) {
@@ -414,12 +507,12 @@ function scoreAniListCandidate(candidate, media) {
 
   if (candidate.sourceType === 'explicit_title_line') {
     score += 20;
-  } else if (candidate.sourceType === 'embed_title') {
-    score += 12;
   } else if (candidate.sourceType === 'embed_description' || candidate.sourceType === 'embed_author') {
-    score += 10;
+    score += 16;
+  } else if (candidate.sourceType === 'embed_title') {
+    score += 8;
   } else if (candidate.sourceType === 'content_title') {
-    score += 5;
+    score += 1;
   }
 
   if (String(media.format || '') === 'TV') {
@@ -634,7 +727,21 @@ async function handleAnimeHashtagPost(message, options = {}) {
       }))
     });
 
-    const extracted = extractAnimeCandidateFromHashtagPost(integrationMessage, options);
+    const extraction = extractAnimeCandidateFromHashtagPost(integrationMessage, options);
+    for (const considered of extraction.consideredSources || []) {
+      logger.info('anime candidate source considered', {
+        sourceMessageId: message.id,
+        sourceChannelId: message.channelId,
+        sourceType: considered.sourceType,
+        rawTitle: considered.rawTitle || null,
+        normalizedCandidate: considered.normalizedCandidate || null,
+        priority: considered.priority ?? null,
+        rejectedReason: considered.rejectedReason || null,
+        embedUrl: considered.embedUrl || null,
+        embedProvider: considered.embedProvider || null
+      });
+    }
+    const extracted = extraction.winner;
     if (!extracted) {
       setIntegrationState(client, message.id, {
         status: 'skipped_no_candidate',
@@ -647,15 +754,11 @@ async function handleAnimeHashtagPost(message, options = {}) {
       return;
     }
 
-    const normalized = extracted.rawTitle
-      ? normalizeAnimeCandidateTitle(extracted.rawTitle)
-      : { rawTitle: '', normalizedCandidate: '', candidates: [], reason: 'explicit_id' };
-
     const candidate = {
       ...extracted,
       rawTitle: extracted.rawTitle || null,
-      normalizedCandidate: normalized.normalizedCandidate || null,
-      candidateVariants: normalized.candidates || []
+      normalizedCandidate: extracted.normalizedCandidate || null,
+      candidateVariants: extracted.candidateVariants || []
     };
 
     logger.info('anime hashtag candidate extracted', {
@@ -678,6 +781,13 @@ async function handleAnimeHashtagPost(message, options = {}) {
         variants: candidate.candidateVariants.map((entry) => entry.value)
       });
     }
+    logger.info('anime candidate winner selected', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      sourceType: candidate.sourceType,
+      normalizedCandidate: candidate.normalizedCandidate || null,
+      whyItWon: candidate.sourceType === 'content_title' ? 'fallback_after_embed_sources' : 'higher_priority_source'
+    });
 
     if (!candidate.providerMediaId && !candidate.normalizedCandidate) {
       setIntegrationState(client, message.id, {
@@ -699,6 +809,7 @@ async function handleAnimeHashtagPost(message, options = {}) {
       sourceMessageId: message.id,
       sourceChannelId: message.channelId,
       sourceType: candidate.sourceType,
+      query: candidate.normalizedCandidate || candidate.rawTitle || null,
       normalizedCandidate: candidate.normalizedCandidate || null,
       providerMediaId: candidate.providerMediaId || null
     });
@@ -711,7 +822,13 @@ async function handleAnimeHashtagPost(message, options = {}) {
       topScore: resolved.top?.score || 0,
       secondScore: resolved.second?.score || 0,
       providerMediaId: resolved.top?.media?.providerMediaId || null,
-      titleNative: resolved.top?.media?.titleNative || null
+      titleNative: resolved.top?.media?.titleNative || null,
+      topResults: resolved.results.slice(0, 3).map((result) => ({
+        title: result.media?.titleNative || result.media?.titleUserPreferred || result.media?.titleEnglish || null,
+        providerMediaId: result.media?.providerMediaId || null,
+        score: result.score,
+        reason: result.reason
+      }))
     });
 
     const confidenceResult = {
@@ -776,6 +893,22 @@ async function handleAnimeHashtagPost(message, options = {}) {
         providerMediaId: confidenceResult.top.media.providerMediaId,
         titleNative: confidenceResult.top.media.titleNative || null
       });
+      const store = ensureReplyStore(client);
+      if (!store.has(message.id)) {
+        store.add(message.id);
+        const links = buildAnimeLinks(existing);
+        const replyMessage = await message.reply({
+          content: [
+            `このアニメにはすでにスレッドがあります: **${getPreferredAnimeDisplayTitle(existing)}**`,
+            links.parentUrl ? `作品カード: ${links.parentUrl}` : null,
+            links.threadUrl ? `スレッド: ${links.threadUrl}` : null
+          ].filter(Boolean).join('\n'),
+          allowedMentions: { parse: [] }
+        }).catch(() => null);
+        if (replyMessage) {
+          await registerDeletableMessage(replyMessage, message.author.id, 'anime_existing_entry_notice').catch(() => null);
+        }
+      }
       return;
     }
 
@@ -811,6 +944,10 @@ async function handleAnimeHashtagPost(message, options = {}) {
           links.threadUrl ? `スレッド: ${links.threadUrl}` : null
         ].filter(Boolean).join('\n'),
         allowedMentions: { parse: [] }
+      }).then(async (replyMessage) => {
+        if (replyMessage) {
+          await registerDeletableMessage(replyMessage, message.author.id, 'anime_created_entry_notice').catch(() => null);
+        }
       }).catch(() => null);
       logger.info('anime hashtag source reply sent', {
         sourceMessageId: message.id,

@@ -203,7 +203,7 @@ function prunePostSelectionStore(client) {
   }
 }
 
-function buildPostCandidateSelectResponse(title, candidates, token) {
+function buildPostCandidateSelectResponse(title, candidates, token, ownerUserId) {
   const options = candidates.slice(0, 5).map((entry) => ({
     label: formatTitle(entry).slice(0, 100),
     description: `${formatSeason(entry) || 'シーズン不明'} / ${entry.status || '状態不明'}`.slice(0, 100),
@@ -218,7 +218,7 @@ function buildPostCandidateSelectResponse(title, candidates, token) {
     components: [
       new ActionRowBuilder().addComponents(
         new StringSelectMenuBuilder()
-          .setCustomId(`anime:post:select:${token}`)
+          .setCustomId(`anime:post:select:${ownerUserId}:${token}`)
           .setPlaceholder('登録する作品を選択')
           .addOptions(options)
       )
@@ -464,7 +464,7 @@ module.exports = {
             candidates: resolved.candidates.slice(0, 5),
             expiresAt: Date.now() + (1000 * 60 * 10)
           });
-          await interaction.editReply(buildPostCandidateSelectResponse(title, resolved.candidates, token));
+          await interaction.editReply(buildPostCandidateSelectResponse(title, resolved.candidates, token, interaction.user.id));
           return;
         }
         const result = await postAnimeToChannel(interaction.guild, resolved.media, interaction.user.id, [title]);
@@ -657,20 +657,108 @@ module.exports = {
 
     if (interaction.isStringSelectMenu() && interaction.customId.startsWith('anime:post:select:')) {
       prunePostSelectionStore(client);
-      const token = interaction.customId.split(':').pop();
-      const state = ensurePostSelectionStore(client).get(token);
-      if (!state || String(state.userId) !== String(interaction.user.id)) {
-        await interaction.editReply({ content: 'この候補選択は期限切れか、利用できません。', components: [] }).catch(() => null);
+      const parts = interaction.customId.split(':');
+      const ownerUserId = parts.length >= 5 ? parts[3] : null;
+      const token = parts.length >= 5 ? parts[4] : (parts[3] || null);
+      client.logger.info('anime post select interaction received', {
+        interactionId: interaction.id,
+        customId: interaction.customId,
+        token,
+        ownerUserId,
+        interactingUserId: interaction.user.id,
+        selectedValue: interaction.values?.[0] || null
+      });
+      if (ownerUserId && String(ownerUserId) !== String(interaction.user.id)) {
+        client.logger.warn('anime post select rejected owner mismatch', {
+          interactionId: interaction.id,
+          customId: interaction.customId,
+          token,
+          ownerUserId,
+          interactingUserId: interaction.user.id
+        });
+        await interaction.editReply({ content: 'この候補選択は実行した本人のみ利用できます。', components: [] }).catch(() => null);
         return true;
       }
+      const state = ensurePostSelectionStore(client).get(token);
+      client.logger.info('anime post select token lookup', {
+        interactionId: interaction.id,
+        token,
+        hit: Boolean(state),
+        stateUserId: state?.userId || null,
+        stateGuildId: state?.guildId || null
+      });
       const selected = interaction.values?.[0] || '';
       const [provider, providerMediaId] = selected.split(':');
-      const media = state.candidates.find((entry) => String(entry.provider) === String(provider) && String(entry.providerMediaId) === String(providerMediaId));
+      let media = state?.candidates?.find((entry) => String(entry.provider) === String(provider) && String(entry.providerMediaId) === String(providerMediaId)) || null;
+      if (!media && providerMediaId) {
+        client.logger.info('anime post select state fallback fetch started', {
+          interactionId: interaction.id,
+          token,
+          provider,
+          providerMediaId
+        });
+        media = await getAnimeById(client, providerMediaId, client.appConfig.anime.maxCastInCard, provider).catch((error) => {
+          client.logger.warn('anime post select state fallback fetch failed', {
+            interactionId: interaction.id,
+            token,
+            provider,
+            providerMediaId,
+            error: error.message
+          });
+          return null;
+        });
+      }
+      client.logger.info('anime post select work lookup result', {
+        interactionId: interaction.id,
+        token,
+        provider,
+        providerMediaId,
+        mediaFound: Boolean(media),
+        mediaTitle: media ? formatTitle(media) : null
+      });
+      if (!state && !media) {
+        await interaction.editReply({
+          content: '候補選択の有効期限が切れました。もう一度 `/anime post title:` を実行してください。',
+          components: []
+        }).catch(() => null);
+        return true;
+      }
       if (!media) {
         await interaction.editReply({ content: '選択された候補が見つかりませんでした。', components: [] }).catch(() => null);
         return true;
       }
-      const result = await postAnimeToChannel(interaction.guild, media, interaction.user.id, [state.title]);
+      client.logger.info('postAnimeToChannel started from select interaction', {
+        interactionId: interaction.id,
+        token,
+        provider,
+        providerMediaId,
+        title: formatTitle(media)
+      });
+      let result;
+      try {
+        result = await postAnimeToChannel(interaction.guild, media, interaction.user.id, state?.title ? [state.title] : []);
+      } catch (error) {
+        client.logger.error('postAnimeToChannel failed from select interaction', {
+          interactionId: interaction.id,
+          token,
+          provider,
+          providerMediaId,
+          errorName: error?.name || null,
+          errorMessage: error?.message || null,
+          errorStack: error?.stack || null
+        });
+        await interaction.editReply({
+          content: '作品カードの作成に失敗しました。少し時間をおいてもう一度試してください。',
+          components: []
+        }).catch(() => null);
+        return true;
+      }
+      client.logger.info('postAnimeToChannel finished from select interaction', {
+        interactionId: interaction.id,
+        token,
+        animeEntryId: result.entry.id,
+        created: result.created
+      });
       await maybeLinkRecentAnimeHashtagSource(client, interaction.guildId, interaction.user.id, result.entry.id).catch(() => null);
       ensurePostSelectionStore(client).delete(token);
       const links = buildAnimeLinks(result.entry);

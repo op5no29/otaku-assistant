@@ -29,6 +29,7 @@ const { buildAnimeRoleAwardDm } = require('./animeQuoteMessages');
 const REVIEW_PROMPT_TYPES = {
   WATCHED: 'watched'
 };
+const IMAGE_VALIDATION_TTL_MS = 1000 * 60 * 60 * 6;
 
 function parseAliases(value) {
   try {
@@ -152,6 +153,100 @@ async function safeFetchMessage(channel, messageId) {
     return null;
   }
   return channel.messages.fetch(messageId).catch(() => null);
+}
+
+function ensureAnimeImageValidationStore(client) {
+  if (!client.animeImageValidationCache) {
+    client.animeImageValidationCache = new Map();
+  }
+  return client.animeImageValidationCache;
+}
+
+async function validateAnimeImageUrl(client, url) {
+  const normalizedUrl = String(url || '').trim();
+  if (!/^https:\/\//iu.test(normalizedUrl)) {
+    return false;
+  }
+
+  const cache = ensureAnimeImageValidationStore(client);
+  const cached = cache.get(normalizedUrl);
+  if (cached && (Date.now() - cached.checkedAt) < IMAGE_VALIDATION_TTL_MS) {
+    return cached.valid;
+  }
+
+  try {
+    const response = await fetch(normalizedUrl, {
+      headers: {
+        Accept: 'image/*'
+      },
+      signal: AbortSignal.timeout ? AbortSignal.timeout(6000) : undefined
+    });
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    const valid = response.ok && contentType.startsWith('image/');
+    response.body?.cancel?.();
+    cache.set(normalizedUrl, {
+      checkedAt: Date.now(),
+      valid
+    });
+    return valid;
+  } catch {
+    cache.set(normalizedUrl, {
+      checkedAt: Date.now(),
+      valid: false
+    });
+    return false;
+  }
+}
+
+async function resolveAnimeCardImageEntry(client, entry) {
+  const normalizedEntry = normalizeEntry(entry);
+  const imageChoice = selectAnimeImageUrls(normalizedEntry);
+  client.logger.info('anime image candidates', {
+    animeEntryId: normalizedEntry?.id || null,
+    coverImageUrl: normalizedEntry?.coverImageUrl || null,
+    bannerImageUrl: normalizedEntry?.bannerImageUrl || null,
+    thumbnailUrl: imageChoice.thumbnailUrl || null,
+    selectedImageSource: imageChoice.selectedImageSource,
+    selectedImageUrl: imageChoice.thumbnailUrl || null,
+    imageOmitted: !imageChoice.thumbnailUrl
+  });
+
+  const candidates = [
+    ['cover', imageChoice.coverImageUrl],
+    ['banner', imageChoice.bannerImageUrl]
+  ].filter(([, candidateUrl]) => Boolean(candidateUrl));
+
+  for (const [source, candidateUrl] of candidates) {
+    const valid = await validateAnimeImageUrl(client, candidateUrl);
+    if (valid) {
+      client.logger.info('anime image candidate selected', {
+        animeEntryId: normalizedEntry?.id || null,
+        source,
+        url: candidateUrl
+      });
+      return {
+        ...normalizedEntry,
+        coverImageUrl: source === 'cover' ? candidateUrl : null,
+        bannerImageUrl: source === 'banner' ? candidateUrl : null
+      };
+    }
+    client.logger.warn('anime image validation failed', {
+      animeEntryId: normalizedEntry?.id || null,
+      source,
+      url: candidateUrl
+    });
+  }
+
+  client.logger.info('anime image fallback used', {
+    animeEntryId: normalizedEntry?.id || null,
+    selectedImageSource: 'none',
+    reason: 'all_candidates_invalid'
+  });
+  return {
+    ...normalizedEntry,
+    coverImageUrl: null,
+    bannerImageUrl: null
+  };
 }
 
 async function searchAnime(client, title) {
@@ -319,17 +414,8 @@ async function updateAnimeChannelCard(client, entry) {
   const stats = await getAnimeStats(client, normalizedEntry);
   const cast = client.db.anime.listCast(normalizedEntry.id).slice(0, client.appConfig.anime.maxCastInCard);
   const latestReviews = await getLatestReviewPreviews(client, normalizedEntry, client.appConfig.anime.maxReviewsInCard);
-  const imageChoice = selectAnimeImageUrls(normalizedEntry);
-  client.logger.info('anime image candidates', {
-    animeEntryId: normalizedEntry.id,
-    coverImageUrl: normalizedEntry.coverImageUrl || null,
-    bannerImageUrl: normalizedEntry.bannerImageUrl || null,
-    thumbnailUrl: imageChoice.thumbnailUrl || null,
-    selectedImageSource: imageChoice.selectedImageSource,
-    selectedImageUrl: imageChoice.thumbnailUrl || null,
-    imageOmitted: !imageChoice.thumbnailUrl
-  });
-  const payload = buildAnimeChannelCard(normalizedEntry, stats, cast, latestReviews);
+  const imageReadyEntry = await resolveAnimeCardImageEntry(client, normalizedEntry);
+  const payload = buildAnimeChannelCard(imageReadyEntry, stats, cast, latestReviews);
   await message.edit(payload);
   client.logger.info('anime parent card updated', {
     animeEntryId: normalizedEntry.id,
@@ -515,12 +601,13 @@ async function postAnimeToChannel(guild, media, createdByUserId, additionalAlias
   let sentMessage = null;
   let thread = null;
   try {
+    const imageReadyEntry = await resolveAnimeCardImageEntry(client, entry);
     client.logger.info('anime parent card send started', {
       animeEntryId: entry.id,
       channelId: animeChannelId
     });
     try {
-      sentMessage = await channel.send(buildAnimeChannelCard(entry, stats));
+      sentMessage = await channel.send(buildAnimeChannelCard(imageReadyEntry, stats));
     } catch (error) {
       client.logger.error('anime parent card send failed', {
         animeEntryId: entry.id,
@@ -939,6 +1026,10 @@ async function listAnimeIndex(client, guildId, page = 1) {
       reason: 'incomplete_registration'
     });
     client.db.anime.deleteEntryCascade(entry.id);
+    client.logger.info('anime incomplete entry cleanup completed', {
+      animeEntryId: entry.id,
+      reason: 'incomplete_registration'
+    });
   }
   const total = validEntries.length;
   const entries = validEntries.slice((safePage - 1) * pageSize, ((safePage - 1) * pageSize) + pageSize);
@@ -1019,6 +1110,10 @@ async function runAnimeOrphanScan(client) {
         reason: 'incomplete_registration'
       });
       client.db.anime.deleteEntryCascade(entry.id);
+      client.logger.info('anime incomplete entry cleanup completed', {
+        animeEntryId: entry?.id || null,
+        reason: 'incomplete_registration'
+      });
       continue;
     }
     if (!entry?.animeChannelId || !entry?.animeChannelMessageId) {
