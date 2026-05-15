@@ -35,6 +35,10 @@ for (const filePath of files) {
 }
 
 const { createDatabase } = require(path.join(projectRoot, 'src', 'db', 'database'));
+const {
+  ANIME_QUOTES_PATH,
+  validateAnimeQuoteDatabase
+} = require(path.join(projectRoot, 'src', 'modules', 'anime', 'animeQuoteMessages'));
 const commands = require(path.join(projectRoot, 'src', 'commands'));
 const tempDatabasePath = path.join(os.tmpdir(), `otaku-assistant-check-${process.pid}.db`);
 const database = createDatabase(tempDatabasePath);
@@ -48,6 +52,15 @@ for (const command of commands.list.filter((entry) => entry.enabled !== false)) 
   if (optionCount > 25) {
     throw new Error(`Command ${command.data?.name || 'unknown'} has too many top-level options: ${optionCount}`);
   }
+}
+
+const configExample = JSON.parse(fs.readFileSync(path.join(projectRoot, 'config.example.json'), 'utf8'));
+const animeQuoteValidation = validateAnimeQuoteDatabase({
+  reviewRoles: configExample?.anime?.reviewRoles
+});
+
+if (!animeQuoteValidation.ok) {
+  throw new Error(`Anime quote database validation failed for ${ANIME_QUOTES_PATH}: ${animeQuoteValidation.errors.join(' | ')}`);
 }
 
 console.log(`Checked ${files.length} JavaScript files.`);

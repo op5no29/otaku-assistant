@@ -221,6 +221,19 @@ function buildBottomActionRows(post, options = {}) {
     );
   }
 
+  const extraLinkButtons = Array.isArray(post.extraLinkButtons) ? post.extraLinkButtons : [];
+  for (const button of extraLinkButtons) {
+    if (!button?.label || !button?.url) {
+      continue;
+    }
+    buttons.push(
+      new ButtonBuilder()
+        .setLabel(button.label)
+        .setStyle(ButtonStyle.Link)
+        .setURL(button.url)
+    );
+  }
+
   if (!buttons.length) {
     return [];
   }
@@ -406,7 +419,7 @@ function addAttachmentNamesSection(container, post, { showOnlyAsFallback = false
 }
 
 function buildTweetTimelineMessage({ post, config }) {
-  const container = createBaseContainer(ACCENT_COLORS.timeline);
+  const container = createBaseContainer(post.accentColor || ACCENT_COLORS.timeline);
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
   const body = formatPrimaryTweetBody(trimmedContent);
   const primaryMediaUrls = [...new Set([

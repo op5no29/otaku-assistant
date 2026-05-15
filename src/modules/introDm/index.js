@@ -778,6 +778,22 @@ async function processIntroDmQueue(client, guildId = null, limit = null, options
   for (const item of dueItems) {
     client.db.introDmQueue.markStatus(item.id, 'processing');
 
+    if (hasUserIntro(client, item.guildId || guildId, item.userId)) {
+      client.db.introDmQueue.updateStatus(item.id, {
+        status: 'skipped',
+        attempts: Number(item.attempts || 0) + 1,
+        lastError: 'intro_found_before_send'
+      });
+      skippedCount += 1;
+      logger.info('intro DM queue skipped because intro found before send', {
+        processorLabel,
+        guildId: item.guildId || guildId,
+        userId: item.userId,
+        promptType: item.promptType
+      });
+      continue;
+    }
+
     if (config.devTestMode && String(item.userId) !== String(config.devUserId)) {
       client.db.introDmQueue.updateStatus(item.id, {
         status: 'skipped',

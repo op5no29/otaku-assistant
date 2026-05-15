@@ -1036,6 +1036,7 @@ function createDatabase(databasePath) {
         provider,
         provider_media_id,
         title_native,
+        title_kana,
         title_romaji,
         title_english,
         title_user_preferred,
@@ -1043,6 +1044,7 @@ function createDatabase(databasePath) {
         description,
         site_url,
         official_site_url,
+        mal_anime_id,
         cover_image_url,
         banner_image_url,
         season,
@@ -1055,13 +1057,15 @@ function createDatabase(databasePath) {
         anime_channel_message_id,
         thread_id,
         thread_card_message_id,
+        review_card_message_id,
         has_spoiler_reviews,
         created_by_user_id,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(guild_id, provider, provider_media_id) DO UPDATE SET
         title_native = excluded.title_native,
+        title_kana = excluded.title_kana,
         title_romaji = excluded.title_romaji,
         title_english = excluded.title_english,
         title_user_preferred = excluded.title_user_preferred,
@@ -1069,6 +1073,7 @@ function createDatabase(databasePath) {
         description = excluded.description,
         site_url = excluded.site_url,
         official_site_url = excluded.official_site_url,
+        mal_anime_id = excluded.mal_anime_id,
         cover_image_url = excluded.cover_image_url,
         banner_image_url = excluded.banner_image_url,
         season = excluded.season,
@@ -1081,6 +1086,7 @@ function createDatabase(databasePath) {
         anime_channel_message_id = COALESCE(excluded.anime_channel_message_id, anime_entries.anime_channel_message_id),
         thread_id = COALESCE(excluded.thread_id, anime_entries.thread_id),
         thread_card_message_id = COALESCE(excluded.thread_card_message_id, anime_entries.thread_card_message_id),
+        review_card_message_id = COALESCE(excluded.review_card_message_id, anime_entries.review_card_message_id),
         has_spoiler_reviews = excluded.has_spoiler_reviews,
         created_by_user_id = COALESCE(excluded.created_by_user_id, anime_entries.created_by_user_id),
         updated_at = excluded.updated_at
@@ -1092,6 +1098,7 @@ function createDatabase(databasePath) {
         provider,
         provider_media_id AS providerMediaId,
         title_native AS titleNative,
+        title_kana AS titleKana,
         title_romaji AS titleRomaji,
         title_english AS titleEnglish,
         title_user_preferred AS titleUserPreferred,
@@ -1099,6 +1106,7 @@ function createDatabase(databasePath) {
         description,
         site_url AS siteUrl,
         official_site_url AS officialSiteUrl,
+        mal_anime_id AS malAnimeId,
         cover_image_url AS coverImageUrl,
         banner_image_url AS bannerImageUrl,
         season,
@@ -1111,6 +1119,7 @@ function createDatabase(databasePath) {
         anime_channel_message_id AS animeChannelMessageId,
         thread_id AS threadId,
         thread_card_message_id AS threadCardMessageId,
+        review_card_message_id AS reviewCardMessageId,
         has_spoiler_reviews AS hasSpoilerReviews,
         created_by_user_id AS createdByUserId,
         created_at AS createdAt,
@@ -1126,6 +1135,7 @@ function createDatabase(databasePath) {
         provider,
         provider_media_id AS providerMediaId,
         title_native AS titleNative,
+        title_kana AS titleKana,
         title_romaji AS titleRomaji,
         title_english AS titleEnglish,
         title_user_preferred AS titleUserPreferred,
@@ -1133,6 +1143,7 @@ function createDatabase(databasePath) {
         description,
         site_url AS siteUrl,
         official_site_url AS officialSiteUrl,
+        mal_anime_id AS malAnimeId,
         cover_image_url AS coverImageUrl,
         banner_image_url AS bannerImageUrl,
         season,
@@ -1145,6 +1156,7 @@ function createDatabase(databasePath) {
         anime_channel_message_id AS animeChannelMessageId,
         thread_id AS threadId,
         thread_card_message_id AS threadCardMessageId,
+        review_card_message_id AS reviewCardMessageId,
         has_spoiler_reviews AS hasSpoilerReviews,
         created_by_user_id AS createdByUserId,
         created_at AS createdAt,
@@ -1160,6 +1172,7 @@ function createDatabase(databasePath) {
         provider,
         provider_media_id AS providerMediaId,
         title_native AS titleNative,
+        title_kana AS titleKana,
         title_romaji AS titleRomaji,
         title_english AS titleEnglish,
         title_user_preferred AS titleUserPreferred,
@@ -1167,6 +1180,7 @@ function createDatabase(databasePath) {
         description,
         site_url AS siteUrl,
         official_site_url AS officialSiteUrl,
+        mal_anime_id AS malAnimeId,
         cover_image_url AS coverImageUrl,
         banner_image_url AS bannerImageUrl,
         season,
@@ -1179,6 +1193,7 @@ function createDatabase(databasePath) {
         anime_channel_message_id AS animeChannelMessageId,
         thread_id AS threadId,
         thread_card_message_id AS threadCardMessageId,
+        review_card_message_id AS reviewCardMessageId,
         has_spoiler_reviews AS hasSpoilerReviews,
         created_by_user_id AS createdByUserId,
         created_at AS createdAt,
@@ -1194,6 +1209,7 @@ function createDatabase(databasePath) {
         provider,
         provider_media_id AS providerMediaId,
         title_native AS titleNative,
+        title_kana AS titleKana,
         title_romaji AS titleRomaji,
         title_english AS titleEnglish,
         title_user_preferred AS titleUserPreferred,
@@ -1201,6 +1217,7 @@ function createDatabase(databasePath) {
         description,
         site_url AS siteUrl,
         official_site_url AS officialSiteUrl,
+        mal_anime_id AS malAnimeId,
         cover_image_url AS coverImageUrl,
         banner_image_url AS bannerImageUrl,
         season,
@@ -1213,6 +1230,7 @@ function createDatabase(databasePath) {
         anime_channel_message_id AS animeChannelMessageId,
         thread_id AS threadId,
         thread_card_message_id AS threadCardMessageId,
+        review_card_message_id AS reviewCardMessageId,
         has_spoiler_reviews AS hasSpoilerReviews,
         created_by_user_id AS createdByUserId,
         created_at AS createdAt,
@@ -1228,6 +1246,7 @@ function createDatabase(databasePath) {
         e.provider,
         e.provider_media_id AS providerMediaId,
         e.title_native AS titleNative,
+        e.title_kana AS titleKana,
         e.title_romaji AS titleRomaji,
         e.title_english AS titleEnglish,
         e.title_user_preferred AS titleUserPreferred,
@@ -1235,6 +1254,7 @@ function createDatabase(databasePath) {
         e.description,
         e.site_url AS siteUrl,
         e.official_site_url AS officialSiteUrl,
+        e.mal_anime_id AS malAnimeId,
         e.cover_image_url AS coverImageUrl,
         e.banner_image_url AS bannerImageUrl,
         e.season,
@@ -1247,6 +1267,7 @@ function createDatabase(databasePath) {
         e.anime_channel_message_id AS animeChannelMessageId,
         e.thread_id AS threadId,
         e.thread_card_message_id AS threadCardMessageId,
+        e.review_card_message_id AS reviewCardMessageId,
         e.has_spoiler_reviews AS hasSpoilerReviews,
         e.created_by_user_id AS createdByUserId,
         e.created_at AS createdAt,
@@ -1268,6 +1289,7 @@ function createDatabase(databasePath) {
         e.provider,
         e.provider_media_id AS providerMediaId,
         e.title_native AS titleNative,
+        e.title_kana AS titleKana,
         e.title_romaji AS titleRomaji,
         e.title_english AS titleEnglish,
         e.title_user_preferred AS titleUserPreferred,
@@ -1275,6 +1297,7 @@ function createDatabase(databasePath) {
         e.description,
         e.site_url AS siteUrl,
         e.official_site_url AS officialSiteUrl,
+        e.mal_anime_id AS malAnimeId,
         e.cover_image_url AS coverImageUrl,
         e.banner_image_url AS bannerImageUrl,
         e.season,
@@ -1295,6 +1318,7 @@ function createDatabase(databasePath) {
       WHERE e.guild_id = ?
         AND (
           LOWER(COALESCE(e.title_user_preferred, '')) LIKE ?
+          OR LOWER(COALESCE(e.title_kana, '')) LIKE ?
           OR LOWER(COALESCE(e.title_romaji, '')) LIKE ?
           OR LOWER(COALESCE(e.title_native, '')) LIKE ?
           OR LOWER(COALESCE(e.title_english, '')) LIKE ?
@@ -1315,6 +1339,7 @@ function createDatabase(databasePath) {
           anime_channel_message_id = COALESCE(?, anime_channel_message_id),
           thread_id = COALESCE(?, thread_id),
           thread_card_message_id = COALESCE(?, thread_card_message_id),
+          review_card_message_id = COALESCE(?, review_card_message_id),
           updated_at = ?
       WHERE id = ?
     `),
@@ -1494,6 +1519,237 @@ function createDatabase(databasePath) {
       FROM anime_review_roles
       WHERE guild_id = ?
       ORDER BY threshold ASC
+    `),
+    getAnimeRoleAward: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        threshold,
+        role_id AS roleId,
+        awarded_at AS awardedAt,
+        dm_sent_at AS dmSentAt
+      FROM anime_role_awards
+      WHERE guild_id = ? AND user_id = ? AND threshold = ?
+      LIMIT 1
+    `),
+    upsertAnimeRoleAward: sqlite.prepare(`
+      INSERT INTO anime_role_awards (
+        guild_id,
+        user_id,
+        threshold,
+        role_id,
+        awarded_at,
+        dm_sent_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, user_id, threshold) DO UPDATE SET
+        role_id = COALESCE(excluded.role_id, anime_role_awards.role_id),
+        awarded_at = COALESCE(anime_role_awards.awarded_at, excluded.awarded_at),
+        dm_sent_at = COALESCE(anime_role_awards.dm_sent_at, excluded.dm_sent_at)
+    `),
+    setAnimeRoleAwardDmSentAt: sqlite.prepare(`
+      UPDATE anime_role_awards
+      SET dm_sent_at = ?
+      WHERE guild_id = ? AND user_id = ? AND threshold = ?
+    `),
+    upsertAnimeReviewPromptState: sqlite.prepare(`
+      INSERT INTO anime_review_prompt_state (
+        guild_id,
+        anime_entry_id,
+        user_id,
+        prompt_type,
+        prompted_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, anime_entry_id, user_id, prompt_type) DO UPDATE SET
+        prompted_at = excluded.prompted_at
+    `),
+    getAnimeReviewPromptState: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        anime_entry_id AS animeEntryId,
+        user_id AS userId,
+        prompt_type AS promptType,
+        prompted_at AS promptedAt
+      FROM anime_review_prompt_state
+      WHERE guild_id = ? AND anime_entry_id = ? AND user_id = ? AND prompt_type = ?
+      LIMIT 1
+    `),
+    deleteAnimeReviewPromptStateByEntryId: sqlite.prepare(`
+      DELETE FROM anime_review_prompt_state
+      WHERE anime_entry_id = ?
+    `),
+    upsertAnimeHashtagSource: sqlite.prepare(`
+      INSERT INTO anime_hashtag_sources (
+        guild_id,
+        source_message_id,
+        source_channel_id,
+        source_author_id,
+        relayed_timeline_message_id,
+        relayed_route_message_ids_json,
+        cleaned_content,
+        display_tags_json,
+        detected_candidate,
+        anime_entry_id,
+        status,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, source_message_id) DO UPDATE SET
+        source_channel_id = excluded.source_channel_id,
+        source_author_id = COALESCE(excluded.source_author_id, anime_hashtag_sources.source_author_id),
+        relayed_timeline_message_id = COALESCE(excluded.relayed_timeline_message_id, anime_hashtag_sources.relayed_timeline_message_id),
+        relayed_route_message_ids_json = COALESCE(excluded.relayed_route_message_ids_json, anime_hashtag_sources.relayed_route_message_ids_json),
+        cleaned_content = COALESCE(excluded.cleaned_content, anime_hashtag_sources.cleaned_content),
+        display_tags_json = COALESCE(excluded.display_tags_json, anime_hashtag_sources.display_tags_json),
+        detected_candidate = COALESCE(excluded.detected_candidate, anime_hashtag_sources.detected_candidate),
+        anime_entry_id = COALESCE(excluded.anime_entry_id, anime_hashtag_sources.anime_entry_id),
+        status = excluded.status,
+        updated_at = excluded.updated_at
+    `),
+    getAnimeHashtagSourceByMessageId: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        source_message_id AS sourceMessageId,
+        source_channel_id AS sourceChannelId,
+        source_author_id AS sourceAuthorId,
+        relayed_timeline_message_id AS relayedTimelineMessageId,
+        relayed_route_message_ids_json AS relayedRouteMessageIdsJson,
+        cleaned_content AS cleanedContent,
+        display_tags_json AS displayTagsJson,
+        detected_candidate AS detectedCandidate,
+        anime_entry_id AS animeEntryId,
+        status,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM anime_hashtag_sources
+      WHERE guild_id = ? AND source_message_id = ?
+      LIMIT 1
+    `),
+    listRecentUnresolvedAnimeHashtagSourcesByUser: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        source_message_id AS sourceMessageId,
+        source_channel_id AS sourceChannelId,
+        source_author_id AS sourceAuthorId,
+        relayed_timeline_message_id AS relayedTimelineMessageId,
+        relayed_route_message_ids_json AS relayedRouteMessageIdsJson,
+        cleaned_content AS cleanedContent,
+        display_tags_json AS displayTagsJson,
+        detected_candidate AS detectedCandidate,
+        anime_entry_id AS animeEntryId,
+        status,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM anime_hashtag_sources
+      WHERE guild_id = ?
+        AND source_author_id = ?
+        AND status IN ('pending', 'unresolved')
+        AND datetime(updated_at) >= datetime(?)
+      ORDER BY datetime(updated_at) DESC, id DESC
+      LIMIT ?
+    `),
+    updateAnimeHashtagSourceLink: sqlite.prepare(`
+      UPDATE anime_hashtag_sources
+      SET anime_entry_id = ?,
+          status = ?,
+          detected_candidate = COALESCE(?, detected_candidate),
+          updated_at = ?
+      WHERE id = ?
+    `),
+    deleteAnimeHashtagSourcesByEntryId: sqlite.prepare(`
+      DELETE FROM anime_hashtag_sources
+      WHERE anime_entry_id = ?
+    `),
+    deleteAnimeHashtagSourceByMessageId: sqlite.prepare(`
+      DELETE FROM anime_hashtag_sources
+      WHERE guild_id = ? AND source_message_id = ?
+    `),
+    deleteAnimeReviewsByEntryId: sqlite.prepare(`
+      DELETE FROM anime_reviews
+      WHERE anime_entry_id = ?
+    `),
+    deleteAnimeUserStatusByEntryId: sqlite.prepare(`
+      DELETE FROM anime_user_status
+      WHERE anime_entry_id = ?
+    `),
+    deleteAnimeEntryById: sqlite.prepare(`
+      DELETE FROM anime_entries
+      WHERE id = ?
+    `),
+    listAllAnimeEntries: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        provider,
+        provider_media_id AS providerMediaId,
+        title_native AS titleNative,
+        title_kana AS titleKana,
+        title_romaji AS titleRomaji,
+        title_english AS titleEnglish,
+        title_user_preferred AS titleUserPreferred,
+        aliases_json AS aliasesJson,
+        description,
+        site_url AS siteUrl,
+        official_site_url AS officialSiteUrl,
+        mal_anime_id AS malAnimeId,
+        cover_image_url AS coverImageUrl,
+        banner_image_url AS bannerImageUrl,
+        season,
+        season_year AS seasonYear,
+        status,
+        episodes,
+        duration,
+        next_airing_at AS nextAiringAt,
+        anime_channel_id AS animeChannelId,
+        anime_channel_message_id AS animeChannelMessageId,
+        thread_id AS threadId,
+        thread_card_message_id AS threadCardMessageId,
+        review_card_message_id AS reviewCardMessageId,
+        has_spoiler_reviews AS hasSpoilerReviews,
+        created_by_user_id AS createdByUserId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM anime_entries
+      WHERE guild_id = ?
+      ORDER BY id ASC
+    `),
+    upsertBotDeletableMessage: sqlite.prepare(`
+      INSERT INTO bot_deletable_messages (
+        guild_id,
+        channel_id,
+        message_id,
+        owner_user_id,
+        purpose,
+        expires_at,
+        created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(message_id) DO UPDATE SET
+        owner_user_id = excluded.owner_user_id,
+        purpose = excluded.purpose,
+        expires_at = excluded.expires_at
+    `),
+    getBotDeletableMessage: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        channel_id AS channelId,
+        message_id AS messageId,
+        owner_user_id AS ownerUserId,
+        purpose,
+        expires_at AS expiresAt,
+        created_at AS createdAt
+      FROM bot_deletable_messages
+      WHERE message_id = ?
+      LIMIT 1
+    `),
+    deleteBotDeletableMessage: sqlite.prepare(`
+      DELETE FROM bot_deletable_messages
+      WHERE message_id = ?
+    `),
+    deleteExpiredBotDeletableMessages: sqlite.prepare(`
+      DELETE FROM bot_deletable_messages
+      WHERE expires_at IS NOT NULL
+        AND datetime(expires_at) <= datetime(?)
     `),
     getTimelineMergeState: sqlite.prepare(`
       SELECT
@@ -2069,6 +2325,7 @@ function createDatabase(databasePath) {
           record.provider,
           record.providerMediaId,
           record.titleNative || null,
+          record.titleKana || null,
           record.titleRomaji || null,
           record.titleEnglish || null,
           record.titleUserPreferred || null,
@@ -2076,6 +2333,7 @@ function createDatabase(databasePath) {
           record.description || null,
           record.siteUrl || null,
           record.officialSiteUrl || null,
+          record.malAnimeId || null,
           record.coverImageUrl || null,
           record.bannerImageUrl || null,
           record.season || null,
@@ -2088,6 +2346,7 @@ function createDatabase(databasePath) {
           record.animeChannelMessageId || null,
           record.threadId || null,
           record.threadCardMessageId || null,
+          record.reviewCardMessageId || null,
           record.hasSpoilerReviews ? 1 : 0,
           record.createdByUserId || null,
           record.createdAt || now,
@@ -2106,12 +2365,13 @@ function createDatabase(databasePath) {
       getEntryByChannelMessageId(guildId, messageId) {
         return statements.getAnimeEntryByChannelMessageId.get(guildId, messageId) || null;
       },
-      updateBindings(id, { animeChannelId = null, animeChannelMessageId = null, threadId = null, threadCardMessageId = null }) {
+      updateBindings(id, { animeChannelId = null, animeChannelMessageId = null, threadId = null, threadCardMessageId = null, reviewCardMessageId = null }) {
         statements.updateAnimeEntryMessageBindings.run(
           animeChannelId,
           animeChannelMessageId,
           threadId,
           threadCardMessageId,
+          reviewCardMessageId,
           new Date().toISOString(),
           id
         );
@@ -2127,7 +2387,7 @@ function createDatabase(databasePath) {
       },
       searchEntries(guildId, query, limit = 10) {
         const like = `%${String(query || '').toLowerCase()}%`;
-        return statements.searchAnimeEntriesLocal.all(guildId, like, like, like, like, like, limit);
+        return statements.searchAnimeEntriesLocal.all(guildId, like, like, like, like, like, like, limit);
       },
       replaceCastCache(animeEntryId, rows = []) {
         const transaction = sqlite.transaction((entryId, castRows) => {
@@ -2215,6 +2475,76 @@ function createDatabase(databasePath) {
       },
       listReviewRoles(guildId) {
         return statements.listAnimeReviewRoles.all(guildId);
+      },
+      getRoleAward(guildId, userId, threshold) {
+        return statements.getAnimeRoleAward.get(guildId, userId, threshold) || null;
+      },
+      upsertRoleAward({ guildId, userId, threshold, roleId = null, awardedAt = new Date().toISOString(), dmSentAt = null }) {
+        statements.upsertAnimeRoleAward.run(guildId, userId, threshold, roleId, awardedAt, dmSentAt);
+      },
+      setRoleAwardDmSentAt(guildId, userId, threshold, dmSentAt = new Date().toISOString()) {
+        statements.setAnimeRoleAwardDmSentAt.run(dmSentAt, guildId, userId, threshold);
+      },
+      upsertReviewPromptState({ guildId, animeEntryId, userId, promptType, promptedAt = new Date().toISOString() }) {
+        statements.upsertAnimeReviewPromptState.run(guildId, animeEntryId, userId, promptType, promptedAt);
+      },
+      getReviewPromptState(guildId, animeEntryId, userId, promptType) {
+        return statements.getAnimeReviewPromptState.get(guildId, animeEntryId, userId, promptType) || null;
+      },
+      upsertHashtagSource(record) {
+        const now = new Date().toISOString();
+        statements.upsertAnimeHashtagSource.run(
+          record.guildId,
+          record.sourceMessageId,
+          record.sourceChannelId,
+          record.sourceAuthorId || null,
+          record.relayedTimelineMessageId || null,
+          record.relayedRouteMessageIdsJson || null,
+          record.cleanedContent || null,
+          record.displayTagsJson || null,
+          record.detectedCandidate || null,
+          record.animeEntryId || null,
+          record.status || 'pending',
+          record.createdAt || now,
+          now
+        );
+      },
+      getHashtagSourceByMessageId(guildId, sourceMessageId) {
+        return statements.getAnimeHashtagSourceByMessageId.get(guildId, sourceMessageId) || null;
+      },
+      listRecentUnresolvedHashtagSourcesByUser(guildId, userId, sinceIso, limit = 5) {
+        return statements.listRecentUnresolvedAnimeHashtagSourcesByUser.all(guildId, userId, sinceIso, limit);
+      },
+      updateHashtagSourceLink(id, { animeEntryId = null, status = 'linked', detectedCandidate = null }) {
+        statements.updateAnimeHashtagSourceLink.run(animeEntryId, status, detectedCandidate, new Date().toISOString(), id);
+      },
+      listAllEntries(guildId) {
+        return statements.listAllAnimeEntries.all(guildId);
+      },
+      deleteEntryCascade(entryId) {
+        const transaction = sqlite.transaction((targetEntryId) => {
+          statements.deleteAnimeCastByEntryId.run(targetEntryId);
+          statements.deleteAnimeReviewsByEntryId.run(targetEntryId);
+          statements.deleteAnimeUserStatusByEntryId.run(targetEntryId);
+          statements.deleteAnimeReviewPromptStateByEntryId.run(targetEntryId);
+          statements.deleteAnimeHashtagSourcesByEntryId.run(targetEntryId);
+          statements.deleteAnimeEntryById.run(targetEntryId);
+        });
+        transaction(entryId);
+      }
+    },
+    deletableMessages: {
+      upsert({ guildId, channelId, messageId, ownerUserId, purpose = null, expiresAt = null, createdAt = new Date().toISOString() }) {
+        statements.upsertBotDeletableMessage.run(guildId, channelId, messageId, ownerUserId, purpose, expiresAt, createdAt);
+      },
+      get(messageId) {
+        return statements.getBotDeletableMessage.get(messageId) || null;
+      },
+      delete(messageId) {
+        statements.deleteBotDeletableMessage.run(messageId);
+      },
+      deleteExpired(nowIso = new Date().toISOString()) {
+        statements.deleteExpiredBotDeletableMessages.run(nowIso);
       }
     },
     timelineMerge: {

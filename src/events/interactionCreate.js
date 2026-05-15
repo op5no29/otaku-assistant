@@ -1,6 +1,21 @@
 module.exports = {
   async execute(interaction) {
     if (!interaction.isChatInputCommand()) {
+      const animeCommand = interaction.client.commands.get('anime');
+      if (animeCommand?.handleComponentInteraction) {
+        try {
+          const handled = await animeCommand.handleComponentInteraction(interaction);
+          if (handled) {
+            return;
+          }
+        } catch (error) {
+          interaction.client.logger.error('Anime component interaction failed', {
+            interactionId: interaction.id,
+            customId: interaction.customId || null,
+            error: error.message
+          });
+        }
+      }
       return;
     }
 

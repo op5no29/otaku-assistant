@@ -1,4 +1,4 @@
-const { SlashCommandBuilder } = require('discord.js');
+const { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder } = require('discord.js');
 const {
   searchAnime,
   resolveAnimeFromTitle,
@@ -10,12 +10,19 @@ const {
   listAnimeIndex,
   getCurrentSeasonAnime,
   getNextSeasonAnime,
-  getAnimeById
+  getAnimeById,
+  maybeLinkRecentAnimeHashtagSource,
+  getProviderTokenMissingMessage
 } = require('../modules/anime');
 const { buildAnimeLinks, getPreferredAnimeDisplayTitle } = require('../modules/anime/buildAnimeMessages');
+const { registerDeletableMessage } = require('../modules/deletableMessages');
 
 function formatTitle(media) {
   return getPreferredAnimeDisplayTitle(media);
+}
+
+function getExternalLabel(entry) {
+  return String(entry?.provider || '') === 'annict' ? 'Annict' : 'AniList';
 }
 
 function formatSeason(media) {
@@ -40,6 +47,122 @@ function getNextThreshold(config, reviewedCount) {
   return thresholds.find((threshold) => reviewedCount < threshold) || null;
 }
 
+async function buildAnimeDetailLine(client, entry) {
+  const stats = await getAnimeStats(client, entry);
+  const links = buildAnimeLinks(entry);
+  return [
+    `**${formatTitle(entry)}**`,
+    `👀 ${stats.interestedCount} / ✅ ${stats.watchedCount} / 💬 ${stats.reviewCount}`,
+    links.parentUrl ? `作品カード: ${links.parentUrl}` : null,
+    links.threadUrl ? `スレッド: ${links.threadUrl}` : null,
+    entry.siteUrl ? `${getExternalLabel(entry)}: ${entry.siteUrl}` : null
+  ].filter(Boolean).join('\n');
+}
+
+async function buildAnimeIndexResponse(client, guildId, page = 1, selectedEntryId = null) {
+  const result = await listAnimeIndex(client, guildId, page);
+  const selectedEntry = selectedEntryId ? client.db.anime.getEntryById(Number(selectedEntryId)) : result.entries[0] || null;
+  const validSelectedEntry = selectedEntry && String(selectedEntry.guildId) === String(guildId) ? selectedEntry : (result.entries[0] || null);
+  const options = result.entries.slice(0, 10).map((entry) => ({
+    label: formatTitle(entry).slice(0, 100),
+    description: `${entry.status || '状態不明'} / ${formatSeason(entry) || 'シーズン不明'}`.slice(0, 100),
+    value: String(entry.id)
+  }));
+
+  const content = [
+    `登録済みアニメ一覧 ${result.page}ページ目 / 全${result.total}件`,
+    validSelectedEntry ? await buildAnimeDetailLine(client, validSelectedEntry) : 'まだ登録済みアニメはありません。'
+  ].join('\n\n');
+
+  const components = [];
+  if (options.length) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`anime:index:select:${result.page}`)
+          .setPlaceholder('作品を選択')
+          .addOptions(options)
+      )
+    );
+  }
+  components.push(
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`anime:index:page:${Math.max(1, result.page - 1)}`)
+        .setLabel('前へ')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(result.page <= 1),
+      new ButtonBuilder()
+        .setCustomId(`anime:index:page:${result.page + 1}`)
+        .setLabel('次へ')
+        .setStyle(ButtonStyle.Secondary)
+        .setDisabled(result.page * result.pageSize >= result.total)
+    )
+  );
+
+  if (validSelectedEntry) {
+    const links = buildAnimeLinks(validSelectedEntry);
+    const detailButtons = [];
+    if (links.parentUrl) {
+      detailButtons.push(new ButtonBuilder().setLabel('作品カードへ飛ぶ').setStyle(ButtonStyle.Link).setURL(links.parentUrl));
+    }
+    if (links.threadUrl) {
+      detailButtons.push(new ButtonBuilder().setLabel('作品スレッドへ飛ぶ').setStyle(ButtonStyle.Link).setURL(links.threadUrl));
+    }
+    if (validSelectedEntry.siteUrl) {
+      detailButtons.push(new ButtonBuilder().setLabel(`${getExternalLabel(validSelectedEntry)}で開く`).setStyle(ButtonStyle.Link).setURL(validSelectedEntry.siteUrl));
+    }
+    if (detailButtons.length) {
+      components.push(new ActionRowBuilder().addComponents(...detailButtons.slice(0, 3)));
+    }
+  }
+
+  return { content, components };
+}
+
+async function buildAnimeFindResponse(client, guildId, query, selectedEntryId = null) {
+  const entries = await findRegisteredAnime(client, guildId, query, 10);
+  const selectedEntry = selectedEntryId ? client.db.anime.getEntryById(Number(selectedEntryId)) : entries[0] || null;
+  const validSelectedEntry = selectedEntry && String(selectedEntry.guildId) === String(guildId) ? selectedEntry : (entries[0] || null);
+  const content = entries.length
+    ? [`検索結果: ${query}`, validSelectedEntry ? await buildAnimeDetailLine(client, validSelectedEntry) : null].filter(Boolean).join('\n\n')
+    : '登録済みアニメは見つかりませんでした。';
+  const components = [];
+
+  if (entries.length) {
+    components.push(
+      new ActionRowBuilder().addComponents(
+        new StringSelectMenuBuilder()
+          .setCustomId(`anime:find:select`)
+          .setPlaceholder('作品を選択')
+          .addOptions(entries.map((entry) => ({
+            label: formatTitle(entry).slice(0, 100),
+            description: `${entry.status || '状態不明'} / ${formatSeason(entry) || 'シーズン不明'}`.slice(0, 100),
+            value: String(entry.id)
+          })))
+      )
+    );
+    if (validSelectedEntry) {
+      const links = buildAnimeLinks(validSelectedEntry);
+      const buttons = [];
+      if (links.parentUrl) {
+        buttons.push(new ButtonBuilder().setLabel('作品カードへ飛ぶ').setStyle(ButtonStyle.Link).setURL(links.parentUrl));
+      }
+      if (links.threadUrl) {
+        buttons.push(new ButtonBuilder().setLabel('作品スレッドへ飛ぶ').setStyle(ButtonStyle.Link).setURL(links.threadUrl));
+      }
+      if (validSelectedEntry.siteUrl) {
+        buttons.push(new ButtonBuilder().setLabel(`${getExternalLabel(validSelectedEntry)}で開く`).setStyle(ButtonStyle.Link).setURL(validSelectedEntry.siteUrl));
+      }
+      if (buttons.length) {
+        components.push(new ActionRowBuilder().addComponents(...buttons.slice(0, 3)));
+      }
+    }
+  }
+
+  return { content, components };
+}
+
 async function buildLocalEntryLines(client, guildId, entries) {
   const lines = [];
   for (const entry of entries) {
@@ -55,6 +178,13 @@ async function buildLocalEntryLines(client, guildId, entries) {
   return lines;
 }
 
+async function sendPublicResult(interaction, payload, purpose) {
+  const sentMessage = await interaction.channel.send(payload);
+  await registerDeletableMessage(sentMessage, interaction.user.id, purpose);
+  await interaction.editReply(`結果を投稿しました: ${sentMessage.url}`);
+  return sentMessage;
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('anime')
@@ -62,7 +192,7 @@ module.exports = {
     .addSubcommand((subcommand) =>
       subcommand
         .setName('search')
-        .setDescription('AniList でアニメ作品を検索します。')
+        .setDescription('Annict でアニメ作品を検索します。')
         .addStringOption((option) =>
           option
             .setName('title')
@@ -187,20 +317,31 @@ module.exports = {
         return;
       }
 
+      const remoteLookupRequired = subcommand === 'search'
+        || subcommand === 'cast'
+        || subcommand === 'post'
+        || group === 'season';
+      const providerReadyError = remoteLookupRequired ? getProviderTokenMissingMessage(client) : null;
+      if (providerReadyError) {
+        await interaction.editReply(providerReadyError);
+        return;
+      }
+
       if (subcommand === 'search') {
         const title = interaction.options.getString('title', true);
         const results = await searchAnime(client, title);
-        await interaction.editReply(
-          results.length
+        await sendPublicResult(interaction, {
+          content: results.length
             ? [`検索結果: ${title}`, ...buildCandidateLines(results.slice(0, 5))].join('\n\n')
-            : '該当するアニメが見つかりませんでした。'
-        );
+            : '該当するアニメが見つかりませんでした。',
+          allowedMentions: { parse: [] }
+        }, 'anime_search_result');
         return;
       }
 
       if (subcommand === 'cast') {
         const title = interaction.options.getString('title', true);
-        const resolved = await resolveAnimeFromTitle(client, title);
+        const resolved = await resolveAnimeFromTitle(client, title, interaction.guildId);
         if (!resolved.media) {
           await interaction.editReply('アニメ情報の取得に失敗しました。少し後で試してください。');
           return;
@@ -211,7 +352,12 @@ module.exports = {
           mediaId: resolved.media.providerMediaId || null
         });
 
-        const detailedMedia = await getAnimeById(client, resolved.media.providerMediaId, Math.max(client.appConfig.anime.maxCastInCard, 10));
+        const detailedMedia = await getAnimeById(
+          client,
+          resolved.media.providerMediaId,
+          Math.max(client.appConfig.anime.maxCastInCard, 10),
+          resolved.media.provider
+        );
         const castRows = Array.isArray(detailedMedia?.cast) ? detailedMedia.cast : [];
         client.logger.info('anime cast query finished', {
           title,
@@ -225,29 +371,50 @@ module.exports = {
           (row) => `- ${row.characterName || 'キャラ不明'}: ${row.voiceActorName || '声優情報なし'}`
         );
         const ambiguity = resolved.candidates.length > 1 ? `候補が複数ありましたが、先頭候補を採用しました。(${resolved.candidates.length}件)` : null;
-        await interaction.editReply([
-          `**${formatTitle(detailedMedia || resolved.media)}**`,
-          formatSeason(detailedMedia || resolved.media) ? `- ${formatSeason(detailedMedia || resolved.media)} / ${(detailedMedia || resolved.media).status || '状態不明'}` : null,
-          castLines.length ? castLines.join('\n') : 'キャスト情報を取得できませんでした。',
-          ambiguity,
-        ].filter(Boolean).join('\n'));
+        await sendPublicResult(interaction, {
+          content: [
+            `**${formatTitle(detailedMedia || resolved.media)}**`,
+            formatSeason(detailedMedia || resolved.media) ? `- ${formatSeason(detailedMedia || resolved.media)} / ${(detailedMedia || resolved.media).status || '状態不明'}` : null,
+            castLines.length ? castLines.join('\n') : 'キャスト情報が見つかりませんでした。',
+            ambiguity,
+          ].filter(Boolean).join('\n'),
+          allowedMentions: { parse: [] }
+        }, 'anime_cast_result');
         return;
       }
 
       if (subcommand === 'post') {
         const title = interaction.options.getString('title', true);
-        const resolved = await resolveAnimeFromTitle(client, title);
+        const resolved = await resolveAnimeFromTitle(client, title, interaction.guildId);
         if (!resolved.media) {
           await interaction.editReply('アニメ情報の取得に失敗しました。少し後で試してください。');
           return;
         }
-        const result = await postAnimeToChannel(interaction.guild, resolved.media, interaction.user.id);
+        const result = await postAnimeToChannel(interaction.guild, resolved.media, interaction.user.id, [title]);
+        await maybeLinkRecentAnimeHashtagSource(client, interaction.guildId, interaction.user.id, result.entry.id).catch(() => null);
         const links = buildAnimeLinks(result.entry);
-        await interaction.editReply([
-          result.created ? '作品カードとスレッドを作成しました。' : '既に登録済みです。',
-          links.parentUrl ? `作品カードへ飛ぶ: ${links.parentUrl}` : null,
-          links.threadUrl ? `スレッドへ飛ぶ: ${links.threadUrl}` : null
-        ].filter(Boolean).join('\n'));
+        const components = [];
+        const buttons = [];
+        if (links.parentUrl) {
+          buttons.push(new ButtonBuilder().setLabel('作品カードへ飛ぶ').setStyle(ButtonStyle.Link).setURL(links.parentUrl));
+        }
+        if (links.threadUrl) {
+          buttons.push(new ButtonBuilder().setLabel('作品スレッドへ飛ぶ').setStyle(ButtonStyle.Link).setURL(links.threadUrl));
+        }
+        if (result.entry.siteUrl) {
+          buttons.push(new ButtonBuilder().setLabel(`${getExternalLabel(result.entry)}で開く`).setStyle(ButtonStyle.Link).setURL(result.entry.siteUrl));
+        }
+        if (buttons.length) {
+          components.push(new ActionRowBuilder().addComponents(...buttons.slice(0, 3)));
+        }
+        await sendPublicResult(interaction, {
+          content: [
+            result.created ? '作品カードとスレッドを作成しました。' : '既に登録済みです。',
+            `**${formatTitle(result.entry)}**`
+          ].join('\n'),
+          components,
+          allowedMentions: { parse: [] }
+        }, 'anime_post_result');
         return;
       }
 
@@ -257,13 +424,17 @@ module.exports = {
           : await getNextSeasonAnime(client, 15);
         const lines = [];
         for (const media of seasonResult.items.slice(0, 15)) {
-          const existing = client.db.anime.getEntryByProviderMediaId(interaction.guildId, 'anilist', media.providerMediaId);
-          lines.push(`- ${formatTitle(media)}${existing ? ' [登録済み]' : ''}`);
+          const existing = client.db.anime.getEntryByProviderMediaId(interaction.guildId, media.provider, media.providerMediaId);
+          const links = existing ? buildAnimeLinks(existing) : null;
+          lines.push(`- ${formatTitle(media)}${existing ? ` [登録済み]${links?.threadUrl ? ` ${links.threadUrl}` : ''}` : ''}`);
         }
-        await interaction.editReply([
-          `${seasonResult.season} ${seasonResult.seasonYear}`,
-          ...lines
-        ].join('\n'));
+        await sendPublicResult(interaction, {
+          content: [
+            `${seasonResult.season} ${seasonResult.seasonYear}`,
+            ...lines
+          ].join('\n'),
+          allowedMentions: { parse: [] }
+        }, 'anime_season_result');
         return;
       }
 
@@ -301,39 +472,31 @@ module.exports = {
           return;
         }
         const reviews = client.db.anime.listReviews(interaction.guildId, animeEntry.id, client.appConfig.anime.maxReviewsInCard);
-        await interaction.editReply(
-          reviews.length
+        await sendPublicResult(interaction, {
+          content: reviews.length
             ? [
                 `**${formatTitle(animeEntry)} の感想**`,
                 ...reviews.map((review) => review.spoiler
                   ? `- ${review.userId}: ネタバレ感想あり`
                   : `- ${review.userId}: ${String(review.reviewText || '').trim().slice(0, 180)}`)
               ].join('\n')
-            : 'まだ感想はありません。'
-        );
+            : 'まだ感想はありません。',
+          allowedMentions: { parse: [] }
+        }, 'anime_reviews_result');
         return;
       }
 
       if (subcommand === 'find') {
         const query = interaction.options.getString('query', true);
-        const entries = await findRegisteredAnime(client, interaction.guildId, query, 10);
-        if (!entries.length) {
-          await interaction.editReply('登録済みアニメは見つかりませんでした。');
-          return;
-        }
-        const lines = await buildLocalEntryLines(client, interaction.guildId, entries);
-        await interaction.editReply(lines.join('\n\n'));
+        const response = await buildAnimeFindResponse(client, interaction.guildId, query);
+        await interaction.editReply(response);
         return;
       }
 
       if (subcommand === 'index') {
         const page = interaction.options.getInteger('page') || 1;
-        const result = await listAnimeIndex(client, interaction.guildId, page);
-        const lines = await buildLocalEntryLines(client, interaction.guildId, result.entries);
-        await interaction.editReply([
-          `登録済みアニメ一覧 ${result.page}ページ目 / 全${result.total}件`,
-          ...(lines.length ? lines : ['まだ登録済みアニメはありません。'])
-        ].join('\n\n'));
+        const response = await buildAnimeIndexResponse(client, interaction.guildId, page);
+        await interaction.editReply(response);
         return;
       }
 
@@ -364,7 +527,9 @@ module.exports = {
         userId: interaction.user.id,
         error: error.message
       });
-      await interaction.editReply('アニメ情報の取得に失敗しました。少し後で試してください。');
+      await interaction.editReply(error.code === 'ANNICT_TOKEN_MISSING'
+        ? 'Annict APIトークンが設定されていません。'
+        : 'アニメ情報の取得に失敗しました。少し後で試してください。');
     } finally {
       client.logger.info('anime command finished', {
         subcommandGroup: group || null,
@@ -373,5 +538,42 @@ module.exports = {
         userId: interaction.user.id
       });
     }
+  }
+  ,
+  async handleComponentInteraction(interaction) {
+    if (!interaction.isButton() && !interaction.isStringSelectMenu()) {
+      return false;
+    }
+    if (!String(interaction.customId || '').startsWith('anime:')) {
+      return false;
+    }
+
+    const client = interaction.client;
+    await interaction.deferUpdate().catch(() => null);
+
+    if (interaction.isButton() && interaction.customId.startsWith('anime:index:page:')) {
+      const page = Number(interaction.customId.split(':').pop() || '1');
+      const response = await buildAnimeIndexResponse(client, interaction.guildId, page);
+      await interaction.editReply(response).catch(() => null);
+      return true;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId.startsWith('anime:index:select:')) {
+      const page = Number(interaction.customId.split(':').pop() || '1');
+      const selectedEntryId = interaction.values?.[0] || null;
+      const response = await buildAnimeIndexResponse(client, interaction.guildId, page, selectedEntryId);
+      await interaction.editReply(response).catch(() => null);
+      return true;
+    }
+
+    if (interaction.isStringSelectMenu() && interaction.customId === 'anime:find:select') {
+      const selectedEntryId = interaction.values?.[0] || null;
+      const currentQuery = interaction.message?.content?.match(/^検索結果: (.+)$/m)?.[1] || '';
+      const response = await buildAnimeFindResponse(client, interaction.guildId, currentQuery, selectedEntryId);
+      await interaction.editReply(response).catch(() => null);
+      return true;
+    }
+
+    return false;
   }
 };

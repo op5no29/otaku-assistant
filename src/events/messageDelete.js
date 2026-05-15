@@ -32,5 +32,25 @@ module.exports = {
         error: error.message
       });
     }
+
+    try {
+      client.db.deletableMessages.delete(messageId);
+    } catch (error) {
+      client.logger.error('delete deletable message reference failed', {
+        messageId,
+        error: error.message
+      });
+    }
+
+    try {
+      const { handleAnimeParentMessageDeleted } = require('../modules/anime');
+      await handleAnimeParentMessageDeleted(client, message);
+    } catch (error) {
+      client.logger.error('anime parent delete cleanup failed', {
+        messageId,
+        channelId: message.channelId || null,
+        error: error.message
+      });
+    }
   }
 };

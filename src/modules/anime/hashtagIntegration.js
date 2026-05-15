@@ -2,13 +2,15 @@ const { parseRelayHashtagPrefixes } = require('../../utils/text');
 const {
   searchAnime,
   getAnimeById,
-  postAnimeToChannel
+  postAnimeToChannel,
+  linkAnimeHashtagSourceToEntry
 } = require('./index');
 const { buildAnimeLinks, getPreferredAnimeDisplayTitle } = require('./buildAnimeMessages');
 
 const GENERIC_SHORT_COMMENTS = new Set([
   '見た',
   'これ好き',
+  'test',
   'op好き',
   'ed好き',
   '神',
@@ -18,14 +20,56 @@ const GENERIC_SHORT_COMMENTS = new Set([
   'すき',
   '好き',
   '良かった',
-  'いい'
+  'いい',
+  'op最高'
 ]);
+
+const INTEGRATION_STATE_TTL_MS = 1000 * 60 * 30;
 
 function ensureReplyStore(client) {
   if (!client.animeHashtagRepliedMessages) {
     client.animeHashtagRepliedMessages = new Set();
   }
   return client.animeHashtagRepliedMessages;
+}
+
+function ensureIntegrationStateStore(client) {
+  if (!client.animeHashtagIntegrationStates) {
+    client.animeHashtagIntegrationStates = new Map();
+  }
+  return client.animeHashtagIntegrationStates;
+}
+
+function getIntegrationState(client, messageId) {
+  const store = ensureIntegrationStateStore(client);
+  const existing = store.get(messageId);
+  if (!existing) {
+    return null;
+  }
+  if (existing.expiresAt <= Date.now()) {
+    store.delete(messageId);
+    return null;
+  }
+  return existing;
+}
+
+function setIntegrationState(client, messageId, patch) {
+  const store = ensureIntegrationStateStore(client);
+  const previous = getIntegrationState(client, messageId) || {
+    status: 'pending',
+    attempts: 0,
+    replied: false,
+    lastReason: null,
+    createdAt: Date.now(),
+    expiresAt: Date.now() + INTEGRATION_STATE_TTL_MS
+  };
+  const next = {
+    ...previous,
+    ...patch,
+    expiresAt: Date.now() + INTEGRATION_STATE_TTL_MS
+  };
+  store.set(messageId, next);
+  return next;
 }
 
 function hasAnimeRoute(message, options = {}) {
@@ -42,9 +86,31 @@ function hasAnimeRoute(message, options = {}) {
   });
 }
 
-function extractAniListIdFromText(text) {
-  const match = String(text || '').match(/https?:\/\/anilist\.co\/anime\/(\d+)(?:\/|$)/iu);
-  return match?.[1] || null;
+function extractProviderIdFromText(text) {
+  const source = String(text || '');
+  const annictMatch = source.match(/https?:\/\/annict\.com\/works\/(\d+)(?:\/|$)/iu);
+  if (annictMatch?.[1]) {
+    return {
+      provider: 'annict',
+      providerMediaId: annictMatch[1]
+    };
+  }
+  const anilistMatch = source.match(/https?:\/\/anilist\.co\/anime\/(\d+)(?:\/|$)/iu);
+  if (anilistMatch?.[1]) {
+    return {
+      provider: 'anilist',
+      providerMediaId: anilistMatch[1]
+    };
+  }
+  return null;
+}
+
+function cleanupCandidate(value) {
+  return String(value || '')
+    .replace(/^[\s"'`“”‘’【『「]+/u, '')
+    .replace(/[\s"'`“”‘’】』」]+$/u, '')
+    .replace(/\s{2,}/gu, ' ')
+    .trim();
 }
 
 function looksLikeGenericComment(text) {
@@ -60,40 +126,28 @@ function looksLikeAnimeTitleCandidate(text) {
   if (/[ぁ-んァ-ヶ一-龠々ー]/u.test(value)) {
     return true;
   }
-  if (/[!！?？]/u.test(value)) {
-    return true;
-  }
   const words = value.split(/\s+/u).filter(Boolean);
   if (words.length >= 2) {
     return true;
   }
-  if (/^[A-Z][A-Za-z0-9'!?:.-]+$/u.test(value)) {
-    return true;
-  }
-  return false;
-}
-
-function cleanupCandidate(value) {
-  return String(value || '')
-    .replace(/^[\s"'`“”‘’【『「]+/u, '')
-    .replace(/[\s"'`“”‘’】』」]+$/u, '')
-    .replace(/\s{2,}/gu, ' ')
-    .trim();
+  return /^[A-Z][A-Za-z0-9'!?:.-]+$/u.test(value);
 }
 
 function stripNoiseTokens(value) {
   return cleanupCandidate(
     String(value || '')
+      .replace(/\bオープニングムービー完全版\b/giu, ' ')
+      .replace(/\bオープニングムービー\b/giu, ' ')
+      .replace(/\bOpening Movie\b/giu, ' ')
       .replace(/\bTVアニメ\b/giu, ' ')
       .replace(/\bアニメ\b/giu, ' ')
       .replace(/\banime\b/giu, ' ')
+      .replace(/\b公式サイト\b/giu, ' ')
+      .replace(/\bofficial site\b/giu, ' ')
       .replace(/\bofficial\b/giu, ' ')
       .replace(/\b公式\b/giu, ' ')
       .replace(/\bノンクレジット\b/giu, ' ')
       .replace(/\bノンテロップ\b/giu, ' ')
-      .replace(/\bオープニングムービー完全版\b/giu, ' ')
-      .replace(/\bオープニングムービー\b/giu, ' ')
-      .replace(/\bOpening Movie\b/giu, ' ')
       .replace(/\bNCOP\b/giu, ' ')
       .replace(/\bNCED\b/giu, ' ')
       .replace(/\bOPテーマ\b/giu, ' ')
@@ -158,10 +212,11 @@ function normalizeAnimeCandidateTitle(rawTitle) {
 
   const bracketPatterns = [
     /(?:TVアニメ|アニメ|anime)[「『【]([^」』】]+)[」』】]/iu,
-    /(?:TVアニメ|アニメ|anime)[「『【]([^「『【|｜\n\r]+)$/iu,
-    /(?:TVアニメ|アニメ|anime)\s+(.+?)\s*(?:OP|ED|Opening|Ending|PV|MV|CM|Trailer|Teaser|主題歌|オープニング|エンディング|ノンクレジット|ノンテロップ|$)/iu,
+    /(?:TVアニメ|アニメ|anime)[「『【]([^|｜\n\r]+)$/iu,
+    /(?:TVアニメ|アニメ)[“"]([^”"]+)(?:[”"]|$)/iu,
+    /(?:TVアニメ|アニメ)\s+(.+?)\s*(?:公式|OP|ED|Opening|Ending|PV|MV|CM|Trailer|Teaser|主題歌|オープニング|エンディング|ノンクレジット|ノンテロップ|$)/iu,
     /[【『「]([^】』」]+)[】』」]\s*(?:第\s*\d+\s*期|\d+\s*期|Season\s*\d+|\d+(?:st|nd|rd|th)\s+Season)?\s*(?:OP|ED|Opening|Ending|PV|MV|CM|Trailer|Teaser|主題歌|オープニング|エンディング)/iu,
-    /[【『「]([^】』」|｜\n\r]+)(?:$|\s*(?:OP|ED|Opening|Ending|PV|MV|CM|Trailer|Teaser|主題歌|オープニング|エンディング))/iu,
+    /[【『「]([^】』」|｜\n\r]+)(?:$|\s*(?:公式|OP|ED|Opening|Ending|PV|MV|CM|Trailer|Teaser|主題歌|オープニング|エンディング))/iu,
     /^(.*?)\s*(?:Opening|Ending|OP|ED)\b/iu
   ];
 
@@ -172,7 +227,7 @@ function normalizeAnimeCandidateTitle(rawTitle) {
     }
   }
 
-  const bracketMatches = Array.from(raw.matchAll(/[【『「]([^】』」]{2,80})[】』」]/gu));
+  const bracketMatches = Array.from(raw.matchAll(/[【『「]([^】』」]{2,120})[】』」]/gu));
   for (const match of bracketMatches) {
     addCandidate(match[1], 'bracket_extract', 25);
   }
@@ -207,20 +262,21 @@ function extractExplicitTitleLine(text) {
 function extractCandidateFromEmbeds(message) {
   const embeds = Array.isArray(message.embeds) ? message.embeds : [];
   for (const embed of embeds) {
-    const embedTitle = cleanupCandidate(embed?.title || '');
-    if (embedTitle) {
+    const sources = [
+      ['embed_title', cleanupCandidate(embed?.title || '')],
+      ['embed_description', cleanupCandidate(embed?.description || '')],
+      ['embed_author', cleanupCandidate(embed?.author?.name || '')]
+    ];
+
+    for (const [sourceType, rawTitle] of sources) {
+      if (!rawTitle) {
+        continue;
+      }
       return {
-        sourceType: 'embed_title',
-        rawTitle: embedTitle,
-        embedUrl: embed?.url || null
-      };
-    }
-    const authorTitle = cleanupCandidate(embed?.author?.name || '');
-    if (authorTitle) {
-      return {
-        sourceType: 'embed_author',
-        rawTitle: authorTitle,
-        embedUrl: embed?.url || null
+        sourceType,
+        rawTitle,
+        embedUrl: embed?.url || null,
+        embedProvider: cleanupCandidate(embed?.provider?.name || embed?.data?.provider?.name || '')
       };
     }
   }
@@ -233,11 +289,12 @@ function extractAnimeCandidateFromHashtagPost(message, options = {}) {
     botRoutes: message.client.appConfig.botHashtagRoutes
   });
   const cleanedContent = cleanupCandidate(options.cleanedContent || parsed.content || '');
-  const anilistId = extractAniListIdFromText(message.content || '');
-  if (anilistId) {
+  const providerId = extractProviderIdFromText(message.content || '');
+  if (providerId) {
     return {
-      sourceType: 'anilist_url',
-      providerMediaId: anilistId,
+      sourceType: `${providerId.provider}_url`,
+      providerMediaId: providerId.providerMediaId,
+      provider: providerId.provider,
       rawTitle: null,
       cleanedContent
     };
@@ -284,7 +341,7 @@ function titleLooksLikeSeasonSpecific(value) {
 }
 
 function scoreAniListCandidate(candidate, media) {
-  if (candidate.sourceType === 'anilist_url') {
+  if (candidate.sourceType === 'anilist_url' || candidate.sourceType === 'annict_url') {
     return {
       score: 999,
       reason: 'explicit_anilist_url'
@@ -307,19 +364,19 @@ function scoreAniListCandidate(candidate, media) {
     score += 70;
     reason = 'exact_title';
   }
-
   if (canonicalTitle(media.titleNative) === candidateTitle) {
     score += 15;
     reason = 'exact_native_title';
   }
-
   if (canonicalTitles.some((value) => value.includes(candidateTitle) || candidateTitle.includes(value))) {
     score += 20;
   }
 
   if (candidate.sourceType === 'explicit_title_line') {
     score += 20;
-  } else if (candidate.sourceType === 'embed_title' || candidate.sourceType === 'embed_author') {
+  } else if (candidate.sourceType === 'embed_title') {
+    score += 12;
+  } else if (candidate.sourceType === 'embed_description' || candidate.sourceType === 'embed_author') {
     score += 10;
   } else if (candidate.sourceType === 'content_title') {
     score += 5;
@@ -337,23 +394,20 @@ function scoreAniListCandidate(candidate, media) {
     score += 5;
   }
 
-  return {
-    score,
-    reason
-  };
+  return { score, reason };
 }
 
 function shouldAutoRegisterAnime(scoreResult) {
   if (!scoreResult?.top) {
     return false;
   }
-  if (scoreResult.candidate?.sourceType === 'anilist_url') {
+  if (scoreResult.candidate?.sourceType === 'anilist_url' || scoreResult.candidate?.sourceType === 'annict_url') {
     return true;
   }
   if (scoreResult.candidate?.sourceType === 'explicit_title_line') {
     return scoreResult.top.score >= 80 && scoreResult.scoreGap >= 8;
   }
-  if (scoreResult.candidate?.sourceType === 'embed_title' || scoreResult.candidate?.sourceType === 'embed_author') {
+  if (scoreResult.candidate?.sourceType === 'embed_title' || scoreResult.candidate?.sourceType === 'embed_author' || scoreResult.candidate?.sourceType === 'embed_description') {
     return scoreResult.top.score >= 88 && scoreResult.scoreGap >= 12;
   }
   if (scoreResult.candidate?.sourceType === 'content_title') {
@@ -363,11 +417,21 @@ function shouldAutoRegisterAnime(scoreResult) {
 }
 
 async function maybeReplyAskForTitle(message, reason) {
+  const state = getIntegrationState(message.client, message.id);
   const store = ensureReplyStore(message.client);
   if (store.has(message.id)) {
     return false;
   }
+  if (state?.status === 'success') {
+    message.client.logger.info('anime hashtag failure reply suppressed because success already happened', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      reason
+    });
+    return false;
+  }
   store.add(message.id);
+  setIntegrationState(message.client, message.id, { replied: true });
   await message.reply({
     content: [
       'アニメ作品を自動判定できませんでした。',
@@ -394,8 +458,8 @@ async function resolveAnimeCandidate(client, candidate) {
     };
   }
 
-  if (candidate.sourceType === 'anilist_url' && candidate.providerMediaId) {
-    const media = await getAnimeById(client, candidate.providerMediaId, client.appConfig.anime.maxCastInCard);
+  if ((candidate.sourceType === 'anilist_url' || candidate.sourceType === 'annict_url') && candidate.providerMediaId) {
+    const media = await getAnimeById(client, candidate.providerMediaId, client.appConfig.anime.maxCastInCard, candidate.provider || null);
     return {
       candidate,
       results: media ? [{ media, score: 999, reason: 'explicit_anilist_url' }] : [],
@@ -406,13 +470,10 @@ async function resolveAnimeCandidate(client, candidate) {
   }
 
   const results = await searchAnime(client, candidate.normalizedCandidate || candidate.rawTitle);
-  const scored = results.map((media) => {
-    const score = scoreAniListCandidate(candidate, media);
-    return {
-      media,
-      ...score
-    };
-  }).sort((left, right) => right.score - left.score);
+  const scored = results.map((media) => ({
+    media,
+    ...scoreAniListCandidate(candidate, media)
+  })).sort((left, right) => right.score - left.score);
 
   return {
     candidate,
@@ -425,18 +486,50 @@ async function resolveAnimeCandidate(client, candidate) {
 
 async function maybeWaitForYoutubeEmbeds(message, logger) {
   const hasYoutubeUrl = /https?:\/\/(?:www\.)?(?:youtube\.com|youtu\.be)\//iu.test(String(message.content || ''));
-  if (!hasYoutubeUrl || (Array.isArray(message.embeds) && message.embeds.length > 0)) {
+  if (!hasYoutubeUrl) {
     return message;
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 2500));
-  const refreshed = await message.channel.messages.fetch(message.id).catch(() => message);
-  logger.info('anime hashtag embed retry finished', {
-    sourceMessageId: message.id,
-    sourceChannelId: message.channelId,
-    embedCount: Array.isArray(refreshed?.embeds) ? refreshed.embeds.length : 0
-  });
-  return refreshed || message;
+  let workingMessage = message;
+  const initialEmbedCount = Array.isArray(message.embeds) ? message.embeds.length : 0;
+  if (initialEmbedCount > 0) {
+    logger.info('anime hashtag delayed refetch embeds found', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      attempt: 0,
+      embedCount: initialEmbedCount
+    });
+    return message;
+  }
+
+  const delays = [3000, 5000];
+  for (let index = 0; index < delays.length; index += 1) {
+    logger.info('anime hashtag delayed refetch scheduled', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      attempt: index + 1,
+      delayMs: delays[index]
+    });
+    await new Promise((resolve) => setTimeout(resolve, delays[index]));
+    logger.info('anime hashtag delayed refetch started', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      attempt: index + 1
+    });
+    workingMessage = await message.channel.messages.fetch(message.id).catch(() => workingMessage);
+    const embedCount = Array.isArray(workingMessage?.embeds) ? workingMessage.embeds.length : 0;
+    logger.info('anime hashtag delayed refetch embeds found', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      attempt: index + 1,
+      embedCount
+    });
+    if (embedCount > 0) {
+      return workingMessage || message;
+    }
+  }
+
+  return workingMessage || message;
 }
 
 async function handleAnimeHashtagPost(message, options = {}) {
@@ -462,9 +555,39 @@ async function handleAnimeHashtagPost(message, options = {}) {
   }
 
   try {
+    const existingState = getIntegrationState(client, message.id);
+    if (existingState?.status === 'pending' || existingState?.status === 'success' || existingState?.status === 'skipped_no_candidate' || existingState?.status === 'skipped_ambiguous') {
+      logger.info('anime hashtag duplicate invocation skipped', {
+        sourceMessageId: message.id,
+        sourceChannelId: message.channelId,
+        status: existingState.status,
+        attempts: existingState.attempts
+      });
+      return;
+    }
+
+    setIntegrationState(client, message.id, {
+      status: 'pending',
+      attempts: 0,
+      lastReason: 'started'
+    });
+    logger.info('anime hashtag integration state created', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId
+    });
+
     const integrationMessage = await maybeWaitForYoutubeEmbeds(message, logger);
+    setIntegrationState(client, message.id, {
+      attempts: 1,
+      lastReason: 'candidate_extraction'
+    });
+
     const extracted = extractAnimeCandidateFromHashtagPost(integrationMessage, options);
     if (!extracted) {
+      setIntegrationState(client, message.id, {
+        status: 'skipped_no_candidate',
+        lastReason: 'no_candidate'
+      });
       logger.info('anime hashtag skipped no candidate', {
         sourceMessageId: message.id,
         sourceChannelId: message.channelId
@@ -489,7 +612,9 @@ async function handleAnimeHashtagPost(message, options = {}) {
       sourceType: candidate.sourceType,
       rawTitle: candidate.rawTitle,
       normalizedCandidate: candidate.normalizedCandidate || null,
-      providerMediaId: candidate.providerMediaId || null
+      providerMediaId: candidate.providerMediaId || null,
+      embedProvider: candidate.embedProvider || null,
+      embedUrl: candidate.embedUrl || null
     });
 
     if (candidate.rawTitle) {
@@ -503,13 +628,22 @@ async function handleAnimeHashtagPost(message, options = {}) {
     }
 
     if (!candidate.providerMediaId && !candidate.normalizedCandidate) {
-      if (candidate.sourceType === 'explicit_title_line' || candidate.sourceType === 'embed_title' || candidate.sourceType === 'embed_author') {
+      setIntegrationState(client, message.id, {
+        status: 'skipped_no_candidate',
+        lastReason: 'normalized_candidate_missing'
+      });
+      if (['explicit_title_line', 'embed_title', 'embed_author', 'embed_description'].includes(candidate.sourceType)) {
         await maybeReplyAskForTitle(message, 'normalized_candidate_missing');
+        logger.info('anime hashtag final failure reply sent', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          reason: 'normalized_candidate_missing'
+        });
       }
       return;
     }
 
-    logger.info('anime hashtag AniList search started', {
+    logger.info('anime hashtag provider search started', {
       sourceMessageId: message.id,
       sourceChannelId: message.channelId,
       sourceType: candidate.sourceType,
@@ -518,7 +652,7 @@ async function handleAnimeHashtagPost(message, options = {}) {
     });
 
     const resolved = await resolveAnimeCandidate(client, candidate);
-    logger.info('anime hashtag AniList search result', {
+    logger.info('anime hashtag provider search result', {
       sourceMessageId: message.id,
       sourceChannelId: message.channelId,
       resultCount: resolved.results.length,
@@ -546,6 +680,10 @@ async function handleAnimeHashtagPost(message, options = {}) {
     });
 
     if (!shouldAutoRegisterAnime(confidenceResult)) {
+      setIntegrationState(client, message.id, {
+        status: 'skipped_ambiguous',
+        lastReason: confidenceResult.top ? 'confidence_below_threshold' : 'no_search_result'
+      });
       logger.info('anime hashtag skipped ambiguous', {
         sourceMessageId: message.id,
         sourceChannelId: message.channelId,
@@ -555,18 +693,31 @@ async function handleAnimeHashtagPost(message, options = {}) {
         scoreGap: confidenceResult.scoreGap,
         reason: confidenceResult.top ? 'confidence_below_threshold' : 'no_search_result'
       });
-      if (candidate.sourceType === 'explicit_title_line' || candidate.sourceType === 'embed_title' || candidate.sourceType === 'embed_author') {
+      if (['explicit_title_line', 'embed_title', 'embed_author', 'embed_description'].includes(candidate.sourceType)) {
         await maybeReplyAskForTitle(message, 'ambiguous_candidate');
+        logger.info('anime hashtag final failure reply sent', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          reason: 'ambiguous_candidate'
+        });
       }
       return;
     }
 
     const existing = client.db.anime.getEntryByProviderMediaId(
       message.guildId,
-      'anilist',
+      confidenceResult.top.media.provider,
       confidenceResult.top.media.providerMediaId
     );
+    const sourceRecord = client.db.anime.getHashtagSourceByMessageId(message.guildId, message.id);
     if (existing) {
+      setIntegrationState(client, message.id, {
+        status: 'success',
+        lastReason: 'existing_entry'
+      });
+      if (sourceRecord) {
+        await linkAnimeHashtagSourceToEntry(client, sourceRecord, existing.id, candidate.normalizedCandidate || candidate.rawTitle || null).catch(() => null);
+      }
       logger.info('anime hashtag existing entry found', {
         sourceMessageId: message.id,
         sourceChannelId: message.channelId,
@@ -576,7 +727,19 @@ async function handleAnimeHashtagPost(message, options = {}) {
       return;
     }
 
-    const postResult = await postAnimeToChannel(message.guild, confidenceResult.top.media, message.author.id);
+    const postResult = await postAnimeToChannel(
+      message.guild,
+      confidenceResult.top.media,
+      message.author.id,
+      [candidate.normalizedCandidate, candidate.rawTitle].filter(Boolean)
+    );
+    setIntegrationState(client, message.id, {
+      status: 'success',
+      lastReason: 'created_entry'
+    });
+    if (sourceRecord) {
+      await linkAnimeHashtagSourceToEntry(client, sourceRecord, postResult.entry.id, candidate.normalizedCandidate || candidate.rawTitle || null).catch(() => null);
+    }
     logger.info('anime hashtag created anime entry', {
       sourceMessageId: message.id,
       sourceChannelId: message.channelId,
@@ -604,6 +767,10 @@ async function handleAnimeHashtagPost(message, options = {}) {
       });
     }
   } catch (error) {
+    setIntegrationState(client, message.id, {
+      status: 'failed',
+      lastReason: error.message
+    });
     logger.warn('anime hashtag integration failed', {
       sourceMessageId: message.id,
       sourceChannelId: message.channelId,

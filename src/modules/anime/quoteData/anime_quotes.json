@@ -1,0 +1,432 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "updated": "2026-05-15",
+    "description": "Discord Bot 用アニメ視聴ロールDMセリフ集。視聴本数のマイルストーン（10/20/50/100/300/500本）ごとに、そのレベルの『お祝いDM』に差し込むためのアニメキャラクターのセリフを集めたもの。",
+    "language": "ja",
+    "selection_rationale": "各レベルのテーマ（始まり、習慣、語り、積み重ね、見極め、称号）に合うキャラクター・作品を優先的に採用。エヴァ・シュタゲ・まどマギ・SAO・ノゲノラ・無職転生・オーバーロードはユーザーの好み枠として複数レベルに登場。",
+    "notes": [
+      "セリフはネット上の名言まとめサイト複数を参照して採用しているため、原作・アニメの実テキストと細部（句読点・改行・送り仮名）で差異がある可能性があります。クリティカルな場面（外部公開、引用元の明示など）で使う前に原作該当話の確認推奨。",
+      "official_url はその作品の代表的な公式ページ（アニメ公式 / シリーズポータル）です。シリーズで複数公式サイトが存在する場合は、最も総合的なものを採用しています。リンク切れがあれば差し替えてください。",
+      "Lv.500（オタク）は『複数のキャラから言われてもよい』というユーザー要望に従い、他レベルより多めにエントリーを用意しています。"
+    ]
+  },
+  "schema": {
+    "top_level": "levels というキーの下に、視聴本数の閾値（'10', '20', '50', '100', '300', '500'）をキーとするオブジェクトが並びます。",
+    "level_object": {
+      "role_name": "Discordロール名",
+      "emoji": "DM冒頭に置く絵文字",
+      "theme": "そのレベルでのお祝いメッセージのトーン／テーマ",
+      "quotes": "そのレベルにふさわしいセリフエントリの配列"
+    },
+    "quote_object": {
+      "id": "一意の識別子。形式は 'lv{level}_{連番3桁}'",
+      "quote": "実際にDMに引用するセリフ本文",
+      "character": "発言キャラクター名",
+      "anime_title": "作品タイトル（日本語）",
+      "official_url": "作品公式ページ"
+    },
+    "bot_usage": "ロールが付与されるタイミングで、該当レベルの quotes 配列から1件をランダムに選び、emoji・既定の祝辞テンプレートと一緒にDMに差し込む想定。"
+  },
+  "levels": {
+    "10": {
+      "role_name": "アニメ視聴者 Lv.1",
+      "emoji": "🎉",
+      "theme": "始まりの一歩を祝う。続けることへの後押し。",
+      "quotes": [
+        {
+          "id": "lv10_001",
+          "quote": "諦めるなんて、絶対にしねぇ。それがオレの忍道だってばよ！",
+          "character": "うずまきナルト",
+          "anime_title": "NARUTO -ナルト-",
+          "official_url": "https://www.tv-tokyo.co.jp/anime/naruto/"
+        },
+        {
+          "id": "lv10_002",
+          "quote": "何時でも何処でも何度でもチャレンジしたいと思った時が、まっ白なスタートです。",
+          "character": "水無灯里",
+          "anime_title": "ARIA The ANIMATION",
+          "official_url": "https://ariacompany.net/"
+        },
+        {
+          "id": "lv10_003",
+          "quote": "頑張った者は皆戦士だ。",
+          "character": "アイゼン",
+          "anime_title": "葬送のフリーレン",
+          "official_url": "https://frieren-anime.jp/"
+        },
+        {
+          "id": "lv10_004",
+          "quote": "最初の町の宿屋に閉じこもって、ゆっくり腐っていくくらいなら、最後の瞬間まで自分のままでいたい。",
+          "character": "結城明日奈（アスナ）",
+          "anime_title": "ソードアート・オンライン",
+          "official_url": "https://sao-anime.net/"
+        },
+        {
+          "id": "lv10_005",
+          "quote": "負けたくないことに理由って要る？",
+          "character": "日向翔陽",
+          "anime_title": "ハイキュー!!",
+          "official_url": "https://www.j-haikyu.com/"
+        },
+        {
+          "id": "lv10_006",
+          "quote": "先生は今失敗したんじゃありません、経験を積んだんです。",
+          "character": "ルーデウス・グレイラット",
+          "anime_title": "無職転生 ～異世界行ったら本気だす～",
+          "official_url": "https://mushokutensei.jp/"
+        },
+        {
+          "id": "lv10_007",
+          "quote": "俺が知りてぇのは楽な道のりじゃねぇ、険しい道の歩き方だ。",
+          "character": "うずまきナルト",
+          "anime_title": "NARUTO -ナルト- 疾風伝",
+          "official_url": "https://www.tv-tokyo.co.jp/anime/naruto/"
+        }
+      ]
+    },
+    "20": {
+      "role_name": "アニメ視聴者 Lv.2",
+      "emoji": "🎉",
+      "theme": "視聴と感想を残す習慣の定着を労う。日常の積み重ねへのリスペクト。",
+      "quotes": [
+        {
+          "id": "lv20_001",
+          "quote": "魔法は探し求めている時が一番楽しいんだよ。",
+          "character": "フリーレン",
+          "anime_title": "葬送のフリーレン",
+          "official_url": "https://frieren-anime.jp/"
+        },
+        {
+          "id": "lv20_002",
+          "quote": "もしかしたら当たり前すぎて、普段気が付かない素敵なものって、まだまだいっぱいあるのかもしれませんね。",
+          "character": "水無灯里",
+          "anime_title": "ARIA The ANIMATION",
+          "official_url": "https://ariacompany.net/"
+        },
+        {
+          "id": "lv20_003",
+          "quote": "想いってのは、言葉にしないと伝わらないんだぜ。",
+          "character": "ザイン",
+          "anime_title": "葬送のフリーレン",
+          "official_url": "https://frieren-anime.jp/"
+        },
+        {
+          "id": "lv20_004",
+          "quote": "僕は、自分の目で見たものしか信じないよ。だから、見たものは全部、信じてきた。",
+          "character": "阿良々木暦",
+          "anime_title": "〈物語〉シリーズ",
+          "official_url": "https://www.monogatari-series.com/"
+        },
+        {
+          "id": "lv20_005",
+          "quote": "どんなことでも、興味を持ってやれば上手くいくものよ。『好きこそものの上手なれ』って言うでしょ。",
+          "character": "牧瀬紅莉栖",
+          "anime_title": "STEINS;GATE",
+          "official_url": "https://steinsgate.jp/"
+        },
+        {
+          "id": "lv20_006",
+          "quote": "たとえ怪物に負けて死んでも、このゲーム、この世界には負けたくない。",
+          "character": "結城明日奈（アスナ）",
+          "anime_title": "ソードアート・オンライン",
+          "official_url": "https://sao-anime.net/"
+        },
+        {
+          "id": "lv20_007",
+          "quote": "我慢しなきゃいけないのが、そもそもおかしいんだよ。痛い時は、痛いでいいんだ。",
+          "character": "阿良々木暦",
+          "anime_title": "〈物語〉シリーズ",
+          "official_url": "https://www.monogatari-series.com/"
+        },
+        {
+          "id": "lv20_008",
+          "quote": "夢中で日々を送っていれば、それだけで素敵な毎日になる。",
+          "character": "アリシア・フローレンス",
+          "anime_title": "ARIA The ANIMATION",
+          "official_url": "https://ariacompany.net/"
+        }
+      ]
+    },
+    "50": {
+      "role_name": "アニメ語り部",
+      "emoji": "🎊",
+      "theme": "観るだけでなく、言葉として残してきた行為を讃える。語り・記録・継承。",
+      "quotes": [
+        {
+          "id": "lv50_001",
+          "quote": "世界は美しくなんかない。そしてそれゆえに、美しい。",
+          "character": "キノ",
+          "anime_title": "キノの旅 -the Beautiful World-",
+          "official_url": "https://kinonotabi-anime.com/"
+        },
+        {
+          "id": "lv50_002",
+          "quote": "生きているということは、誰かに知ってもらって覚えていてもらうことだ。ほんの少しでいい。誰かの人生を変えてあげればいい。きっとそれだけで十分なんだ。",
+          "character": "ヒンメル",
+          "anime_title": "葬送のフリーレン",
+          "official_url": "https://frieren-anime.jp/"
+        },
+        {
+          "id": "lv50_003",
+          "quote": "良きドールとは、人が話している言葉の中から、伝えたい本当の心をすくい上げるもの。",
+          "character": "養成講座先生",
+          "anime_title": "ヴァイオレット・エヴァーガーデン",
+          "official_url": "https://violet-evergarden.jp/"
+        },
+        {
+          "id": "lv50_004",
+          "quote": "何でもは知らないわよ。知ってることだけ。",
+          "character": "羽川翼",
+          "anime_title": "〈物語〉シリーズ",
+          "official_url": "https://www.monogatari-series.com/"
+        },
+        {
+          "id": "lv50_005",
+          "quote": "無理だったかもしれない。無茶だったかもしれない。でも、無駄じゃなかった。",
+          "character": "阿良々木暦",
+          "anime_title": "猫物語（白）",
+          "official_url": "https://www.monogatari-series.com/"
+        },
+        {
+          "id": "lv50_006",
+          "quote": "知らないことがたくさんあるってことは、まだまだたくさんの素敵があるってこと。",
+          "character": "アリシア・フローレンス",
+          "anime_title": "ARIA The ANIMATION",
+          "official_url": "https://ariacompany.net/"
+        },
+        {
+          "id": "lv50_007",
+          "quote": "キリトくんは私にとって、ここで過ごした2年間の意味であり、生きた証です。",
+          "character": "結城明日奈（アスナ）",
+          "anime_title": "ソードアート・オンライン",
+          "official_url": "https://sao-anime.net/"
+        },
+        {
+          "id": "lv50_008",
+          "quote": "全てに意味があった。無駄なんて、一つもなかった。",
+          "character": "岡部倫太郎",
+          "anime_title": "STEINS;GATE",
+          "official_url": "https://steinsgate.jp/"
+        }
+      ]
+    },
+    "100": {
+      "role_name": "アニメ仙人",
+      "emoji": "🏮",
+      "theme": "長い時間軸での積み重ねへの敬意。歴史化・年表化されたあなたの視聴に対して。",
+      "quotes": [
+        {
+          "id": "lv100_001",
+          "quote": "人間の寿命は短いってわかっていたのに……なんでもっと知ろうと思わなかったんだろう……。",
+          "character": "フリーレン",
+          "anime_title": "葬送のフリーレン",
+          "official_url": "https://frieren-anime.jp/"
+        },
+        {
+          "id": "lv100_002",
+          "quote": "人生ってのは、衰えてからのほうが案外長いもんさ。",
+          "character": "アイゼン",
+          "anime_title": "葬送のフリーレン",
+          "official_url": "https://frieren-anime.jp/"
+        },
+        {
+          "id": "lv100_003",
+          "quote": "私はな、恩には恩を、仇には仇を返すべきだと思っている。受けた借りはしっかりと返すべきだと。",
+          "character": "アインズ・ウール・ゴウン",
+          "anime_title": "オーバーロード",
+          "official_url": "https://over-lord-anime.com/"
+        },
+        {
+          "id": "lv100_004",
+          "quote": "監禁して働かせるよりは、信頼を培い、感謝という鎖で縛った方が未来の利益につながる。",
+          "character": "アインズ・ウール・ゴウン",
+          "anime_title": "オーバーロード",
+          "official_url": "https://over-lord-anime.com/"
+        },
+        {
+          "id": "lv100_005",
+          "quote": "人は思い出を忘れることで生きていける。だが、決して忘れてはならないこともある。",
+          "character": "碇ゲンドウ",
+          "anime_title": "新世紀エヴァンゲリオン",
+          "official_url": "https://www.evangelion.co.jp/"
+        },
+        {
+          "id": "lv100_006",
+          "quote": "私は今、初めて分かった。大切なことは、言葉ではなかったのだと。",
+          "character": "ロキシー・ミグルディア",
+          "anime_title": "無職転生 ～異世界行ったら本気だす～",
+          "official_url": "https://mushokutensei.jp/"
+        },
+        {
+          "id": "lv100_007",
+          "quote": "未来は誰にも分からない。やり直しがきかないからこそ、あらゆる不幸も、苦しみも、理不尽な事故も、人は受け入れ、前に進むことができるんだ。",
+          "character": "岡部倫太郎",
+          "anime_title": "STEINS;GATE",
+          "official_url": "https://steinsgate.jp/"
+        },
+        {
+          "id": "lv100_008",
+          "quote": "お前が潰れるほど重い幸せなんて、この世にねえ。幸せは、まぶしくもなければ重くもない。",
+          "character": "阿良々木暦",
+          "anime_title": "暦物語",
+          "official_url": "https://www.monogatari-series.com/"
+        }
+      ]
+    },
+    "300": {
+      "role_name": "アニメソムリエ",
+      "emoji": "🍷",
+      "theme": "差異を味わい、言語化する力への敬意。常人には見えないものを見ている人へ。",
+      "quotes": [
+        {
+          "id": "lv300_001",
+          "quote": "この世に運なんて存在しない。ルール、前提、心理状態。そんな無数の見えない変数がもたらす予測できない必然で、ゲームの勝敗は始める前には終ってるんだ。",
+          "character": "空",
+          "anime_title": "ノーゲーム・ノーライフ",
+          "official_url": "https://ngnl.jp/"
+        },
+        {
+          "id": "lv300_002",
+          "quote": "レベルなんて、ただの数字だよ。この世界での強さは、単なる幻想に過ぎない。そんなものよりもっと大事なものがある。",
+          "character": "キリト",
+          "anime_title": "ソードアート・オンライン",
+          "official_url": "https://sao-anime.net/"
+        },
+        {
+          "id": "lv300_003",
+          "quote": "私は、冷静な人の味方で、無駄な争いをする馬鹿の敵。あなたはどっちなの？",
+          "character": "暁美ほむら",
+          "anime_title": "魔法少女まどか☆マギカ",
+          "official_url": "https://www.madoka-magica.com/"
+        },
+        {
+          "id": "lv300_004",
+          "quote": "私に読めないのは、空気だけ。",
+          "character": "戦場ヶ原ひたぎ",
+          "anime_title": "化物語",
+          "official_url": "https://www.monogatari-series.com/"
+        },
+        {
+          "id": "lv300_005",
+          "quote": "才能は開花させるもの。センスは磨くもの。",
+          "character": "及川徹",
+          "anime_title": "ハイキュー!!",
+          "official_url": "https://www.j-haikyu.com/"
+        },
+        {
+          "id": "lv300_006",
+          "quote": "そろそろ理解したか？　全て私の手の内だということに。",
+          "character": "アインズ・ウール・ゴウン",
+          "anime_title": "オーバーロード",
+          "official_url": "https://over-lord-anime.com/"
+        },
+        {
+          "id": "lv300_007",
+          "quote": "変えるべきは、自分じゃなくて手段だと思うんだ。今のままの自分が空を飛ぶ方法を、考えるしかないと思うんだ。",
+          "character": "空",
+          "anime_title": "ノーゲーム・ノーライフ",
+          "official_url": "https://ngnl.jp/"
+        },
+        {
+          "id": "lv300_008",
+          "quote": "知ってれば１．９２％の可能性が、１００％に変わる。",
+          "character": "空",
+          "anime_title": "ノーゲーム・ノーライフ",
+          "official_url": "https://ngnl.jp/"
+        }
+      ]
+    },
+    "500": {
+      "role_name": "オタク",
+      "emoji": "👑",
+      "theme": "称号。観て、覚えて、語って、積み上げてきた人だけが名乗れる。複数キャラから讃辞を贈る想定。",
+      "quotes": [
+        {
+          "id": "lv500_001",
+          "quote": "俺は狂気のマッドサイエンティスト、鳳凰院凶真！　世界を騙すなど造作もない！",
+          "character": "岡部倫太郎",
+          "anime_title": "STEINS;GATE",
+          "official_url": "https://steinsgate.jp/"
+        },
+        {
+          "id": "lv500_002",
+          "quote": "俺は、必ずシュタインズゲートを見つけてみせる！　それが！　この俺の！　選択だ！！　エル・プサイ・コングルゥ。",
+          "character": "岡部倫太郎",
+          "anime_title": "STEINS;GATE",
+          "official_url": "https://steinsgate.jp/"
+        },
+        {
+          "id": "lv500_003",
+          "quote": "ぼくはここに居ていいんだ！",
+          "character": "碇シンジ",
+          "anime_title": "新世紀エヴァンゲリオン",
+          "official_url": "https://www.evangelion.co.jp/"
+        },
+        {
+          "id": "lv500_004",
+          "quote": "奇跡を起こすのよ。人の意志で。",
+          "character": "葛城ミサト",
+          "anime_title": "新世紀エヴァンゲリオン",
+          "official_url": "https://www.evangelion.co.jp/"
+        },
+        {
+          "id": "lv500_005",
+          "quote": "こんな自分でも、誰かの役に立てるんだって、胸を張って生きていけたら、それが一番の夢だから。",
+          "character": "鹿目まどか",
+          "anime_title": "魔法少女まどか☆マギカ",
+          "official_url": "https://www.madoka-magica.com/"
+        },
+        {
+          "id": "lv500_006",
+          "quote": "だが断る！　この『空白』が最も好きなことの一つは、自分が絶対的優位にあると思っている奴に『NO』と断ってやることだ！",
+          "character": "空",
+          "anime_title": "ノーゲーム・ノーライフ",
+          "official_url": "https://ngnl.jp/"
+        },
+        {
+          "id": "lv500_007",
+          "quote": "我が名を知るがいい。我こそが──アインズ・ウール・ゴウン。",
+          "character": "アインズ・ウール・ゴウン",
+          "anime_title": "オーバーロード",
+          "official_url": "https://over-lord-anime.com/"
+        },
+        {
+          "id": "lv500_008",
+          "quote": "お前達に厳命する。アインズ・ウール・ゴウンの名を、不変の伝説にせよ！",
+          "character": "アインズ・ウール・ゴウン",
+          "anime_title": "オーバーロード",
+          "official_url": "https://over-lord-anime.com/"
+        },
+        {
+          "id": "lv500_009",
+          "quote": "出来るかもしれない、こんな俺でも。無職の引きこもりでクズな俺でも、人生をやり直すことが、本気で生きていくことが。",
+          "character": "ルーデウス・グレイラット",
+          "anime_title": "無職転生 ～異世界行ったら本気だす～",
+          "official_url": "https://mushokutensei.jp/"
+        },
+        {
+          "id": "lv500_010",
+          "quote": "俺の命は君のものだ。だから君のために使う。最後の一瞬まで、一緒にいよう。",
+          "character": "キリト",
+          "anime_title": "ソードアート・オンライン",
+          "official_url": "https://sao-anime.net/"
+        },
+        {
+          "id": "lv500_011",
+          "quote": "友達は要らない。友達を作ると、人間強度が下がるから。",
+          "character": "阿良々木暦",
+          "anime_title": "猫物語（黒）",
+          "official_url": "https://www.monogatari-series.com/"
+        },
+        {
+          "id": "lv500_012",
+          "quote": "あなた達の祈りを、絶望で終わらせたりしない。あなた達は、誰も呪わない。祟らない。因果は全て、私が受け止める。だからお願い。最後まで自分を信じて。",
+          "character": "鹿目まどか",
+          "anime_title": "魔法少女まどか☆マギカ",
+          "official_url": "https://www.madoka-magica.com/"
+        }
+      ]
+    }
+  }
+}

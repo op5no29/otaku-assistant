@@ -223,6 +223,7 @@ function runMigrations(database) {
       provider TEXT NOT NULL,
       provider_media_id TEXT NOT NULL,
       title_native TEXT,
+      title_kana TEXT,
       title_romaji TEXT,
       title_english TEXT,
       title_user_preferred TEXT,
@@ -230,6 +231,7 @@ function runMigrations(database) {
       description TEXT,
       site_url TEXT,
       official_site_url TEXT,
+      mal_anime_id TEXT,
       cover_image_url TEXT,
       banner_image_url TEXT,
       season TEXT,
@@ -242,6 +244,7 @@ function runMigrations(database) {
       anime_channel_message_id TEXT,
       thread_id TEXT,
       thread_card_message_id TEXT,
+      review_card_message_id TEXT,
       has_spoiler_reviews INTEGER NOT NULL DEFAULT 0,
       created_by_user_id TEXT,
       created_at TEXT NOT NULL,
@@ -316,6 +319,60 @@ function runMigrations(database) {
       PRIMARY KEY (guild_id, threshold)
     );
 
+    CREATE TABLE IF NOT EXISTS anime_review_prompt_state (
+      guild_id TEXT NOT NULL,
+      anime_entry_id INTEGER NOT NULL,
+      user_id TEXT NOT NULL,
+      prompt_type TEXT NOT NULL,
+      prompted_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, anime_entry_id, user_id, prompt_type)
+    );
+
+    CREATE TABLE IF NOT EXISTS anime_role_awards (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      threshold INTEGER NOT NULL,
+      role_id TEXT,
+      awarded_at TEXT NOT NULL,
+      dm_sent_at TEXT,
+      PRIMARY KEY (guild_id, user_id, threshold)
+    );
+
+    CREATE TABLE IF NOT EXISTS anime_hashtag_sources (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      source_message_id TEXT NOT NULL,
+      source_channel_id TEXT NOT NULL,
+      source_author_id TEXT,
+      relayed_timeline_message_id TEXT,
+      relayed_route_message_ids_json TEXT,
+      cleaned_content TEXT,
+      display_tags_json TEXT,
+      detected_candidate TEXT,
+      anime_entry_id INTEGER,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(guild_id, source_message_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_anime_hashtag_sources_status
+      ON anime_hashtag_sources (guild_id, status, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS bot_deletable_messages (
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      owner_user_id TEXT NOT NULL,
+      purpose TEXT,
+      expires_at TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (message_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_bot_deletable_messages_owner
+      ON bot_deletable_messages (guild_id, owner_user_id, expires_at);
+
     CREATE TABLE IF NOT EXISTS user_llm_memories (
       guild_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
@@ -385,6 +442,23 @@ function runMigrations(database) {
 
   if (questionThreadColumns.size && !questionThreadColumns.has('guide_sent_at')) {
     database.exec('ALTER TABLE question_threads ADD COLUMN guide_sent_at TEXT');
+  }
+
+  const animeEntryColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(anime_entries)')
+      .all()
+      .map((column) => column.name)
+  );
+
+  if (animeEntryColumns.size && !animeEntryColumns.has('review_card_message_id')) {
+    database.exec('ALTER TABLE anime_entries ADD COLUMN review_card_message_id TEXT');
+  }
+  if (animeEntryColumns.size && !animeEntryColumns.has('title_kana')) {
+    database.exec('ALTER TABLE anime_entries ADD COLUMN title_kana TEXT');
+  }
+  if (animeEntryColumns.size && !animeEntryColumns.has('mal_anime_id')) {
+    database.exec('ALTER TABLE anime_entries ADD COLUMN mal_anime_id TEXT');
   }
 
   const relayedMessageColumns = new Set(

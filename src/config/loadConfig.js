@@ -179,18 +179,18 @@ function ensureIntroDmConfig(value, introChannelId = '') {
 
 function ensureAnimeConfig(value) {
   const defaultReviewRoles = [
-    { threshold: 10, roleId: null },
-    { threshold: 20, roleId: null },
-    { threshold: 50, roleId: null },
-    { threshold: 100, roleId: null },
-    { threshold: 300, roleId: null },
-    { threshold: 500, roleId: null }
+    { threshold: 10, roleId: '1504730447710519386', name: 'アニメ視聴者 Lv.1' },
+    { threshold: 20, roleId: '1504730443637854242', name: 'アニメ視聴者 Lv.2' },
+    { threshold: 50, roleId: '1504730439502532618', name: 'アニメ語り部' },
+    { threshold: 100, roleId: '1504730894383054918', name: 'アニメ仙人' },
+    { threshold: 300, roleId: '1504731042697842699', name: 'アニメソムリエ' },
+    { threshold: 500, roleId: '1504730319226404864', name: 'オタク' }
   ];
 
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
       enabled: true,
-      provider: 'anilist',
+      provider: 'annict',
       channelId: '1504329024460296232',
       autoPostOnCastLookup: false,
       interestEmoji: '👀',
@@ -206,7 +206,7 @@ function ensureAnimeConfig(value) {
 
   return {
     enabled: value.enabled !== false,
-    provider: String(value.provider || 'anilist'),
+    provider: String(value.provider || 'annict'),
     channelId: String(value.channelId || '1504329024460296232'),
     autoPostOnCastLookup: value.autoPostOnCastLookup === true,
     interestEmoji: String(value.interestEmoji || '👀'),
@@ -219,9 +219,30 @@ function ensureAnimeConfig(value) {
     reviewRoles: Array.isArray(value.reviewRoles) && value.reviewRoles.length
       ? value.reviewRoles.map((entry) => ({
           threshold: Number(entry?.threshold ?? 0),
-          roleId: entry?.roleId ? String(entry.roleId) : null
+          roleId: entry?.roleId ? String(entry.roleId) : null,
+          name: entry?.name ? String(entry.name) : null
         }))
       : defaultReviewRoles
+  };
+}
+
+function ensureAnnictConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      enabled: true,
+      baseUrl: 'https://api.annict.com/v1',
+      accessTokenEnv: 'ANNICT_ACCESS_TOKEN',
+      timeoutMs: 15_000,
+      cacheTtlHours: 24
+    };
+  }
+
+  return {
+    enabled: value.enabled !== false,
+    baseUrl: String(value.baseUrl || 'https://api.annict.com/v1'),
+    accessTokenEnv: String(value.accessTokenEnv || 'ANNICT_ACCESS_TOKEN'),
+    timeoutMs: Number(value.timeoutMs ?? 15_000),
+    cacheTtlHours: Number(value.cacheTtlHours ?? 24)
   };
 }
 
@@ -322,6 +343,7 @@ function loadConfig(configPath) {
     },
     introDm: ensureIntroDmConfig(parsed.introDm, parsed.introChannelId),
     anime: ensureAnimeConfig(parsed.anime),
+    annict: ensureAnnictConfig(parsed.annict),
     ops: ensureOpsConfig(parsed.ops),
     questionForumTags: ensureTagMap(parsed.questionForumTags, 'questionForumTags'),
     botHashtagRoutes: ensureBotHashtagRoutes(parsed.botHashtagRoutes, 'botHashtagRoutes'),

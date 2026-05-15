@@ -1,4 +1,4 @@
-const { relayTweetMessage, relayGlobalHashtagMessage } = require('../modules/timelineRelay');
+const { relayTweetMessage, relayGlobalHashtagMessage, handleReplyBasedGlobalHashtagRoute } = require('../modules/timelineRelay');
 const { applyWelcomeReactionsToMessage } = require('../modules/welcomeReactions');
 const { saveMessageToArchive } = require('../modules/messageArchive');
 const { handleLlmMessage } = require('../modules/llm');
@@ -56,6 +56,23 @@ module.exports = {
       await handleLlmMessage(message);
     } catch (error) {
       client.logger.error('Failed to handle LLM message trigger', {
+        messageId: message.id,
+        channelId: message.channelId,
+        error: error.message
+      });
+    }
+
+    try {
+      const handledReplyRoute = await handleReplyBasedGlobalHashtagRoute(message, {
+        config: client.appConfig,
+        db: client.db,
+        logger: client.logger
+      });
+      if (handledReplyRoute) {
+        return;
+      }
+    } catch (error) {
+      client.logger.error('Failed to handle reply-based hashtag route', {
         messageId: message.id,
         channelId: message.channelId,
         error: error.message

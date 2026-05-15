@@ -105,7 +105,7 @@
   },
   "anime": {
     "enabled": true,
-    "provider": "anilist",
+    "provider": "annict",
     "channelId": "YOUR_ANIME_CHANNEL_ID",
     "autoPostOnCastLookup": false,
     "interestEmoji": "👀",
@@ -116,13 +116,20 @@
     "apiTimeoutMs": 15000,
     "apiCacheTtlHours": 24,
     "reviewRoles": [
-      { "threshold": 10, "roleId": null },
-      { "threshold": 20, "roleId": null },
-      { "threshold": 50, "roleId": null },
-      { "threshold": 100, "roleId": null },
-      { "threshold": 300, "roleId": null },
-      { "threshold": 500, "roleId": null }
+      { "threshold": 10, "roleId": "1504730447710519386", "name": "アニメ視聴者 Lv.1" },
+      { "threshold": 20, "roleId": "1504730443637854242", "name": "アニメ視聴者 Lv.2" },
+      { "threshold": 50, "roleId": "1504730439502532618", "name": "アニメ語り部" },
+      { "threshold": 100, "roleId": "1504730894383054918", "name": "アニメ仙人" },
+      { "threshold": 300, "roleId": "1504731042697842699", "name": "アニメソムリエ" },
+      { "threshold": 500, "roleId": "1504730319226404864", "name": "オタク" }
     ]
+  },
+  "annict": {
+    "enabled": true,
+    "baseUrl": "https://api.annict.com/v1",
+    "accessTokenEnv": "ANNICT_ACCESS_TOKEN",
+    "timeoutMs": 15000,
+    "cacheTtlHours": 24
   },
   "ops": {
     "logChannelId": "YOUR_OPS_LOG_CHANNEL_ID",

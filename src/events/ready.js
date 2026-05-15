@@ -3,9 +3,12 @@ const pkg = require('../../package.json');
 const { getBotHealth } = require('../modules/ops/health');
 const { notifyOpsChannel } = require('../modules/ops/notify');
 const { startIntroDmQueueProcessor } = require('../modules/introDm');
+const { runAnimeOrphanScan } = require('../modules/anime');
+const { getAnnictAccessToken } = require('../modules/anime/annictClient');
 
 module.exports = {
   async execute(client) {
+    client.db.deletableMessages.deleteExpired();
     await initializeVoiceProfileMappings(client);
     await rebuildVoiceProfileState(client);
 
@@ -49,6 +52,19 @@ module.exports = {
       autoPostOnCastLookup: client.appConfig.anime.autoPostOnCastLookup,
       interestEmoji: client.appConfig.anime.interestEmoji,
       watchedEmoji: client.appConfig.anime.watchedEmoji
+    });
+
+    if (client.appConfig.anime.provider === 'annict' && !getAnnictAccessToken(client)) {
+      client.logger.warn('annict token missing', {
+        provider: client.appConfig.anime.provider,
+        accessTokenEnv: client.appConfig.annict.accessTokenEnv
+      });
+    }
+
+    await runAnimeOrphanScan(client).catch((error) => {
+      client.logger.error('anime orphan scan failed', {
+        error: error.message
+      });
     });
 
     startIntroDmQueueProcessor(client);

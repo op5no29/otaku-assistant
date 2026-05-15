@@ -16,6 +16,16 @@ function createContainer(accentColor = 0x8b5cf6) {
   return new ContainerBuilder().setAccentColor(accentColor);
 }
 
+const ANIME_PARENT_ACCENT = 0xf3f4f6;
+const ANIME_REVIEW_ACCENT = 0xd1d5db;
+
+function getExternalLinkLabel(entry) {
+  if (String(entry?.provider || '') === 'annict') {
+    return 'Annictで開く';
+  }
+  return 'AniListで開く';
+}
+
 function getPreferredAnimeDisplayTitle(entry) {
   return entry.titleNative || entry.titleUserPreferred || entry.titleRomaji || entry.titleEnglish || 'タイトル不明';
 }
@@ -64,7 +74,7 @@ function buildMetadataLines(entry, stats) {
   return lines;
 }
 
-function buildLinkRows({ threadUrl, siteUrl, parentUrl }) {
+function buildLinkRows({ threadUrl, siteUrl, parentUrl, provider = null }) {
   const buttons = [];
   if (threadUrl) {
     buttons.push(
@@ -85,7 +95,7 @@ function buildLinkRows({ threadUrl, siteUrl, parentUrl }) {
   if (siteUrl) {
     buttons.push(
       new ButtonBuilder()
-        .setLabel('AniListで開く')
+        .setLabel(getExternalLinkLabel({ provider }))
         .setStyle(ButtonStyle.Link)
         .setURL(siteUrl)
     );
@@ -107,8 +117,8 @@ function addPoster(container, entry) {
   container.addMediaGalleryComponents(gallery);
 }
 
-function buildAnimeChannelCard(entry, stats) {
-  const container = createContainer(stats?.hasSpoilerReviews ? 0xef4444 : 0x8b5cf6);
+function buildAnimeChannelCard(entry, stats, cast = [], latestReviews = []) {
+  const container = createContainer(stats?.hasSpoilerReviews ? 0xfca5a5 : ANIME_PARENT_ACCENT);
   const section = new SectionBuilder().addTextDisplayComponents(
     new TextDisplayBuilder().setContent(`### ${getPreferredAnimeDisplayTitle(entry)}`),
     new TextDisplayBuilder().setContent(buildMetadataLines(entry, stats).join('\n'))
@@ -123,6 +133,16 @@ function buildAnimeChannelCard(entry, stats) {
   }
 
   container.addSectionComponents(section);
+  const castLines = Array.isArray(cast)
+    ? cast
+        .slice(0, Number(stats?.maxCastInCard || 5))
+        .map((item) => `- ${item.characterName || 'キャラ不明'}: ${item.voiceActorName || '声優情報なし'}`)
+    : [];
+  if (castLines.length) {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`**メインキャスト**\n${castLines.join('\n')}`)
+    );
+  }
   if (stats?.hasSpoilerReviews) {
     container.addTextDisplayComponents(
       new TextDisplayBuilder().setContent('⚠️ この作品のスレッドにはネタバレ感想が含まれています。')
@@ -131,10 +151,54 @@ function buildAnimeChannelCard(entry, stats) {
   addPoster(container, entry);
   for (const row of buildLinkRows({
     threadUrl: stats?.threadUrl || null,
-    siteUrl: entry.siteUrl || null
+    siteUrl: entry.siteUrl || null,
+    provider: entry.provider || null
   })) {
     container.addActionRowComponents(row);
   }
+  return {
+    flags: MessageFlags.IsComponentsV2,
+    components: [container],
+    allowedMentions: { parse: [] }
+  };
+}
+
+function buildAnimeReviewUiCard(entry, stats, latestReviews = []) {
+  const container = createContainer(stats?.hasSpoilerReviews ? 0xfca5a5 : ANIME_REVIEW_ACCENT);
+  const title = getPreferredAnimeDisplayTitle(entry);
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(`### ${title}`),
+    new TextDisplayBuilder().setContent('**感想エリア**'),
+    new TextDisplayBuilder().setContent('感想は `/anime review` で投稿できます。')
+  );
+
+  const countLine = `👀 興味あり: ${stats?.interestedCount || 0} / ✅ 視聴済み: ${stats?.watchedCount || 0} / 💬 感想投稿済み: ${stats?.reviewCount || 0}`;
+  container.addTextDisplayComponents(new TextDisplayBuilder().setContent(countLine));
+
+  if (Array.isArray(latestReviews) && latestReviews.length) {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`**最新感想**\n${latestReviews.join('\n\n')}`)
+    );
+  } else {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent('まだ感想はありません。')
+    );
+  }
+
+  if (stats?.hasSpoilerReviews) {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent('⚠️ ネタバレ感想あり')
+    );
+  }
+
+  for (const row of buildLinkRows({
+    parentUrl: stats?.parentUrl || null,
+    siteUrl: entry.siteUrl || null,
+    provider: entry.provider || null
+  })) {
+    container.addActionRowComponents(row);
+  }
+
   return {
     flags: MessageFlags.IsComponentsV2,
     components: [container],
@@ -197,7 +261,8 @@ function buildAnimeThreadHeaderCard(entry, stats, cast, latestReviews) {
   addPoster(container, entry);
   for (const row of buildLinkRows({
     parentUrl: stats?.parentUrl || null,
-    siteUrl: entry.siteUrl || null
+    siteUrl: entry.siteUrl || null,
+    provider: entry.provider || null
   })) {
     container.addActionRowComponents(row);
   }
@@ -232,6 +297,7 @@ function buildAnimeLinks(entry) {
 
 module.exports = {
   buildAnimeChannelCard,
+  buildAnimeReviewUiCard,
   buildAnimeThreadHeaderCard,
   buildAnimeLinks,
   buildReviewPreview,

@@ -121,6 +121,10 @@ function getPreviewProvider(url) {
   }
 }
 
+function isYoutubeLikeUrl(url) {
+  return /(?:youtube\.com|youtu\.be|ytimg\.com|googlevideo\.com)/i.test(String(url || ''));
+}
+
 function extractTwitterStatusId(url) {
   const match = String(url || '').match(/(?:x\.com|twitter\.com)\/[^/]+\/status\/(\d+)/i);
   return match?.[1] || null;
@@ -150,6 +154,9 @@ function inferCandidatePriority(candidate) {
   if (candidate.kind === 'video') {
     return 100;
   }
+  if (isYoutubeLikeUrl(candidate.url || candidate.sourceUrl) && (candidate.kind === 'image' || candidate.kind === 'thumbnail')) {
+    return 85;
+  }
   if (candidate.kind === 'image') {
     return 80;
   }
@@ -167,6 +174,9 @@ function inferCandidatePriority(candidate) {
 
 function looksLikeLogoCandidate(url) {
   const value = String(url || '');
+  if (isYoutubeLikeUrl(value)) {
+    return false;
+  }
   return /abs\.twimg\.com|favicon|icon|logo|profile_images/i.test(value);
 }
 
@@ -183,7 +193,8 @@ function buildPreviewCandidate(url, source, sourceUrl) {
     kind,
     source,
     provider,
-    priority: inferCandidatePriority({ kind }),
+    sourceUrl: sourceUrl || null,
+    priority: inferCandidatePriority({ kind, url, sourceUrl }),
     twitterStatusId: extractTwitterStatusId(sourceUrl)
   };
 }
@@ -195,6 +206,9 @@ function collectPreviewMediaCandidates(embeds, sourceUrl = null) {
     const pushCandidate = (url, source) => {
       const candidate = buildPreviewCandidate(url, source, sourceUrl || embed.url || null);
       if (candidate) {
+        if (isYoutubeLikeUrl(sourceUrl || embed.url || url)) {
+          candidate.priority = Math.max(candidate.priority, candidate.kind === 'video' ? 100 : 85);
+        }
         candidates.push(candidate);
       }
     };
@@ -239,6 +253,7 @@ function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger = null,
   }
 
   const isTwitterStatus = Boolean(extractTwitterStatusId(sourceUrl));
+  const isYoutubeSource = isYoutubeLikeUrl(sourceUrl);
   const nonLogo = deduped.filter((candidate) => candidate.kind !== 'logo');
   const selected = [];
 
@@ -304,6 +319,25 @@ function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger = null,
     if (bestGifCandidate) {
       selected.push(bestGifCandidate);
     }
+  } else if (isYoutubeSource) {
+    const youtubeCandidates = [...nonLogo].filter((candidate) => isYoutubeLikeUrl(candidate.url) || isYoutubeLikeUrl(candidate.sourceUrl));
+    const bestYoutubeCandidate = youtubeCandidates.sort((left, right) => right.priority - left.priority)[0]
+      || [...nonLogo].sort((left, right) => right.priority - left.priority)[0];
+    if (bestYoutubeCandidate) {
+      selected.push(bestYoutubeCandidate);
+      logger?.info?.('youtube thumbnail selected', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        selectedUrl: bestYoutubeCandidate.url,
+        selectedKind: bestYoutubeCandidate.kind
+      });
+    } else {
+      logger?.info?.('youtube preview skipped reason', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        reason: 'no_candidate'
+      });
+    }
   } else {
     const bestCandidate = [...nonLogo].sort((left, right) => right.priority - left.priority)[0];
     if (bestCandidate) {
@@ -329,6 +363,15 @@ function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger = null,
     selectedMediaCount: selected.length,
     selectedUrls: selected.map((candidate) => candidate.url)
   });
+
+  if (isYoutubeSource) {
+    logger?.info?.('youtube embed preview candidate extracted', {
+      sourceMessageId: messageId,
+      sourceUrl,
+      candidateCount: candidates.length,
+      selectedMediaCount: selected.length
+    });
+  }
 
   if (isTwitterStatus) {
     logger?.info?.('twitter media candidates grouped', {
@@ -481,6 +524,25 @@ function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null, logger = null,
   const finalImageUrls = selectedCandidates
     .filter((candidate) => candidate.kind !== 'video')
     .map((candidate) => candidate.url);
+
+  if (logger && messageId) {
+    for (const candidate of selectedCandidates) {
+      logger.info('media gallery item added', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        url: candidate.url,
+        kind: candidate.kind
+      });
+    }
+    if (candidates.length !== selectedCandidates.length) {
+      logger.info('media gallery deduped', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        originalCount: candidates.length,
+        selectedCount: selectedCandidates.length
+      });
+    }
+  }
 
   return {
     title: primaryPreview?.title || null,
