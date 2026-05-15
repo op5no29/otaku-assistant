@@ -79,6 +79,24 @@ function normalizeText(value) {
   return String(value || '').trim();
 }
 
+function resolveAbsoluteUrl(value, baseUrl) {
+  const raw = normalizeText(value);
+  if (!raw) {
+    return null;
+  }
+  if (/^https?:\/\//iu.test(raw)) {
+    return raw;
+  }
+  if (!baseUrl) {
+    return raw;
+  }
+  try {
+    return new URL(raw, baseUrl).toString();
+  } catch {
+    return raw;
+  }
+}
+
 function toKatakana(value) {
   return String(value || '').replace(/[ぁ-ゖ]/gu, (char) => String.fromCodePoint(char.codePointAt(0) + 0x60));
 }
@@ -101,6 +119,9 @@ function buildAnnictWorkUrl(workId) {
 
 function normalizeAnnictWork(work = {}) {
   const title = normalizeText(work.title);
+  const officialSiteUrl = normalizeText(work.official_site_url || work.officialSiteUrl) || null;
+  const annictUrl = normalizeText(work.annict_url || work.annictUrl) || buildAnnictWorkUrl(work.id);
+  const imageBaseUrl = officialSiteUrl || annictUrl || null;
   const seasonYear = Number.parseInt(
     String(work.season_year || work.seasonYear || work.season_name_text || '').match(/\d{4}/)?.[0] || '',
     10
@@ -126,18 +147,20 @@ function normalizeAnnictWork(work = {}) {
     titleUserPreferred: title || normalizeText(work.title_kana || work.titleKana) || null,
     aliases,
     description: stripHtml(work.description),
-    siteUrl: normalizeText(work.annict_url || work.annictUrl) || buildAnnictWorkUrl(work.id),
-    officialSiteUrl: normalizeText(work.official_site_url || work.officialSiteUrl) || null,
+    siteUrl: annictUrl,
+    officialSiteUrl,
     malAnimeId: work.mal_anime_id ? String(work.mal_anime_id) : null,
-    coverImageUrl: normalizeText(
+    coverImageUrl: resolveAbsoluteUrl(
       work.images?.recommended_url
       || work.images?.facebook?.og_image_url
       || work.images?.twitter?.mini_avatar_url
-      || work.image?.url
+      || work.image?.url,
+      imageBaseUrl
     ) || null,
-    bannerImageUrl: normalizeText(
+    bannerImageUrl: resolveAbsoluteUrl(
       work.images?.facebook?.og_image_url
-      || work.images?.twitter?.normal_avatar_url
+      || work.images?.twitter?.normal_avatar_url,
+      imageBaseUrl
     ) || null,
     season,
     seasonYear: Number.isFinite(seasonYear) ? seasonYear : null,

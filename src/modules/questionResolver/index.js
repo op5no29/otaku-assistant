@@ -5,6 +5,7 @@ const { applyQuestionStatusTag, areQuestionStatusTagsAlreadyCorrect } = require(
 const { canManageQuestionThread } = require('../../utils/permissions');
 const { addPrefix, removePrefix } = require('../../utils/text');
 const { updateQuestionTimelineCard } = require('../timelineRelay');
+const THREAD_NAME_MAX_LENGTH = 100;
 
 function isWatchedQuestionThread(channel, config) {
   return (
@@ -24,9 +25,45 @@ async function withTimeout(promise, timeoutMs, label) {
 }
 
 function buildDesiredThreadTitle(currentName, targetStatus, prefix) {
-  return targetStatus === 'resolved'
-    ? addPrefix(currentName, prefix)
-    : removePrefix(currentName, prefix);
+  const baseTitle = removePrefix(String(currentName || ''), prefix).trim();
+  if (targetStatus !== 'resolved') {
+    return baseTitle.slice(0, THREAD_NAME_MAX_LENGTH);
+  }
+
+  const prefixedTitle = addPrefix(baseTitle, prefix);
+  if (prefixedTitle.length <= THREAD_NAME_MAX_LENGTH) {
+    return prefixedTitle;
+  }
+
+  const availableBaseLength = Math.max(0, THREAD_NAME_MAX_LENGTH - String(prefix || '').length);
+  const truncatedBase = baseTitle.slice(0, availableBaseLength).trimEnd();
+  return addPrefix(truncatedBase, prefix).slice(0, THREAD_NAME_MAX_LENGTH);
+}
+
+function getCurrentTagNames(thread) {
+  const availableTags = Array.isArray(thread?.parent?.availableTags)
+    ? thread.parent.availableTags
+    : Array.isArray(thread?.parent?.availableTags?.values?.())
+      ? Array.from(thread.parent.availableTags.values())
+      : [];
+  const tagNameById = new Map(availableTags.map((tag) => [String(tag.id), String(tag.name || '')]));
+  return (thread?.appliedTags || []).map((tagId) => tagNameById.get(String(tagId)) || String(tagId));
+}
+
+function getQuestionVisualState(thread, targetStatus, config) {
+  const prefix = config.questions.resolvedPrefix;
+  const desiredTitle = buildDesiredThreadTitle(thread?.name || '', targetStatus, prefix);
+  const titleHasResolvedPrefix = String(thread?.name || '').startsWith(prefix);
+  const currentTagNames = getCurrentTagNames(thread);
+  const visualInSync = String(thread?.name || '') === desiredTitle
+    && areQuestionStatusTagsAlreadyCorrect(thread, targetStatus, config);
+
+  return {
+    desiredTitle,
+    titleHasResolvedPrefix,
+    currentTagNames,
+    visualInSync
+  };
 }
 
 function getDbQuestionStatus(client, threadId) {
@@ -61,6 +98,14 @@ async function performQuestionVisualSync({ client, threadId, targetStatus, logge
   const config = client.appConfig;
   const prefix = config.questions.resolvedPrefix;
   const desiredName = buildDesiredThreadTitle(thread.name || '', targetStatus, prefix);
+  logger.info('question visual sync title computed', {
+    threadId,
+    targetStatus,
+    syncAttempt,
+    originalTitleLength: String(thread.name || '').length,
+    finalTitleLength: String(desiredName || '').length,
+    truncated: String(desiredName || '').length < String(thread.name || '').length && targetStatus === 'resolved'
+  });
 
   if ((thread.name || '') === desiredName) {
     logger.info('title sync skipped/already correct', {
@@ -169,6 +214,34 @@ function scheduleQuestionVisualSync({ client, threadId, targetStatus, logger }) 
   }, 0);
 }
 
+async function repairQuestionVisualState({ client, thread, targetStatus, logger }) {
+  logger.info('question visual repair started', {
+    threadId: thread.id,
+    targetStatus
+  });
+  try {
+    await performQuestionVisualSync({
+      client,
+      threadId: thread.id,
+      targetStatus,
+      logger,
+      syncAttempt: 'repair'
+    });
+    logger.info('question visual repair finished', {
+      threadId: thread.id,
+      targetStatus
+    });
+    return true;
+  } catch (error) {
+    logger.warn('question visual repair failed', {
+      threadId: thread.id,
+      targetStatus,
+      error: error.message
+    });
+    return false;
+  }
+}
+
 async function resolveThread({ interaction, mode }) {
   const config = interaction.client.appConfig;
   const logger = interaction.client.logger;
@@ -247,14 +320,52 @@ async function resolveThread({ interaction, mode }) {
       threadId: thread.id,
       targetStatus
     });
+    const visualState = getQuestionVisualState(thread, targetStatus, config);
+    logger.info('question visual state checked', {
+      interactionId: interaction.id,
+      threadId: thread.id,
+      dbStatus: currentStatus,
+      targetStatus,
+      titleHasResolvedPrefix: visualState.titleHasResolvedPrefix,
+      currentTagNames: visualState.currentTagNames,
+      visualInSync: visualState.visualInSync
+    });
 
     if (mode === 'resolve' && currentStatus === 'resolved') {
-      await interaction.editReply('この質問はすでに解決済みです。');
+      if (visualState.visualInSync) {
+        await interaction.editReply('この質問はすでに解決済みです。');
+      } else {
+        const repaired = await repairQuestionVisualState({
+          client: interaction.client,
+          thread,
+          targetStatus,
+          logger
+        });
+        await interaction.editReply(
+          repaired
+            ? 'この質問はすでに解決済みでしたが、表示を修正しました。'
+            : 'ステータスは解決済みですが、表示同期に失敗しました。'
+        );
+      }
       return;
     }
 
     if (mode === 'unresolve' && currentStatus === 'open') {
-      await interaction.editReply('この質問はまだ解決済みになっていません。');
+      if (visualState.visualInSync) {
+        await interaction.editReply('この質問はまだ解決済みになっていません。');
+      } else {
+        const repaired = await repairQuestionVisualState({
+          client: interaction.client,
+          thread,
+          targetStatus,
+          logger
+        });
+        await interaction.editReply(
+          repaired
+            ? 'この質問はすでに受付中でしたが、表示を修正しました。'
+            : 'ステータスは受付中ですが、表示同期に失敗しました。'
+        );
+      }
       return;
     }
 

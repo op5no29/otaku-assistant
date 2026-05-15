@@ -1590,7 +1590,9 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
   };
 
   for (const [routeKey, route] of globalMatches) {
-    if (route.channelId && route.relayUserPostToDestination !== false) {
+    const isAnimeDestinationRoute = String(route.channelId || '') === animeChannelId;
+    const shouldRelayUserPostToDestination = route.relayUserPostToDestination !== false && !isAnimeDestinationRoute;
+    if (route.channelId && shouldRelayUserPostToDestination) {
       const added = addDestination(route.channelId, `global_hashtag:${routeKey}`);
       logger.info('Global hashtag route matched', {
         sourceMessageId: message.id,
@@ -1599,7 +1601,7 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
         matchedRoute: true,
         destinationChannelId: route.channelId,
         routeDestinationChannelId: route.channelId,
-        relayUserPostToDestination: route.relayUserPostToDestination !== false,
+        relayUserPostToDestination: shouldRelayUserPostToDestination,
         alsoTimeline: route.alsoTimeline === true,
         willRelay: added
       });
@@ -1609,7 +1611,8 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
         routeKey,
         detectedTag,
         destinationChannelId: route.channelId,
-        relayUserPostToDestination: false,
+        relayUserPostToDestination: route.relayUserPostToDestination !== false,
+        forcedAnimeDestinationSkip: isAnimeDestinationRoute,
         reason: 'route_disabled_destination_relay'
       });
     }
@@ -1877,7 +1880,8 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
 
   for (const routeKey of replyRouting.globalMatchedRoutes) {
     const route = config.globalHashtagRoutes?.[routeKey];
-    if (route?.channelId && route.relayUserPostToDestination !== false) {
+    const isAnimeDestinationRoute = String(route?.channelId || '') === String(config.anime?.channelId || '');
+    if (route?.channelId && route.relayUserPostToDestination !== false && !isAnimeDestinationRoute) {
       addDestination(route.channelId, `reply_global_hashtag:${routeKey}`);
     }
     if (route?.alsoTimeline && config.timelineChannelId) {

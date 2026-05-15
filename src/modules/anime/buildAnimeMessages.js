@@ -130,20 +130,26 @@ function buildLinkRows({ threadUrl, siteUrl, parentUrl, provider = null }) {
 function buildAnimeChannelCard(entry, stats, cast = [], latestReviews = []) {
   const container = createContainer(stats?.hasSpoilerReviews ? 0xfca5a5 : ANIME_PARENT_ACCENT);
   const image = selectAnimeImageUrls(entry);
-  const section = new SectionBuilder().addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`### ${getPreferredAnimeDisplayTitle(entry)}`),
-    new TextDisplayBuilder().setContent(buildMetadataLines(entry, stats).join('\n'))
-  );
+  const titleText = `### ${getPreferredAnimeDisplayTitle(entry)}`;
+  const metadataText = buildMetadataLines(entry, stats).join('\n');
 
   if (image.thumbnailUrl) {
+    const section = new SectionBuilder().addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(titleText),
+      new TextDisplayBuilder().setContent(metadataText)
+    );
     section.setThumbnailAccessory(
       new ThumbnailBuilder()
         .setURL(image.thumbnailUrl)
         .setDescription(`${getPreferredAnimeDisplayTitle(entry)} のカバー`)
     );
+    container.addSectionComponents(section);
+  } else {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(titleText),
+      new TextDisplayBuilder().setContent(metadataText)
+    );
   }
-
-  container.addSectionComponents(section);
   const castLines = Array.isArray(cast)
     ? cast
         .slice(0, Number(stats?.maxCastInCard || 5))

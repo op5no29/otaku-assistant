@@ -249,6 +249,34 @@ async function resolveAnimeCardImageEntry(client, entry) {
   };
 }
 
+function summarizeAnimePayload(payload) {
+  return {
+    flags: payload?.flags || null,
+    componentCount: Array.isArray(payload?.components) ? payload.components.length : 0,
+    componentTypes: Array.isArray(payload?.components)
+      ? payload.components.map((component) => component?.constructor?.name || typeof component)
+      : []
+  };
+}
+
+function validateAnimePayload(payload, logger, context = {}) {
+  try {
+    for (const component of Array.isArray(payload?.components) ? payload.components : []) {
+      component?.toJSON?.();
+    }
+    return payload;
+  } catch (error) {
+    logger.error('anime component payload validation failed', {
+      ...context,
+      errorName: error?.name || null,
+      errorMessage: error?.message || null,
+      errorStack: error?.stack || null,
+      payloadSummary: summarizeAnimePayload(payload)
+    });
+    throw error;
+  }
+}
+
 async function searchAnime(client, title) {
   const provider = getConfiguredProvider(client);
   if (provider === 'annict') {
@@ -415,7 +443,14 @@ async function updateAnimeChannelCard(client, entry) {
   const cast = client.db.anime.listCast(normalizedEntry.id).slice(0, client.appConfig.anime.maxCastInCard);
   const latestReviews = await getLatestReviewPreviews(client, normalizedEntry, client.appConfig.anime.maxReviewsInCard);
   const imageReadyEntry = await resolveAnimeCardImageEntry(client, normalizedEntry);
-  const payload = buildAnimeChannelCard(imageReadyEntry, stats, cast, latestReviews);
+  const payload = validateAnimePayload(
+    buildAnimeChannelCard(imageReadyEntry, stats, cast, latestReviews),
+    client.logger,
+    {
+      animeEntryId: normalizedEntry.id,
+      stage: 'updateAnimeChannelCard'
+    }
+  );
   await message.edit(payload);
   client.logger.info('anime parent card updated', {
     animeEntryId: normalizedEntry.id,
@@ -607,7 +642,15 @@ async function postAnimeToChannel(guild, media, createdByUserId, additionalAlias
       channelId: animeChannelId
     });
     try {
-      sentMessage = await channel.send(buildAnimeChannelCard(imageReadyEntry, stats));
+      const payload = validateAnimePayload(
+        buildAnimeChannelCard(imageReadyEntry, stats),
+        client.logger,
+        {
+          animeEntryId: entry.id,
+          stage: 'postAnimeToChannel:parentCardSend'
+        }
+      );
+      sentMessage = await channel.send(payload);
     } catch (error) {
       client.logger.error('anime parent card send failed', {
         animeEntryId: entry.id,
