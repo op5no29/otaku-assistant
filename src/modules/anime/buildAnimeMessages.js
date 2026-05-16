@@ -9,6 +9,7 @@ const {
   ThumbnailBuilder
 } = require('discord.js');
 const { getChannelJumpUrl, getMessageJumpUrl } = require('../../services/discordLinks');
+const { isUsableAnimeMainImageUrl } = require('./imagePolicy');
 
 function createContainer(accentColor = 0x8b5cf6) {
   return new ContainerBuilder().setAccentColor(accentColor);
@@ -28,20 +29,9 @@ function getPreferredAnimeDisplayTitle(entry) {
   return entry.titleNative || entry.titleUserPreferred || entry.titleRomaji || entry.titleEnglish || 'タイトル不明';
 }
 
-function isUsableImageUrl(value) {
-  const text = String(value || '').trim();
-  if (!/^https:\/\//iu.test(text)) {
-    return false;
-  }
-  if (/\.svg(?:$|\?)/iu.test(text)) {
-    return false;
-  }
-  return true;
-}
-
 function selectAnimeImageUrls(entry) {
-  const coverImageUrl = isUsableImageUrl(entry?.coverImageUrl) ? entry.coverImageUrl : null;
-  const bannerImageUrl = isUsableImageUrl(entry?.bannerImageUrl) ? entry.bannerImageUrl : null;
+  const coverImageUrl = isUsableAnimeMainImageUrl(entry?.coverImageUrl, 'cover') ? entry.coverImageUrl : null;
+  const bannerImageUrl = isUsableAnimeMainImageUrl(entry?.bannerImageUrl, 'banner') ? entry.bannerImageUrl : null;
   const thumbnailUrl = coverImageUrl || bannerImageUrl || null;
   return {
     coverImageUrl,
@@ -318,6 +308,5 @@ module.exports = {
   buildAnimeLinks,
   buildReviewPreview,
   getPreferredAnimeDisplayTitle,
-  selectAnimeImageUrls,
-  isUsableImageUrl
+  selectAnimeImageUrls
 };

@@ -15,6 +15,13 @@ const {
 } = require('./annictClient');
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { rankResolvedWorks, normalizeSearchText, extractSearchAliases } = require('./search');
+const {
+  normalizeAnimeImageCandidate,
+  normalizeAnimeImageCandidates,
+  normalizeHttpsUrl,
+  getAnimeImageCandidateRejectionReason,
+  selectPreferredAnimeImageCandidates
+} = require('./imagePolicy');
 const { registerDeletableMessage } = require('../deletableMessages');
 const { extractPlainMessagePost } = require('../timelineRelay/extractFirstPost');
 const { buildTimelineMessage } = require('../timelineRelay/buildTimelineMessage');
@@ -72,14 +79,24 @@ function mergeAliases(...groups) {
   return Array.from(new Set(groups.flat().filter(Boolean).map(String)));
 }
 
+function buildMediaImageCandidates(media) {
+  return normalizeAnimeImageCandidates([
+    normalizeAnimeImageCandidate(media.coverImageUrl, {
+      kind: 'cover',
+      source: 'media.coverImageUrl'
+    }),
+    normalizeAnimeImageCandidate(media.bannerImageUrl, {
+      kind: 'banner',
+      source: 'media.bannerImageUrl'
+    }),
+    ...(Array.isArray(media.imageCandidates) ? media.imageCandidates : [])
+  ]);
+}
+
 function buildEntryRecord(media, extras = {}) {
-  const fallbackImageCandidate = Array.isArray(media.imageCandidates)
-    ? media.imageCandidates.find((value) => String(value || '').trim())
-    : null;
-  const resolvedCoverImageUrl = media.coverImageUrl || null;
-  const resolvedBannerImageUrl = media.bannerImageUrl
-    || ((!resolvedCoverImageUrl || /^http:\/\//iu.test(String(resolvedCoverImageUrl))) ? fallbackImageCandidate : null)
-    || null;
+  const preferredImageCandidates = selectPreferredAnimeImageCandidates(buildMediaImageCandidates(media), 2);
+  const resolvedCoverImageUrl = preferredImageCandidates[0]?.url || null;
+  const resolvedBannerImageUrl = preferredImageCandidates[1]?.url || null;
   const aliases = mergeAliases(
     Array.isArray(media.aliases) ? media.aliases : [],
     Array.isArray(extras.additionalAliases) ? extras.additionalAliases : [],
@@ -174,19 +191,32 @@ function ensureAnimeImageValidationStore(client) {
   return client.animeImageValidationCache;
 }
 
-async function validateAnimeImageUrl(client, url) {
-  const normalizedUrl = String(url || '').trim();
-  const upgradedUrl = /^http:\/\//iu.test(normalizedUrl)
-    ? normalizedUrl.replace(/^http:\/\//iu, 'https://')
-    : normalizedUrl;
-  if (!/^https:\/\//iu.test(upgradedUrl)) {
-    return false;
+function ensureAnimeOfficialSiteImageStore(client) {
+  if (!client.animeOfficialSiteImageCache) {
+    client.animeOfficialSiteImageCache = new Map();
+  }
+  return client.animeOfficialSiteImageCache;
+}
+
+async function validateAnimeImageCandidate(client, candidate) {
+  const normalizedCandidate = normalizeAnimeImageCandidate(candidate);
+  const upgradedUrl = normalizeHttpsUrl(normalizedCandidate?.url);
+  const rejectionReason = getAnimeImageCandidateRejectionReason({
+    ...normalizedCandidate,
+    url: upgradedUrl
+  });
+  if (rejectionReason) {
+    return {
+      valid: false,
+      url: upgradedUrl,
+      reason: rejectionReason
+    };
   }
 
   const cache = ensureAnimeImageValidationStore(client);
   const cached = cache.get(upgradedUrl);
   if (cached && (Date.now() - cached.checkedAt) < IMAGE_VALIDATION_TTL_MS) {
-    return cached.valid;
+    return cached.result;
   }
 
   try {
@@ -197,81 +227,184 @@ async function validateAnimeImageUrl(client, url) {
       signal: AbortSignal.timeout ? AbortSignal.timeout(6000) : undefined
     });
     const contentType = String(response.headers.get('content-type') || '').toLowerCase();
-    const valid = response.ok && contentType.startsWith('image/');
+    const contentLength = Number.parseInt(String(response.headers.get('content-length') || ''), 10);
+    const tooSmall = Number.isFinite(contentLength)
+      && contentLength > 0
+      && contentLength < 4_096
+      && !['main_visual', 'recommended', 'ogp', 'cover'].includes(String(normalizedCandidate?.kind || '').toLowerCase());
+    const valid = response.ok && contentType.startsWith('image/') && !tooSmall;
     response.body?.cancel?.();
+    const result = {
+      valid,
+      url: upgradedUrl,
+      reason: tooSmall ? 'too_small' : (valid ? null : 'non_image_response'),
+      contentType,
+      contentLength: Number.isFinite(contentLength) ? contentLength : null
+    };
     cache.set(upgradedUrl, {
       checkedAt: Date.now(),
-      valid
+      result
     });
     if (valid) {
       client.logger.info('anime image validation succeeded', {
         url: upgradedUrl
       });
     }
-    return valid;
+    return result;
   } catch {
+    const result = {
+      valid: false,
+      url: upgradedUrl,
+      reason: 'fetch_failed'
+    };
     cache.set(upgradedUrl, {
       checkedAt: Date.now(),
-      valid: false
+      result
     });
-    return false;
+    return result;
+  }
+}
+
+function parseMetaTagAttributes(rawTag) {
+  const attrs = {};
+  for (const match of rawTag.matchAll(/([a-zA-Z:_-]+)\s*=\s*["']([^"']*)["']/g)) {
+    attrs[match[1].toLowerCase()] = match[2];
+  }
+  return attrs;
+}
+
+async function fetchOfficialSiteImageCandidates(client, officialSiteUrl) {
+  const normalizedUrl = normalizeHttpsUrl(officialSiteUrl);
+  if (!/^https:\/\//iu.test(String(normalizedUrl || ''))) {
+    return [];
+  }
+
+  const cache = ensureAnimeOfficialSiteImageStore(client);
+  const cached = cache.get(normalizedUrl);
+  if (cached && (Date.now() - cached.checkedAt) < IMAGE_VALIDATION_TTL_MS) {
+    return cached.candidates;
+  }
+
+  try {
+    const response = await fetch(normalizedUrl, {
+      headers: {
+        Accept: 'text/html,application/xhtml+xml'
+      },
+      signal: AbortSignal.timeout ? AbortSignal.timeout(6000) : undefined
+    });
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    if (!response.ok || !contentType.includes('text/html')) {
+      cache.set(normalizedUrl, {
+        checkedAt: Date.now(),
+        candidates: []
+      });
+      return [];
+    }
+
+    const html = await response.text();
+    const candidates = [];
+    for (const match of html.matchAll(/<meta\b[^>]*>/giu)) {
+      const attrs = parseMetaTagAttributes(match[0]);
+      const property = String(attrs.property || attrs.name || '').toLowerCase();
+      const content = normalizeHttpsUrl(attrs.content);
+      if (!content) {
+        continue;
+      }
+      if (property === 'og:image' || property === 'twitter:image') {
+        candidates.push({
+          url: new URL(content, normalizedUrl).toString(),
+          kind: 'ogp',
+          source: `official_site.${property}`
+        });
+      }
+    }
+
+    cache.set(normalizedUrl, {
+      checkedAt: Date.now(),
+      candidates
+    });
+    return candidates;
+  } catch {
+    cache.set(normalizedUrl, {
+      checkedAt: Date.now(),
+      candidates: []
+    });
+    return [];
   }
 }
 
 async function resolveAnimeCardImageEntry(client, entry) {
   const normalizedEntry = normalizeEntry(entry);
   const imageChoice = selectAnimeImageUrls(normalizedEntry);
-  client.logger.info('anime image candidates', {
-    animeEntryId: normalizedEntry?.id || null,
-    coverImageUrl: normalizedEntry?.coverImageUrl || null,
-    bannerImageUrl: normalizedEntry?.bannerImageUrl || null,
-    thumbnailUrl: imageChoice.thumbnailUrl || null,
-    selectedImageSource: imageChoice.selectedImageSource,
-    selectedImageUrl: imageChoice.thumbnailUrl || null,
-    imageOmitted: !imageChoice.thumbnailUrl
+  const candidates = buildMediaImageCandidates({
+    coverImageUrl: imageChoice.coverImageUrl,
+    bannerImageUrl: imageChoice.bannerImageUrl
   });
 
-  const candidates = [
-    ['cover', imageChoice.coverImageUrl],
-    ['banner', imageChoice.bannerImageUrl]
-  ].filter(([, candidateUrl]) => Boolean(candidateUrl));
+  client.logger.info('anime image candidates', {
+    animeEntryId: normalizedEntry?.id || null,
+    candidates: candidates.map((candidate) => ({
+      url: candidate.url,
+      kind: candidate.kind,
+      source: candidate.source
+    })),
+    imageOmitted: !candidates.length
+  });
 
-  for (const [source, candidateUrl] of candidates) {
-    const upgradedUrl = /^http:\/\//iu.test(String(candidateUrl || ''))
-      ? String(candidateUrl).replace(/^http:\/\//iu, 'https://')
-      : candidateUrl;
-    if (upgradedUrl !== candidateUrl) {
-      client.logger.info('anime image url upgraded', {
+  for (const candidate of candidates) {
+    const validation = await validateAnimeImageCandidate(client, candidate);
+    if (validation.valid) {
+      client.logger.info('anime image candidate selected main_visual', {
         animeEntryId: normalizedEntry?.id || null,
-        source,
-        originalUrl: candidateUrl,
-        upgradedUrl
-      });
-    }
-    const valid = await validateAnimeImageUrl(client, upgradedUrl);
-    if (valid) {
-      client.logger.info('anime image candidate selected', {
-        animeEntryId: normalizedEntry?.id || null,
-        source,
-        url: upgradedUrl
+        source: candidate.source,
+        kind: candidate.kind,
+        url: validation.url
       });
       return {
         ...normalizedEntry,
-        coverImageUrl: source === 'cover' ? upgradedUrl : null,
-        bannerImageUrl: source === 'banner' ? upgradedUrl : null
+        coverImageUrl: validation.url,
+        bannerImageUrl: null
       };
     }
-    client.logger.warn('anime image validation failed', {
+    client.logger.info('anime image candidate rejected logo_like', {
       animeEntryId: normalizedEntry?.id || null,
-      source,
-      url: upgradedUrl
+      source: candidate.source,
+      kind: candidate.kind,
+      url: validation.url || candidate.url,
+      reason: validation.reason || 'invalid'
     });
   }
 
-  client.logger.info('anime image all candidates failed', {
+  if (normalizedEntry?.officialSiteUrl) {
+    const officialSiteCandidates = await fetchOfficialSiteImageCandidates(client, normalizedEntry.officialSiteUrl);
+    for (const candidate of officialSiteCandidates) {
+      const validation = await validateAnimeImageCandidate(client, candidate);
+      if (validation.valid) {
+        client.logger.info('anime image candidate selected main_visual', {
+          animeEntryId: normalizedEntry?.id || null,
+          source: candidate.source,
+          kind: candidate.kind,
+          url: validation.url
+        });
+        return {
+          ...normalizedEntry,
+          coverImageUrl: validation.url,
+          bannerImageUrl: null
+        };
+      }
+      client.logger.info('anime image candidate rejected logo_like', {
+        animeEntryId: normalizedEntry?.id || null,
+        source: candidate.source,
+        kind: candidate.kind,
+        url: validation.url || candidate.url,
+        reason: validation.reason || 'invalid'
+      });
+    }
+  }
+
+  client.logger.info('anime image no suitable main visual found', {
     animeEntryId: normalizedEntry?.id || null,
-    selectedImageSource: 'none',
-    reason: 'all_candidates_invalid'
+    officialSiteUrl: normalizedEntry?.officialSiteUrl || null
   });
   return {
     ...normalizedEntry,
@@ -311,10 +444,10 @@ function validateAnimePayload(payload, logger, context = {}) {
 async function searchAnime(client, title) {
   const provider = getConfiguredProvider(client);
   if (provider === 'annict') {
-    const direct = await searchWorks(client, title, { perPage: 10 });
+    const direct = await searchWorks(client, title, { perPage: 20 });
     const normalizedQuery = normalizeSearchText(title);
     const normalizedResults = normalizedQuery && normalizeSearchText(title) !== normalizedQuery
-      ? await searchWorks(client, normalizedQuery, { perPage: 10 }).catch(() => [])
+      ? await searchWorks(client, normalizedQuery, { perPage: 20 }).catch(() => [])
       : [];
     const merged = mergeProviderResults([...direct, ...normalizedResults]);
     return rankResolvedWorks(title, merged).map((row) => row.entry).slice(0, 10);
@@ -420,10 +553,13 @@ async function ensureAnimeEntryFromAnilistMedia(guild, media, createdByUserId, a
     additionalAliases
   });
   if (fallbackImageCandidateUsed(record, media)) {
+    const fallbackImageUrl = buildMediaImageCandidates({
+      imageCandidates: media.imageCandidates
+    })[0]?.url || null;
     client.logger.info('anime image source message fallback used', {
       guildId: guild.id,
       providerMediaId: String(media.providerMediaId || media.id),
-      fallbackImageUrl: Array.isArray(media.imageCandidates) ? media.imageCandidates[0] || null : null
+      fallbackImageUrl
     });
   }
   client.db.anime.upsertEntry(record);
@@ -445,13 +581,13 @@ async function ensureAnimeEntryFromAnilistMedia(guild, media, createdByUserId, a
 }
 
 function fallbackImageCandidateUsed(record, media) {
-  const fallbackImageCandidate = Array.isArray(media.imageCandidates)
-    ? media.imageCandidates.find((value) => String(value || '').trim())
-    : null;
+  const fallbackImageCandidate = buildMediaImageCandidates({
+    imageCandidates: media.imageCandidates
+  })[0]?.url || null;
   return Boolean(
     fallbackImageCandidate
-    && record?.bannerImageUrl
-    && String(record.bannerImageUrl) === String(fallbackImageCandidate)
+    && (String(record?.coverImageUrl || '') === String(fallbackImageCandidate)
+      || String(record?.bannerImageUrl || '') === String(fallbackImageCandidate))
   );
 }
 

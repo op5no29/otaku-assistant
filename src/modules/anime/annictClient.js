@@ -1,4 +1,8 @@
 const requestCache = new Map();
+const {
+  normalizeAnimeImageCandidate,
+  selectPreferredAnimeImageCandidates
+} = require('./imagePolicy');
 
 function getCacheKey(operationName, params) {
   return `${operationName}:${JSON.stringify(params || {})}`;
@@ -122,6 +126,34 @@ function buildAnnictWorkUrl(workId) {
   return workId ? `https://annict.com/works/${workId}` : null;
 }
 
+function collectAnnictImageFieldAudit(value, path = '', acc = [], baseUrl = null) {
+  if (!value || typeof value !== 'object') {
+    return acc;
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    const nextPath = path ? `${path}.${key}` : key;
+    if (typeof child === 'string') {
+      const trimmed = child.trim();
+      if (!trimmed) {
+        continue;
+      }
+      if (/url|image|avatar/iu.test(nextPath)) {
+        acc.push({
+          field: nextPath,
+          value: resolveAbsoluteUrl(trimmed, baseUrl)
+        });
+      }
+      continue;
+    }
+    if (child && typeof child === 'object') {
+      collectAnnictImageFieldAudit(child, nextPath, acc, baseUrl);
+    }
+  }
+
+  return acc;
+}
+
 function normalizeAnnictWork(work = {}) {
   const title = normalizeText(work.title);
   const officialSiteUrl = normalizeText(work.official_site_url || work.officialSiteUrl) || null;
@@ -141,6 +173,44 @@ function normalizeAnnictWork(work = {}) {
     ...(Array.isArray(work.aliases) ? work.aliases : []),
     ...(Array.isArray(work.synonyms) ? work.synonyms : [])
   ].filter(Boolean).map(String);
+  const annictImageCandidates = [
+    normalizeAnimeImageCandidate(work.images?.recommended_url, {
+      kind: 'main_visual',
+      source: 'annict.images.recommended_url'
+    }),
+    normalizeAnimeImageCandidate(work.images?.facebook?.og_image_url, {
+      kind: 'ogp',
+      source: 'annict.images.facebook.og_image_url'
+    }),
+    normalizeAnimeImageCandidate(work.image?.url, {
+      kind: 'image',
+      source: 'annict.image.url'
+    }),
+    normalizeAnimeImageCandidate(work.images?.twitter?.image_url, {
+      kind: 'image',
+      source: 'annict.images.twitter.image_url'
+    }),
+    normalizeAnimeImageCandidate(work.images?.twitter?.mini_avatar_url, {
+      kind: 'logo',
+      source: 'annict.images.twitter.mini_avatar_url'
+    }),
+    normalizeAnimeImageCandidate(work.images?.twitter?.normal_avatar_url, {
+      kind: 'logo',
+      source: 'annict.images.twitter.normal_avatar_url'
+    }),
+    normalizeAnimeImageCandidate(work.images?.twitter?.bigger_avatar_url, {
+      kind: 'logo',
+      source: 'annict.images.twitter.bigger_avatar_url'
+    }),
+    normalizeAnimeImageCandidate(work.images?.twitter?.original_avatar_url, {
+      kind: 'logo',
+      source: 'annict.images.twitter.original_avatar_url'
+    })
+  ].filter(Boolean).map((candidate) => ({
+    ...candidate,
+    url: resolveAbsoluteUrl(candidate.url, imageBaseUrl) || candidate.url
+  }));
+  const preferredImages = selectPreferredAnimeImageCandidates(annictImageCandidates, 2);
 
   return {
     provider: 'annict',
@@ -155,18 +225,10 @@ function normalizeAnnictWork(work = {}) {
     siteUrl: annictUrl,
     officialSiteUrl,
     malAnimeId: work.mal_anime_id ? String(work.mal_anime_id) : null,
-    coverImageUrl: resolveAbsoluteUrl(
-      work.images?.recommended_url
-      || work.images?.facebook?.og_image_url
-      || work.images?.twitter?.mini_avatar_url
-      || work.image?.url,
-      imageBaseUrl
-    ) || null,
-    bannerImageUrl: resolveAbsoluteUrl(
-      work.images?.facebook?.og_image_url
-      || work.images?.twitter?.normal_avatar_url,
-      imageBaseUrl
-    ) || null,
+    coverImageUrl: preferredImages[0]?.url || null,
+    bannerImageUrl: preferredImages[1]?.url || null,
+    imageCandidates: annictImageCandidates,
+    imageFieldAudit: collectAnnictImageFieldAudit(work, '', [], imageBaseUrl),
     season,
     seasonYear: Number.isFinite(seasonYear) ? seasonYear : null,
     status: normalizeText(work.media_text || work.media || work.status) || null,
@@ -261,7 +323,16 @@ async function searchWorks(client, query, options = {}) {
     query,
     count: works.length
   });
-  return works.map(normalizeAnnictWork);
+  return works.map((work) => {
+    const normalized = normalizeAnnictWork(work);
+    client.logger.info('Annict work image fields', {
+      query,
+      providerMediaId: normalized.providerMediaId,
+      titleNative: normalized.titleNative || null,
+      imageFields: normalized.imageFieldAudit
+    });
+    return normalized;
+  });
 }
 
 async function getWorkById(client, workId) {
@@ -270,7 +341,17 @@ async function getWorkById(client, workId) {
     per_page: 1
   });
   const work = Array.isArray(body?.works) ? body.works[0] : null;
-  return work ? normalizeAnnictWork(work) : null;
+  if (!work) {
+    return null;
+  }
+  const normalized = normalizeAnnictWork(work);
+  client.logger.info('Annict work image fields', {
+    query: `id:${workId}`,
+    providerMediaId: normalized.providerMediaId,
+    titleNative: normalized.titleNative || null,
+    imageFields: normalized.imageFieldAudit
+  });
+  return normalized;
 }
 
 async function getCastsByWorkId(client, workId) {
