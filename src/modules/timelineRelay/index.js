@@ -45,6 +45,14 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
   const twitterResolved = await resolveTwitterMedia(post, config, logger);
   const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, logger);
   const attachmentPrepared = await prepareAttachmentRelay(videoPrepared.post, config, logger);
+  const animeChannelId = String(config.anime?.channelId || '');
+  const matchedGlobalRoutes = Array.isArray(attachmentPrepared.post?.matchedGlobalHashtagRoutes)
+    ? attachmentPrepared.post.matchedGlobalHashtagRoutes
+    : [];
+  const isAnimeTaggedRelay = matchedGlobalRoutes.some((routeKey) => String(config.globalHashtagRoutes?.[routeKey]?.channelId || '') === animeChannelId);
+  if (forumType !== 'question' && isAnimeTaggedRelay) {
+    attachmentPrepared.post.accentColor = 0xf3f4f6;
+  }
   if (forumType === 'question') {
     logger.info('Question card built', {
       sourceMessageId: post.messageId,
@@ -2043,6 +2051,7 @@ async function handleRouteAddedOnMessageUpdate(oldMessage, newMessage, { config,
 }
 
 module.exports = {
+  buildTimelinePayload,
   relayForumThread,
   relayTweetMessage,
   updateTweetTimelineCard,

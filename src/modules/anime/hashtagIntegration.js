@@ -473,14 +473,60 @@ function titleLooksLikeSeasonSpecific(value) {
   return /第\s*\d+\s*期|\b\d+\s*期\b|Season\s*\d+|\d+(?:st|nd|rd|th)\s+Season/iu.test(String(value || ''));
 }
 
+function extractSeasonNumber(value) {
+  const text = String(value || '');
+  const patterns = [
+    /(?:^|[^\d])(\d+)(?:st|nd|rd|th)\s+season/iu,
+    /season\s*(\d+)/iu,
+    /第\s*(\d+)\s*期/iu,
+    /(?:^|[^\d])(\d+)\s*期/iu
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      return Number.parseInt(match[1], 10);
+    }
+  }
+  return null;
+}
+
+function extractCandidateSeasonContext(candidate) {
+  const rawText = String(candidate?.rawTitle || candidate?.normalizedCandidate || '');
+  const normalizedText = String(candidate?.normalizedCandidate || '');
+  return {
+    explicitSeasonNumber: extractSeasonNumber(rawText),
+    rawLooksSeasonSpecific: titleLooksLikeSeasonSpecific(rawText),
+    normalizedLooksSeasonSpecific: titleLooksLikeSeasonSpecific(normalizedText),
+    hasSpecialLikeTerms: /\bOVA\b|\bOAD\b|\bMovie\b|劇場版|Memory Snow|氷結の絆|\bSpecials?\b|\bSP\b/iu.test(rawText)
+  };
+}
+
+function extractMediaSeasonInfo(media) {
+  const title = String(
+    media?.titleUserPreferred
+    || media?.titleNative
+    || media?.titleEnglish
+    || media?.titleRomaji
+    || ''
+  );
+  return {
+    seasonNumber: extractSeasonNumber(title),
+    isSpecialLike: /\bOVA\b|\bOAD\b|\bMovie\b|劇場版|Memory Snow|氷結の絆|\bSpecials?\b|\bSP\b/iu.test(title),
+    isSeasonSpecific: titleLooksLikeSeasonSpecific(title)
+  };
+}
+
 function scoreAniListCandidate(candidate, media) {
   if (candidate.sourceType === 'anilist_url' || candidate.sourceType === 'annict_url') {
     return {
       score: 999,
-      reason: 'explicit_anilist_url'
+      reason: 'explicit_anilist_url',
+      seasonPenaltyReason: null
     };
   }
 
+  const candidateSeasonContext = extractCandidateSeasonContext(candidate);
+  const mediaSeasonInfo = extractMediaSeasonInfo(media);
   const candidateTitle = canonicalTitle(candidate.normalizedCandidate || candidate.rawTitle || '');
   const titles = [
     media.titleNative,
@@ -492,6 +538,7 @@ function scoreAniListCandidate(candidate, media) {
   const canonicalTitles = titles.map((value) => canonicalTitle(value));
   let score = 0;
   let reason = 'weak_match';
+  let seasonPenaltyReason = null;
 
   if (canonicalTitles.includes(candidateTitle)) {
     score += 70;
@@ -521,13 +568,39 @@ function scoreAniListCandidate(candidate, media) {
     score -= 8;
   }
 
+  if (candidateSeasonContext.explicitSeasonNumber) {
+    if (mediaSeasonInfo.seasonNumber && mediaSeasonInfo.seasonNumber !== candidateSeasonContext.explicitSeasonNumber) {
+      score -= 90;
+      seasonPenaltyReason = 'season_number_mismatch';
+    } else if (mediaSeasonInfo.isSpecialLike) {
+      score -= 70;
+      seasonPenaltyReason = 'special_mismatch';
+    }
+  } else if (!candidateSeasonContext.rawLooksSeasonSpecific && !candidateSeasonContext.normalizedLooksSeasonSpecific) {
+    if (mediaSeasonInfo.isSpecialLike) {
+      score -= 70;
+      seasonPenaltyReason = 'special_ambiguity';
+    } else if (mediaSeasonInfo.isSeasonSpecific) {
+      score -= 60;
+      seasonPenaltyReason = 'season_ambiguity';
+    }
+  }
+
   if (!titleLooksLikeSeasonSpecific(candidate.rawTitle || candidate.normalizedCandidate || '') && titleLooksLikeSeasonSpecific(media.titleUserPreferred || media.titleRomaji || media.titleNative || media.titleEnglish || '')) {
     score -= 12;
+    seasonPenaltyReason ||= 'season_specific_title_penalty';
   } else if (!titleLooksLikeSeasonSpecific(media.titleUserPreferred || media.titleRomaji || media.titleNative || media.titleEnglish || '')) {
     score += 5;
   }
 
-  return { score, reason };
+  return {
+    score,
+    reason,
+    seasonPenaltyReason,
+    candidateSeasonContext,
+    mediaSeasonNumber: mediaSeasonInfo.seasonNumber,
+    mediaIsSpecialLike: mediaSeasonInfo.isSpecialLike
+  };
 }
 
 function shouldAutoRegisterAnime(scoreResult) {
@@ -536,6 +609,9 @@ function shouldAutoRegisterAnime(scoreResult) {
   }
   if (scoreResult.candidate?.sourceType === 'anilist_url' || scoreResult.candidate?.sourceType === 'annict_url') {
     return true;
+  }
+  if (scoreResult.top?.seasonPenaltyReason) {
+    return false;
   }
   if (scoreResult.candidate?.sourceType === 'explicit_title_line') {
     return scoreResult.top.score >= 80 && scoreResult.scoreGap >= 8;
@@ -547,6 +623,22 @@ function shouldAutoRegisterAnime(scoreResult) {
     return scoreResult.top.score >= 92 && scoreResult.scoreGap >= 15;
   }
   return false;
+}
+
+function getAutoRegisterSkipReason(scoreResult) {
+  if (!scoreResult?.top) {
+    return 'no_search_result';
+  }
+  if (scoreResult.top?.seasonPenaltyReason === 'season_number_mismatch') {
+    return 'season_mismatch';
+  }
+  if (scoreResult.top?.seasonPenaltyReason === 'season_ambiguity' || scoreResult.top?.seasonPenaltyReason === 'season_specific_title_penalty') {
+    return 'season_ambiguity';
+  }
+  if (scoreResult.top?.seasonPenaltyReason === 'special_mismatch' || scoreResult.top?.seasonPenaltyReason === 'special_ambiguity') {
+    return 'special_ambiguity';
+  }
+  return 'confidence_below_threshold';
 }
 
 async function maybeReplyAskForTitle(message, reason) {
@@ -578,6 +670,58 @@ async function maybeReplyAskForTitle(message, reason) {
     reason
   });
   return true;
+}
+
+async function maybeReplyAskForSelection(message, reason) {
+  const state = getIntegrationState(message.client, message.id);
+  const store = ensureReplyStore(message.client);
+  if (store.has(message.id)) {
+    return false;
+  }
+  if (state?.status === 'success') {
+    return false;
+  }
+  store.add(message.id);
+  setIntegrationState(message.client, message.id, { replied: true });
+  await message.reply({
+    content: [
+      'アニメ作品の候補が複数あります。',
+      '作品名を指定して `/anime post title:` から選択してください。'
+    ].join('\n'),
+    allowedMentions: { parse: [] }
+  }).catch(() => null);
+  message.client.logger.info('anime hashtag source reply sent', {
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    reason
+  });
+  return true;
+}
+
+function resolveRelativeUrl(value, baseUrl) {
+  const raw = String(value || '').trim();
+  if (!raw) {
+    return null;
+  }
+  try {
+    return new URL(raw, baseUrl || undefined).toString();
+  } catch {
+    return raw;
+  }
+}
+
+function collectMessageImageCandidates(message) {
+  const candidates = [];
+  for (const embed of Array.isArray(message?.embeds) ? message.embeds : []) {
+    const baseUrl = embed?.url || null;
+    for (const candidate of [embed?.thumbnail?.url, embed?.image?.url]) {
+      const resolved = resolveRelativeUrl(candidate, baseUrl);
+      if (resolved && !candidates.includes(resolved)) {
+        candidates.push(resolved);
+      }
+    }
+  }
+  return candidates;
 }
 
 async function resolveAnimeCandidate(client, candidate) {
@@ -773,7 +917,7 @@ async function handleAnimeHashtagPost(message, options = {}) {
     });
 
     if (candidate.rawTitle) {
-      logger.info('anime hashtag candidate normalized', {
+    logger.info('anime hashtag candidate normalized', {
         sourceMessageId: message.id,
         sourceChannelId: message.channelId,
         rawTitle: candidate.rawTitle,
@@ -781,6 +925,14 @@ async function handleAnimeHashtagPost(message, options = {}) {
         variants: candidate.candidateVariants.map((entry) => entry.value)
       });
     }
+    logger.info('anime candidate season context', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      sourceType: candidate.sourceType,
+      rawTitle: candidate.rawTitle || null,
+      normalizedCandidate: candidate.normalizedCandidate || null,
+      seasonContext: extractCandidateSeasonContext(candidate)
+    });
     logger.info('anime candidate winner selected', {
       sourceMessageId: message.id,
       sourceChannelId: message.channelId,
@@ -827,9 +979,24 @@ async function handleAnimeHashtagPost(message, options = {}) {
         title: result.media?.titleNative || result.media?.titleUserPreferred || result.media?.titleEnglish || null,
         providerMediaId: result.media?.providerMediaId || null,
         score: result.score,
-        reason: result.reason
+        reason: result.reason,
+        seasonPenaltyReason: result.seasonPenaltyReason || null,
+        mediaSeasonNumber: result.mediaSeasonNumber || null,
+        mediaIsSpecialLike: result.mediaIsSpecialLike || false
       }))
     });
+    for (const result of resolved.results.slice(0, 3)) {
+      if (result.seasonPenaltyReason) {
+        logger.info('anime result season penalty', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          providerMediaId: result.media?.providerMediaId || null,
+          titleNative: result.media?.titleNative || result.media?.titleUserPreferred || null,
+          seasonPenaltyReason: result.seasonPenaltyReason,
+          mediaSeasonNumber: result.mediaSeasonNumber || null
+        });
+      }
+    }
 
     const confidenceResult = {
       candidate,
@@ -849,9 +1016,10 @@ async function handleAnimeHashtagPost(message, options = {}) {
     });
 
     if (!shouldAutoRegisterAnime(confidenceResult)) {
+      const skipReason = getAutoRegisterSkipReason(confidenceResult);
       setIntegrationState(client, message.id, {
         status: 'skipped_ambiguous',
-        lastReason: confidenceResult.top ? 'confidence_below_threshold' : 'no_search_result'
+        lastReason: skipReason
       });
       logger.info('anime hashtag skipped ambiguous', {
         sourceMessageId: message.id,
@@ -860,14 +1028,33 @@ async function handleAnimeHashtagPost(message, options = {}) {
         normalizedCandidate: candidate.normalizedCandidate || null,
         confidenceScore: confidenceResult.top?.score || 0,
         scoreGap: confidenceResult.scoreGap,
-        reason: confidenceResult.top ? 'confidence_below_threshold' : 'no_search_result'
+        reason: skipReason
       });
+      if (skipReason === 'season_mismatch') {
+        logger.info('anime auto registration skipped due to season mismatch', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          normalizedCandidate: candidate.normalizedCandidate || null,
+          providerMediaId: confidenceResult.top?.media?.providerMediaId || null
+        });
+      } else if (skipReason === 'season_ambiguity' || skipReason === 'special_ambiguity') {
+        logger.info('anime auto registration skipped due to sequel/season ambiguity', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          normalizedCandidate: candidate.normalizedCandidate || null,
+          providerMediaId: confidenceResult.top?.media?.providerMediaId || null
+        });
+      }
       if (['explicit_title_line', 'embed_title', 'embed_author', 'embed_description'].includes(candidate.sourceType)) {
-        await maybeReplyAskForTitle(message, 'ambiguous_candidate');
+        if (skipReason === 'season_mismatch' || skipReason === 'season_ambiguity' || skipReason === 'special_ambiguity') {
+          await maybeReplyAskForSelection(message, skipReason);
+        } else {
+          await maybeReplyAskForTitle(message, 'ambiguous_candidate');
+        }
         logger.info('anime hashtag final failure reply sent', {
           sourceMessageId: message.id,
           sourceChannelId: message.channelId,
-          reason: 'ambiguous_candidate'
+          reason: skipReason
         });
       }
       return;
@@ -914,7 +1101,10 @@ async function handleAnimeHashtagPost(message, options = {}) {
 
     const postResult = await postAnimeToChannel(
       message.guild,
-      confidenceResult.top.media,
+      {
+        ...confidenceResult.top.media,
+        imageCandidates: collectMessageImageCandidates(integrationMessage)
+      },
       message.author.id,
       [candidate.normalizedCandidate, candidate.rawTitle].filter(Boolean)
     );

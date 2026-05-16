@@ -16,6 +16,11 @@ const {
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { rankResolvedWorks, normalizeSearchText, extractSearchAliases } = require('./search');
 const { registerDeletableMessage } = require('../deletableMessages');
+const { extractPlainMessagePost } = require('../timelineRelay/extractFirstPost');
+const { buildTimelineMessage } = require('../timelineRelay/buildTimelineMessage');
+const { resolveTwitterMedia } = require('../timelineRelay/twitterMediaResolver');
+const { prepareVideoThumbnail } = require('../timelineRelay/videoThumbnail');
+const { prepareAttachmentRelay } = require('../timelineRelay/attachmentRelay');
 const {
   buildAnimeChannelCard,
   buildAnimeReviewUiCard,
@@ -68,6 +73,13 @@ function mergeAliases(...groups) {
 }
 
 function buildEntryRecord(media, extras = {}) {
+  const fallbackImageCandidate = Array.isArray(media.imageCandidates)
+    ? media.imageCandidates.find((value) => String(value || '').trim())
+    : null;
+  const resolvedCoverImageUrl = media.coverImageUrl || null;
+  const resolvedBannerImageUrl = media.bannerImageUrl
+    || ((!resolvedCoverImageUrl || /^http:\/\//iu.test(String(resolvedCoverImageUrl))) ? fallbackImageCandidate : null)
+    || null;
   const aliases = mergeAliases(
     Array.isArray(media.aliases) ? media.aliases : [],
     Array.isArray(extras.additionalAliases) ? extras.additionalAliases : [],
@@ -93,8 +105,8 @@ function buildEntryRecord(media, extras = {}) {
     siteUrl: media.siteUrl || null,
     officialSiteUrl: media.officialSiteUrl || null,
     malAnimeId: media.malAnimeId || null,
-    coverImageUrl: media.coverImageUrl || null,
-    bannerImageUrl: media.bannerImageUrl || null,
+    coverImageUrl: resolvedCoverImageUrl,
+    bannerImageUrl: resolvedBannerImageUrl,
     season: media.season || null,
     seasonYear: Number.isFinite(media.seasonYear) ? media.seasonYear : null,
     status: media.status || null,
@@ -164,18 +176,21 @@ function ensureAnimeImageValidationStore(client) {
 
 async function validateAnimeImageUrl(client, url) {
   const normalizedUrl = String(url || '').trim();
-  if (!/^https:\/\//iu.test(normalizedUrl)) {
+  const upgradedUrl = /^http:\/\//iu.test(normalizedUrl)
+    ? normalizedUrl.replace(/^http:\/\//iu, 'https://')
+    : normalizedUrl;
+  if (!/^https:\/\//iu.test(upgradedUrl)) {
     return false;
   }
 
   const cache = ensureAnimeImageValidationStore(client);
-  const cached = cache.get(normalizedUrl);
+  const cached = cache.get(upgradedUrl);
   if (cached && (Date.now() - cached.checkedAt) < IMAGE_VALIDATION_TTL_MS) {
     return cached.valid;
   }
 
   try {
-    const response = await fetch(normalizedUrl, {
+    const response = await fetch(upgradedUrl, {
       headers: {
         Accept: 'image/*'
       },
@@ -184,13 +199,18 @@ async function validateAnimeImageUrl(client, url) {
     const contentType = String(response.headers.get('content-type') || '').toLowerCase();
     const valid = response.ok && contentType.startsWith('image/');
     response.body?.cancel?.();
-    cache.set(normalizedUrl, {
+    cache.set(upgradedUrl, {
       checkedAt: Date.now(),
       valid
     });
+    if (valid) {
+      client.logger.info('anime image validation succeeded', {
+        url: upgradedUrl
+      });
+    }
     return valid;
   } catch {
-    cache.set(normalizedUrl, {
+    cache.set(upgradedUrl, {
       checkedAt: Date.now(),
       valid: false
     });
@@ -217,27 +237,38 @@ async function resolveAnimeCardImageEntry(client, entry) {
   ].filter(([, candidateUrl]) => Boolean(candidateUrl));
 
   for (const [source, candidateUrl] of candidates) {
-    const valid = await validateAnimeImageUrl(client, candidateUrl);
+    const upgradedUrl = /^http:\/\//iu.test(String(candidateUrl || ''))
+      ? String(candidateUrl).replace(/^http:\/\//iu, 'https://')
+      : candidateUrl;
+    if (upgradedUrl !== candidateUrl) {
+      client.logger.info('anime image url upgraded', {
+        animeEntryId: normalizedEntry?.id || null,
+        source,
+        originalUrl: candidateUrl,
+        upgradedUrl
+      });
+    }
+    const valid = await validateAnimeImageUrl(client, upgradedUrl);
     if (valid) {
       client.logger.info('anime image candidate selected', {
         animeEntryId: normalizedEntry?.id || null,
         source,
-        url: candidateUrl
+        url: upgradedUrl
       });
       return {
         ...normalizedEntry,
-        coverImageUrl: source === 'cover' ? candidateUrl : null,
-        bannerImageUrl: source === 'banner' ? candidateUrl : null
+        coverImageUrl: source === 'cover' ? upgradedUrl : null,
+        bannerImageUrl: source === 'banner' ? upgradedUrl : null
       };
     }
     client.logger.warn('anime image validation failed', {
       animeEntryId: normalizedEntry?.id || null,
       source,
-      url: candidateUrl
+      url: upgradedUrl
     });
   }
 
-  client.logger.info('anime image fallback used', {
+  client.logger.info('anime image all candidates failed', {
     animeEntryId: normalizedEntry?.id || null,
     selectedImageSource: 'none',
     reason: 'all_candidates_invalid'
@@ -388,6 +419,13 @@ async function ensureAnimeEntryFromAnilistMedia(guild, media, createdByUserId, a
     createdAt: existing?.createdAt || new Date().toISOString(),
     additionalAliases
   });
+  if (fallbackImageCandidateUsed(record, media)) {
+    client.logger.info('anime image source message fallback used', {
+      guildId: guild.id,
+      providerMediaId: String(media.providerMediaId || media.id),
+      fallbackImageUrl: Array.isArray(media.imageCandidates) ? media.imageCandidates[0] || null : null
+    });
+  }
   client.db.anime.upsertEntry(record);
   const entry = normalizeEntry(
     client.db.anime.getEntryByProviderMediaId(guild.id, provider, String(media.providerMediaId || media.id))
@@ -404,6 +442,17 @@ async function ensureAnimeEntryFromAnilistMedia(guild, media, createdByUserId, a
     title: buildTitle(entry)
   });
   return entry;
+}
+
+function fallbackImageCandidateUsed(record, media) {
+  const fallbackImageCandidate = Array.isArray(media.imageCandidates)
+    ? media.imageCandidates.find((value) => String(value || '').trim())
+    : null;
+  return Boolean(
+    fallbackImageCandidate
+    && record?.bannerImageUrl
+    && String(record.bannerImageUrl) === String(fallbackImageCandidate)
+  );
 }
 
 async function getAnimeStats(client, entry) {
@@ -1238,6 +1287,105 @@ async function appendAnimeThreadButtonToTimelineMessage(client, timelineMessageI
   return true;
 }
 
+async function updateAnimeRelayedCards(client, sourceRecord, entry) {
+  if (!sourceRecord?.sourceMessageId || !sourceRecord?.sourceChannelId) {
+    return false;
+  }
+
+  const relayTargets = client.db.relays.listMessageRelayTargets(sourceRecord.sourceMessageId);
+  if (!relayTargets.length) {
+    client.logger.info('anime relayed card update skipped no relay records', {
+      sourceMessageId: sourceRecord.sourceMessageId,
+      animeEntryId: entry.id
+    });
+    return false;
+  }
+
+  const sourceChannel = await safeFetchChannel(client, sourceRecord.sourceChannelId);
+  const sourceMessage = await safeFetchMessage(sourceChannel, sourceRecord.sourceMessageId);
+  if (!sourceMessage) {
+    client.logger.warn('anime relayed card update failed', {
+      sourceMessageId: sourceRecord.sourceMessageId,
+      animeEntryId: entry.id,
+      reason: 'source_message_missing'
+    });
+    return false;
+  }
+
+  client.logger.info('anime relayed card update started', {
+    sourceMessageId: sourceRecord.sourceMessageId,
+    animeEntryId: entry.id,
+    relayTargetCount: relayTargets.length
+  });
+
+  const post = await extractPlainMessagePost(sourceMessage, client.appConfig, client.logger);
+  const links = buildAnimeLinks(entry);
+  post.extraLinkButtons = [{
+    label: '作品スレッドへ飛ぶ',
+    url: links.threadUrl
+  }];
+  post.accentColor = 0xf3f4f6;
+  const twitterResolved = await resolveTwitterMedia(post, client.appConfig, client.logger);
+  const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, client.logger);
+  const attachmentPrepared = await prepareAttachmentRelay(videoPrepared.post, client.appConfig, client.logger);
+  const payload = buildTimelineMessage({
+    post: {
+      ...attachmentPrepared.post,
+      accentColor: 0xf3f4f6
+    },
+    config: client.appConfig,
+    forumType: 'tweet'
+  });
+
+  try {
+    for (const relayTarget of relayTargets) {
+      client.logger.info('anime relayed card update target', {
+        sourceMessageId: sourceRecord.sourceMessageId,
+        animeEntryId: entry.id,
+        destinationChannelId: relayTarget.destinationChannelId,
+        relayedMessageId: relayTarget.relayedMessageId
+      });
+      const destinationChannel = await safeFetchChannel(client, relayTarget.destinationChannelId);
+      const relayedMessage = await safeFetchMessage(destinationChannel, relayTarget.relayedMessageId);
+      if (!relayedMessage) {
+        client.logger.warn('anime relayed card update failed', {
+          sourceMessageId: sourceRecord.sourceMessageId,
+          animeEntryId: entry.id,
+          destinationChannelId: relayTarget.destinationChannelId,
+          relayedMessageId: relayTarget.relayedMessageId,
+          reason: 'relayed_message_missing'
+        });
+        continue;
+      }
+
+      const alreadyHasButton = Array.isArray(relayedMessage.components) && relayedMessage.components.some((row) =>
+        Array.isArray(row.components) && row.components.some((component) => component?.label === '作品スレッドへ飛ぶ')
+      );
+      if (alreadyHasButton) {
+        client.logger.info('anime relayed card update skipped already_has_button', {
+          sourceMessageId: sourceRecord.sourceMessageId,
+          animeEntryId: entry.id,
+          destinationChannelId: relayTarget.destinationChannelId,
+          relayedMessageId: relayTarget.relayedMessageId
+        });
+      }
+
+      await relayedMessage.edit(payload);
+      client.logger.info('anime relayed card update finished', {
+        sourceMessageId: sourceRecord.sourceMessageId,
+        animeEntryId: entry.id,
+        destinationChannelId: relayTarget.destinationChannelId,
+        relayedMessageId: relayTarget.relayedMessageId
+      });
+    }
+    return true;
+  } finally {
+    await attachmentPrepared.cleanup();
+    await videoPrepared.cleanup();
+    await twitterResolved.cleanup();
+  }
+}
+
 async function linkAnimeHashtagSourceToEntry(client, sourceRecord, animeEntryId, detectedCandidate = null) {
   if (!sourceRecord?.id || !animeEntryId) {
     return false;
@@ -1252,7 +1400,14 @@ async function linkAnimeHashtagSourceToEntry(client, sourceRecord, animeEntryId,
     status: 'linked',
     detectedCandidate
   });
-  await appendAnimeThreadButtonToTimelineMessage(client, sourceRecord.relayedTimelineMessageId, entry).catch(() => false);
+  await updateAnimeRelayedCards(client, sourceRecord, entry).catch((error) => {
+    client.logger.warn('anime relayed card update failed', {
+      sourceMessageId: sourceRecord.sourceMessageId,
+      animeEntryId,
+      error: error.message
+    });
+    return false;
+  });
   return true;
 }
 
@@ -1289,6 +1444,7 @@ module.exports = {
   handleAnimeParentMessageDeleted,
   runAnimeOrphanScan,
   appendAnimeThreadButtonToTimelineMessage,
+  updateAnimeRelayedCards,
   linkAnimeHashtagSourceToEntry,
   maybeLinkRecentAnimeHashtagSource,
   getProviderTokenMissingMessage,

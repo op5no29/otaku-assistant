@@ -85,13 +85,18 @@ function resolveAbsoluteUrl(value, baseUrl) {
     return null;
   }
   if (/^https?:\/\//iu.test(raw)) {
+    if (/^http:\/\//iu.test(raw)) {
+      const upgraded = raw.replace(/^http:\/\//iu, 'https://');
+      return upgraded;
+    }
     return raw;
   }
   if (!baseUrl) {
     return raw;
   }
   try {
-    return new URL(raw, baseUrl).toString();
+    const resolved = new URL(raw, baseUrl).toString();
+    return resolved.replace(/^http:\/\//iu, 'https://');
   } catch {
     return raw;
   }
