@@ -3,7 +3,8 @@ const {
   getAnimeById: getAniListAnimeById,
   getAnimeCastById: getAniListAnimeCastById,
   getCurrentSeasonAnime: getAniListCurrentSeasonAnime,
-  getNextSeasonAnime: getAniListNextSeasonAnime
+  getNextSeasonAnime: getAniListNextSeasonAnime,
+  getAnimeByMalId
 } = require('./anilistClient');
 const {
   searchWorks,
@@ -336,6 +337,20 @@ async function fetchOfficialSiteImageCandidates(client, officialSiteUrl) {
 async function resolveAnimeCardImageEntry(client, entry) {
   const normalizedEntry = normalizeEntry(entry);
   const imageChoice = selectAnimeImageUrls(normalizedEntry);
+  if (normalizedEntry?.coverImageUrl && !imageChoice.coverImageUrl) {
+    client.logger.info('anime stored image ignored logo_like', {
+      animeEntryId: normalizedEntry?.id || null,
+      field: 'coverImageUrl',
+      storedUrl: normalizedEntry.coverImageUrl
+    });
+  }
+  if (normalizedEntry?.bannerImageUrl && !imageChoice.bannerImageUrl) {
+    client.logger.info('anime stored image ignored logo_like', {
+      animeEntryId: normalizedEntry?.id || null,
+      field: 'bannerImageUrl',
+      storedUrl: normalizedEntry.bannerImageUrl
+    });
+  }
   const candidates = buildMediaImageCandidates({
     coverImageUrl: imageChoice.coverImageUrl,
     bannerImageUrl: imageChoice.bannerImageUrl
@@ -400,6 +415,53 @@ async function resolveAnimeCardImageEntry(client, entry) {
         reason: validation.reason || 'invalid'
       });
     }
+  }
+
+  if (normalizedEntry?.malAnimeId) {
+    const anilistMedia = await getAnimeByMalId(client, normalizedEntry.malAnimeId).catch(() => null);
+    if (anilistMedia) {
+      const anilistCandidates = [
+        normalizeAnimeImageCandidate(anilistMedia.coverImage?.extraLarge, {
+          kind: 'cover',
+          source: 'anilist.coverImage.extraLarge'
+        }),
+        normalizeAnimeImageCandidate(anilistMedia.coverImage?.large, {
+          kind: 'cover',
+          source: 'anilist.coverImage.large'
+        }),
+        normalizeAnimeImageCandidate(anilistMedia.bannerImage, {
+          kind: 'banner',
+          source: 'anilist.bannerImage'
+        })
+      ].filter(Boolean);
+      for (const candidate of anilistCandidates) {
+        const validation = await validateAnimeImageCandidate(client, candidate);
+        if (validation.valid) {
+          client.logger.info('anime image anilist fallback used', {
+            animeEntryId: normalizedEntry?.id || null,
+            source: candidate.source,
+            kind: candidate.kind,
+            url: validation.url
+          });
+          return {
+            ...normalizedEntry,
+            coverImageUrl: validation.url,
+            bannerImageUrl: null
+          };
+        }
+        client.logger.info('anime image candidate rejected logo_like', {
+          animeEntryId: normalizedEntry?.id || null,
+          source: candidate.source,
+          kind: candidate.kind,
+          url: validation.url || candidate.url,
+          reason: validation.reason || 'invalid'
+        });
+      }
+    }
+    client.logger.info('anime image anilist fallback also failed', {
+      animeEntryId: normalizedEntry?.id || null,
+      malAnimeId: normalizedEntry.malAnimeId
+    });
   }
 
   client.logger.info('anime image no suitable main visual found', {
@@ -1504,6 +1566,7 @@ async function updateAnimeRelayedCards(client, sourceRecord, entry) {
           destinationChannelId: relayTarget.destinationChannelId,
           relayedMessageId: relayTarget.relayedMessageId
         });
+        continue;
       }
 
       await relayedMessage.edit(payload);

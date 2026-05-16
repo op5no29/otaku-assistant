@@ -324,10 +324,28 @@ async function getNextSeasonAnime(client, limit = 10) {
   return getSeasonAnime(client, 1, limit);
 }
 
+const MALID_QUERY = `
+  query AnimeByMalId($malId: Int!) {
+    Media(idMal: $malId, type: ANIME) {
+      id
+      coverImage { large extraLarge }
+      bannerImage
+    }
+  }
+`;
+
+async function getAnimeByMalId(client, malId) {
+  const data = await postGraphql(client, 'AnimeByMalId', MALID_QUERY, {
+    malId: Number(malId)
+  });
+  return data?.Media || null;
+}
+
 module.exports = {
   searchAnimeByTitle,
   getAnimeById,
   getAnimeCastById,
   getCurrentSeasonAnime,
-  getNextSeasonAnime
+  getNextSeasonAnime,
+  getAnimeByMalId
 };

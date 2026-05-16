@@ -585,7 +585,7 @@ function getGlobalRouteDestinationTargets(post, config, sourceChannelId = '') {
 
   for (const routeKey of post.matchedGlobalHashtagRoutes || []) {
     const route = config.globalHashtagRoutes?.[routeKey];
-    if (route?.channelId) {
+    if (route?.channelId && route.relayUserPostToDestination !== false) {
       targets.push({
         destinationChannelId: String(route.channelId),
         relayKind: `global_hashtag:${routeKey}`
@@ -1316,7 +1316,16 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
       desiredTargetByChannelId.delete(String(relayTarget.destinationChannelId));
     }
 
+    const animeChannelId = String(config.anime?.channelId || '');
     for (const target of desiredTargetByChannelId.values()) {
+      if (animeChannelId && String(target.destinationChannelId) === animeChannelId) {
+        logger.warn('anime_channel_normal_relay_blocked', {
+          sourceMessageId: message.id,
+          destinationChannelId: target.destinationChannelId,
+          reason: 'anime_channel_is_parent_card_only'
+        });
+        continue;
+      }
       const destinationChannel = await getTextChannel(message.guild, target.destinationChannelId);
       if (!destinationChannel) {
         logger.warn('Tweet routed copy creation skipped because destination channel was missing', {
