@@ -268,6 +268,22 @@ function extractUnclosedQuotedTitle(raw) {
   return match?.[1] ? cleanupCandidate(match[1]) : null;
 }
 
+// Extract anime title from YouTube OP/ED video title format.
+// Handles: 【optional_metadata】ANIME_TITLE OP/ED SONG_TITLE...
+// Returns the ANIME_TITLE part, or null if the pattern doesn't match.
+function extractYouTubeOpEdTitle(raw) {
+  const text = String(raw || '');
+  // Allow zero or more leading 【metadata】 brackets (e.g. 【高画質】, 【HD】, 【公式】)
+  // then capture the anime title (stops at 「『【 to avoid grabbing song title brackets)
+  // then require an OP/ED keyword
+  const match = text.match(
+    /^(?:【[^【】]{1,20}】\s*)*([^【「『\n\r]{2,60}?)\s+(?:OP|ED|Opening|Ending|オープニング|エンディング|ノンクレジット|主題歌|MV|PV)\b/iu
+  );
+  if (!match?.[1]) return null;
+  const cleaned = cleanupCandidate(stripNoiseTokens(match[1]));
+  return cleaned && cleaned.length >= 2 ? cleaned : null;
+}
+
 function normalizeAnimeCandidateTitle(rawTitle) {
   const rawSource = String(rawTitle || '').trim();
   const raw = cleanupCandidate(rawSource);
@@ -290,6 +306,13 @@ function normalizeAnimeCandidateTitle(rawTitle) {
       candidates.push({ value: normalized, reason, weight });
     }
   };
+
+  // Highest priority: YouTube OP/ED title format (weight 90 > extractQuotedOfficialTitle's 70).
+  // Handles 【高画質】アサシンズプライド OP 『song』 → アサシンズプライド
+  const youtubeOpEdTitle = extractYouTubeOpEdTitle(rawSource);
+  if (youtubeOpEdTitle) {
+    addCandidate(youtubeOpEdTitle, 'youtube_op_ed_title', 90);
+  }
 
   const quotedOfficialTitle = extractQuotedOfficialTitle(rawSource);
   if (quotedOfficialTitle) {
@@ -347,6 +370,22 @@ function extractExplicitTitleLine(text) {
     }
   }
   return null;
+}
+
+const GENERIC_CHANNEL_TERMS = [
+  'アニメ主題歌', '主題歌', 'アニソン', '映像保存庫', '映像庫', '保存庫',
+  'anime op', 'anime ed', 'anime song', 'anime music', 'anime ost',
+  'opening archive', 'ending archive', 'op/ed', 'ost', '音楽保存庫'
+];
+
+function isGenericYouTubeChannelName(authorName) {
+  const text = String(authorName || '').trim();
+  if (!text) return false;
+  // Official channels with a quoted anime title are not generic
+  // e.g. 「Re:ゼロから始める異世界生活」チャンネル【公式】
+  if (/[「『"].*?[」』"]/.test(text)) return false;
+  const lower = text.toLowerCase();
+  return GENERIC_CHANNEL_TERMS.some((term) => lower.includes(term));
 }
 
 function extractCandidateFromEmbeds(message) {
@@ -419,6 +458,21 @@ function extractAnimeCandidateFromHashtagPost(message, options = {}) {
 
   const embedCandidates = extractCandidateFromEmbeds(message);
   for (const embedCandidate of embedCandidates) {
+    // Reject generic YouTube upload/archive channel names for embed_author.
+    // These are never anime titles, and their presence before embed_title in the
+    // priority order would otherwise block the actual title from being used.
+    if (embedCandidate.sourceType === 'embed_author' && isGenericYouTubeChannelName(embedCandidate.rawTitle)) {
+      consideredSources.push({
+        sourceType: embedCandidate.sourceType,
+        rawTitle: embedCandidate.rawTitle,
+        normalizedCandidate: null,
+        priority: embedCandidate.priority,
+        rejectedReason: 'generic_youtube_author',
+        embedUrl: embedCandidate.embedUrl || null,
+        embedProvider: embedCandidate.embedProvider || null
+      });
+      continue;
+    }
     const normalized = normalizeAnimeCandidateTitle(embedCandidate.rawTitle);
     const rejectedReason = normalized.normalizedCandidate
       ? null
@@ -1158,12 +1212,26 @@ async function handleAnimeHashtagPost(message, options = {}) {
             .map((result) => result.media)
             .filter((m) => m.titleNative || m.titleUserPreferred || m.titleRomaji || m.titleEnglish)
             .slice(0, 5);
+
+      // When there are no search results at all, bypass the picker (which would
+      // misleadingly say "候補が複数あります") and show an accurate failure message.
+      if (ambiguityCandidates.length === 0) {
+        logger.info('anime hashtag no search result', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          skipReason,
+          normalizedCandidate: candidate.normalizedCandidate || null
+        });
+        await maybeReplyAskForTitle(message, skipReason);
+        return;
+      }
+
       logger.info('anime ambiguity picker shown', {
         sourceMessageId: message.id,
         sourceChannelId: message.channelId,
         skipReason,
         candidateCount: ambiguityCandidates.length,
-        usedFallbackFilter: strictCandidates.length === 0 && ambiguityCandidates.length > 0,
+        usedFallbackFilter: strictCandidates.length === 0,
         candidates: ambiguityCandidates.map((m) => ({
           providerMediaId: m?.providerMediaId || null,
           title: m?.titleNative || m?.titleUserPreferred || null
