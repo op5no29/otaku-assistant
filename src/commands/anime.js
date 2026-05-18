@@ -23,6 +23,7 @@ const {
   buildPostCandidateSelectResponse,
   shouldRequirePostSelection
 } = require('../modules/anime/postSelection');
+const { normalizeAnimeSearchQuery } = require('../modules/anime/titleAliases');
 
 function formatTitle(media) {
   return getPreferredAnimeDisplayTitle(media);
@@ -380,26 +381,57 @@ module.exports = {
       }
 
       if (subcommand === 'post') {
-        const title = interaction.options.getString('title', true);
-        const resolved = await resolveAnimeFromTitle(client, title, interaction.guildId);
+        const rawTitle = interaction.options.getString('title', true);
+        const aliasResolved = normalizeAnimeSearchQuery(rawTitle);
+        const searchTitle = aliasResolved.canonicalQuery;
+        if (aliasResolved.aliasMatched) {
+          client.logger.info('anime title alias matched', {
+            guildId: interaction.guildId,
+            userId: interaction.user.id,
+            original: aliasResolved.original,
+            alias: aliasResolved.aliasMatched,
+            canonical: searchTitle
+          });
+        }
+        const resolved = await resolveAnimeFromTitle(client, searchTitle, interaction.guildId);
         if (!resolved.media) {
-          await interaction.editReply('アニメ情報の取得に失敗しました。少し後で試してください。');
+          const hint = aliasResolved.aliasMatched
+            ? `「${searchTitle}」で検索しましたが見つかりませんでした。`
+            : `「${searchTitle}」は見つかりませんでした。`;
+          await interaction.editReply(`${hint}\n別のタイトルや正式名称で試してみてください。`);
           return;
         }
-        if (shouldRequirePostSelection(title, resolved.candidates)) {
+        if (shouldRequirePostSelection(searchTitle, resolved.candidates)) {
           prunePostSelectionStore(client);
           const token = interaction.id;
           ensurePostSelectionStore(client).set(token, {
             userId: interaction.user.id,
             guildId: interaction.guildId,
-            title,
+            title: searchTitle,
             candidates: resolved.candidates.slice(0, 5),
             expiresAt: Date.now() + (1000 * 60 * 10)
           });
-          await interaction.editReply(buildPostCandidateSelectResponse(title, resolved.candidates, token, interaction.user.id));
+          await interaction.editReply(buildPostCandidateSelectResponse(searchTitle, resolved.candidates, token, interaction.user.id));
           return;
         }
-        const result = await postAnimeToChannel(interaction.guild, resolved.media, interaction.user.id, [title]);
+        let result;
+        try {
+          result = await postAnimeToChannel(interaction.guild, resolved.media, interaction.user.id, [searchTitle, rawTitle].filter((v, i, a) => a.indexOf(v) === i));
+        } catch (postError) {
+          client.logger.error('postAnimeToChannel failed', {
+            subcommand,
+            guildId: interaction.guildId,
+            userId: interaction.user.id,
+            providerMediaId: resolved.media?.providerMediaId || null,
+            errorMessage: postError?.message || null
+          });
+          if (postError?.message === 'anime_channel_unavailable') {
+            await interaction.editReply('アニメチャンネルが見つかりません。設定を確認してください。');
+          } else {
+            await interaction.editReply('作品カードの作成に失敗しました。時間をおいてもう一度試してください。');
+          }
+          return;
+        }
         await maybeLinkRecentAnimeHashtagSource(client, interaction.guildId, interaction.user.id, result.entry.id).catch(() => null);
         const links = buildAnimeLinks(result.entry);
         const components = [];
@@ -419,8 +451,9 @@ module.exports = {
         await interaction.editReply({
           content: [
             result.created ? '作品カードとスレッドを作成しました。' : '既に登録済みです。',
-            `**${formatTitle(result.entry)}**`
-          ].join('\n'),
+            `**${formatTitle(result.entry)}**`,
+            aliasResolved.aliasMatched ? `（「${rawTitle}」→「${searchTitle}」で検索）` : null
+          ].filter(Boolean).join('\n'),
           components,
           allowedMentions: { parse: [] }
         });
@@ -540,9 +573,15 @@ module.exports = {
         errorErrors: error?.errors || null,
         errorJson: JSON.stringify(error, Object.getOwnPropertyNames(error || {}))
       });
-      await interaction.editReply(error.code === 'ANNICT_TOKEN_MISSING'
-        ? 'Annict APIトークンが設定されていません。'
-        : 'アニメ情報の取得に失敗しました。少し後で試してください。');
+      if (error.code === 'ANNICT_TOKEN_MISSING') {
+        await interaction.editReply('Annict APIトークンが設定されていません。');
+      } else if (error?.message === 'anime_channel_unavailable') {
+        await interaction.editReply('アニメチャンネルが見つかりません。設定を確認してください。');
+      } else if (subcommand === 'post') {
+        await interaction.editReply('作品カードの作成に失敗しました。時間をおいてもう一度試してください。');
+      } else {
+        await interaction.editReply('アニメ情報の取得に失敗しました。少し後で試してください。');
+      }
     } finally {
       client.logger.info('anime command finished', {
         subcommandGroup: group || null,
@@ -659,6 +698,14 @@ module.exports = {
         await interaction.editReply({ content: '選択された候補が見つかりませんでした。', components: [] }).catch(() => null);
         return true;
       }
+      client.logger.info('anime ambiguity selected', {
+        interactionId: interaction.id,
+        token,
+        provider,
+        providerMediaId,
+        title: formatTitle(media),
+        interactingUserId: interaction.user.id
+      });
       client.logger.info('postAnimeToChannel started from select interaction', {
         interactionId: interaction.id,
         token,
@@ -691,7 +738,20 @@ module.exports = {
         animeEntryId: result.entry.id,
         created: result.created
       });
-      await maybeLinkRecentAnimeHashtagSource(client, interaction.guildId, interaction.user.id, result.entry.id).catch(() => null);
+      const linkResult = await maybeLinkRecentAnimeHashtagSource(client, interaction.guildId, interaction.user.id, result.entry.id).catch(() => null);
+      if (linkResult) {
+        client.logger.info('anime ambiguity selection linked to source', {
+          interactionId: interaction.id,
+          animeEntryId: result.entry.id,
+          userId: interaction.user.id
+        });
+      }
+      client.logger.info('anime ambiguity selection completed', {
+        interactionId: interaction.id,
+        animeEntryId: result.entry.id,
+        created: result.created,
+        title: formatTitle(result.entry)
+      });
       ensurePostSelectionStore(client).delete(token);
       const links = buildAnimeLinks(result.entry);
       const buttons = [];

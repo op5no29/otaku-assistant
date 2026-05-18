@@ -4,7 +4,8 @@ const {
   getAnimeCastById: getAniListAnimeCastById,
   getCurrentSeasonAnime: getAniListCurrentSeasonAnime,
   getNextSeasonAnime: getAniListNextSeasonAnime,
-  getAnimeByMalId
+  getAnimeByMalId,
+  getAnimeImageByTitle
 } = require('./anilistClient');
 const {
   searchWorks,
@@ -199,19 +200,23 @@ function ensureAnimeOfficialSiteImageStore(client) {
   return client.animeOfficialSiteImageCache;
 }
 
-async function validateAnimeImageCandidate(client, candidate) {
+async function validateAnimeImageCandidate(client, candidate, { skipPatternCheck = false } = {}) {
   const normalizedCandidate = normalizeAnimeImageCandidate(candidate);
   const upgradedUrl = normalizeHttpsUrl(normalizedCandidate?.url);
-  const rejectionReason = getAnimeImageCandidateRejectionReason({
-    ...normalizedCandidate,
-    url: upgradedUrl
-  });
-  if (rejectionReason) {
-    return {
-      valid: false,
-      url: upgradedUrl,
-      reason: rejectionReason
-    };
+  if (!skipPatternCheck) {
+    const rejectionReason = getAnimeImageCandidateRejectionReason({
+      ...normalizedCandidate,
+      url: upgradedUrl
+    });
+    if (rejectionReason) {
+      return {
+        valid: false,
+        url: upgradedUrl,
+        reason: rejectionReason
+      };
+    }
+  } else if (!/^https:\/\//iu.test(String(upgradedUrl || ''))) {
+    return { valid: false, url: upgradedUrl, reason: 'non_https' };
   }
 
   const cache = ensureAnimeImageValidationStore(client);
@@ -336,142 +341,156 @@ async function fetchOfficialSiteImageCandidates(client, officialSiteUrl) {
 
 async function resolveAnimeCardImageEntry(client, entry) {
   const normalizedEntry = normalizeEntry(entry);
+
+  // Log stored DB images filtered by imagePolicy (logo/favicon/avatar)
+  const storedCoverUrl = normalizedEntry?.coverImageUrl || null;
+  const storedBannerUrl = normalizedEntry?.bannerImageUrl || null;
   const imageChoice = selectAnimeImageUrls(normalizedEntry);
-  if (normalizedEntry?.coverImageUrl && !imageChoice.coverImageUrl) {
+  if (storedCoverUrl && !imageChoice.coverImageUrl) {
     client.logger.info('anime stored image ignored logo_like', {
       animeEntryId: normalizedEntry?.id || null,
       field: 'coverImageUrl',
-      storedUrl: normalizedEntry.coverImageUrl
+      storedUrl: storedCoverUrl
     });
   }
-  if (normalizedEntry?.bannerImageUrl && !imageChoice.bannerImageUrl) {
+  if (storedBannerUrl && !imageChoice.bannerImageUrl) {
     client.logger.info('anime stored image ignored logo_like', {
       animeEntryId: normalizedEntry?.id || null,
       field: 'bannerImageUrl',
-      storedUrl: normalizedEntry.bannerImageUrl
-    });
-  }
-  const candidates = buildMediaImageCandidates({
-    coverImageUrl: imageChoice.coverImageUrl,
-    bannerImageUrl: imageChoice.bannerImageUrl
-  });
-
-  client.logger.info('anime image candidates', {
-    animeEntryId: normalizedEntry?.id || null,
-    candidates: candidates.map((candidate) => ({
-      url: candidate.url,
-      kind: candidate.kind,
-      source: candidate.source
-    })),
-    imageOmitted: !candidates.length
-  });
-
-  for (const candidate of candidates) {
-    const validation = await validateAnimeImageCandidate(client, candidate);
-    if (validation.valid) {
-      client.logger.info('anime image candidate selected main_visual', {
-        animeEntryId: normalizedEntry?.id || null,
-        source: candidate.source,
-        kind: candidate.kind,
-        url: validation.url
-      });
-      return {
-        ...normalizedEntry,
-        coverImageUrl: validation.url,
-        bannerImageUrl: null
-      };
-    }
-    client.logger.info('anime image candidate rejected logo_like', {
-      animeEntryId: normalizedEntry?.id || null,
-      source: candidate.source,
-      kind: candidate.kind,
-      url: validation.url || candidate.url,
-      reason: validation.reason || 'invalid'
+      storedUrl: storedBannerUrl
     });
   }
 
-  if (normalizedEntry?.officialSiteUrl) {
-    const officialSiteCandidates = await fetchOfficialSiteImageCandidates(client, normalizedEntry.officialSiteUrl);
-    for (const candidate of officialSiteCandidates) {
-      const validation = await validateAnimeImageCandidate(client, candidate);
-      if (validation.valid) {
-        client.logger.info('anime image candidate selected main_visual', {
-          animeEntryId: normalizedEntry?.id || null,
-          source: candidate.source,
-          kind: candidate.kind,
-          url: validation.url
-        });
-        return {
-          ...normalizedEntry,
-          coverImageUrl: validation.url,
-          bannerImageUrl: null
-        };
-      }
-      client.logger.info('anime image candidate rejected logo_like', {
-        animeEntryId: normalizedEntry?.id || null,
-        source: candidate.source,
-        kind: candidate.kind,
-        url: validation.url || candidate.url,
-        reason: validation.reason || 'invalid'
-      });
-    }
-  }
+  // Annict non-logo stored candidates
+  const annictCandidates = [
+    imageChoice.coverImageUrl
+      ? normalizeAnimeImageCandidate(imageChoice.coverImageUrl, { kind: 'cover', source: 'stored.coverImageUrl' })
+      : null,
+    imageChoice.bannerImageUrl
+      ? normalizeAnimeImageCandidate(imageChoice.bannerImageUrl, { kind: 'banner', source: 'stored.bannerImageUrl' })
+      : null
+  ].filter(Boolean);
 
+  // AniList image candidates (by MAL ID first, then by title)
+  let anilistMedia = null;
   if (normalizedEntry?.malAnimeId) {
-    const anilistMedia = await getAnimeByMalId(client, normalizedEntry.malAnimeId).catch(() => null);
-    if (anilistMedia) {
-      const anilistCandidates = [
-        normalizeAnimeImageCandidate(anilistMedia.coverImage?.extraLarge, {
-          kind: 'cover',
-          source: 'anilist.coverImage.extraLarge'
-        }),
-        normalizeAnimeImageCandidate(anilistMedia.coverImage?.large, {
-          kind: 'cover',
-          source: 'anilist.coverImage.large'
-        }),
-        normalizeAnimeImageCandidate(anilistMedia.bannerImage, {
-          kind: 'banner',
-          source: 'anilist.bannerImage'
-        })
-      ].filter(Boolean);
-      for (const candidate of anilistCandidates) {
-        const validation = await validateAnimeImageCandidate(client, candidate);
-        if (validation.valid) {
-          client.logger.info('anime image anilist fallback used', {
-            animeEntryId: normalizedEntry?.id || null,
-            source: candidate.source,
-            kind: candidate.kind,
-            url: validation.url
-          });
-          return {
-            ...normalizedEntry,
-            coverImageUrl: validation.url,
-            bannerImageUrl: null
-          };
-        }
-        client.logger.info('anime image candidate rejected logo_like', {
-          animeEntryId: normalizedEntry?.id || null,
-          source: candidate.source,
-          kind: candidate.kind,
-          url: validation.url || candidate.url,
-          reason: validation.reason || 'invalid'
-        });
-      }
-    }
-    client.logger.info('anime image anilist fallback also failed', {
+    client.logger.info('anime image anilist fallback by mal started', {
       animeEntryId: normalizedEntry?.id || null,
       malAnimeId: normalizedEntry.malAnimeId
     });
+    anilistMedia = await getAnimeByMalId(client, normalizedEntry.malAnimeId).catch(() => null);
+  }
+  if (!anilistMedia?.coverImage?.extraLarge && !anilistMedia?.bannerImage) {
+    const searchTitle = normalizedEntry?.titleNative || normalizedEntry?.titleUserPreferred || normalizedEntry?.titleRomaji || null;
+    if (searchTitle) {
+      client.logger.info('anime image anilist fallback by title started', {
+        animeEntryId: normalizedEntry?.id || null,
+        title: searchTitle
+      });
+      const titleMedia = await getAnimeImageByTitle(client, searchTitle).catch(() => null);
+      if (titleMedia?.coverImage?.extraLarge || titleMedia?.bannerImage) {
+        anilistMedia = titleMedia;
+      }
+    }
+  }
+  const anilistCandidates = anilistMedia ? [
+    normalizeAnimeImageCandidate(anilistMedia.bannerImage, { kind: 'banner', source: 'anilist.bannerImage' }),
+    normalizeAnimeImageCandidate(anilistMedia.coverImage?.extraLarge, { kind: 'cover', source: 'anilist.coverImage.extraLarge' }),
+    normalizeAnimeImageCandidate(anilistMedia.coverImage?.large, { kind: 'cover', source: 'anilist.coverImage.large' })
+  ].filter(Boolean) : [];
+
+  // Official site OGP
+  const ogpCandidates = normalizedEntry?.officialSiteUrl
+    ? await fetchOfficialSiteImageCandidates(client, normalizedEntry.officialSiteUrl)
+    : [];
+
+  // Helper: returns first candidate that passes imagePolicy and HTTP validation.
+  // When allowLogos is true, skips URL-pattern rejection and passes skipPatternCheck to
+  // validateAnimeImageCandidate so logos can reach the HTTP fetch (last-resort for icon only).
+  const trySelect = async (candidates, allowLogos = false) => {
+    for (const candidate of candidates) {
+      if (!allowLogos && getAnimeImageCandidateRejectionReason(candidate)) {
+        continue;
+      }
+      const validation = await validateAnimeImageCandidate(client, candidate, { skipPatternCheck: allowLogos });
+      if (validation.valid) {
+        return { candidate, url: validation.url };
+      }
+    }
+    return null;
+  };
+
+  // --- bannerImageUrl: large visual. No logos ever. ---
+  // Priority: AniList banner > AniList cover > Annict > OGP
+  const bannerResult = await trySelect([
+    ...anilistCandidates.filter((c) => c.kind === 'banner'),
+    ...anilistCandidates.filter((c) => c.kind === 'cover'),
+    ...annictCandidates,
+    ...ogpCandidates
+  ], false);
+  const resolvedBannerUrl = bannerResult?.url || null;
+
+  if (resolvedBannerUrl) {
+    client.logger.info('anime card banner image selected', {
+      animeEntryId: normalizedEntry?.id || null,
+      source: bannerResult.candidate.source,
+      url: resolvedBannerUrl
+    });
+  } else {
+    client.logger.info('anime card banner omitted', {
+      animeEntryId: normalizedEntry?.id || null
+    });
   }
 
-  client.logger.info('anime image no suitable main visual found', {
-    animeEntryId: normalizedEntry?.id || null,
-    officialSiteUrl: normalizedEntry?.officialSiteUrl || null
-  });
+  // --- iconImageUrl: small top-right thumbnail. Logos allowed as last resort. ---
+  // Priority: AniList cover > AniList banner > Annict > OGP (all non-logo first)
+  const iconResult = await trySelect([
+    ...anilistCandidates.filter((c) => c.kind === 'cover'),
+    ...anilistCandidates.filter((c) => c.kind === 'banner'),
+    ...annictCandidates,
+    ...ogpCandidates
+  ], false);
+  let resolvedIconUrl = iconResult?.url || null;
+
+  if (!resolvedIconUrl) {
+    // Last resort: allow logo/favicon images for icon only (better than nothing for small thumbnail)
+    const logoFallbacks = [
+      storedCoverUrl ? normalizeAnimeImageCandidate(storedCoverUrl, { kind: 'cover', source: 'stored.coverImageUrl' }) : null,
+      storedBannerUrl ? normalizeAnimeImageCandidate(storedBannerUrl, { kind: 'banner', source: 'stored.bannerImageUrl' }) : null,
+      ...ogpCandidates
+    ].filter(Boolean);
+    const logoResult = await trySelect(logoFallbacks, true);
+    if (logoResult) {
+      resolvedIconUrl = logoResult.url;
+      client.logger.info('anime card icon logo fallback used', {
+        animeEntryId: normalizedEntry?.id || null,
+        source: logoResult.candidate.source,
+        url: resolvedIconUrl
+      });
+    }
+  }
+
+  if (resolvedIconUrl) {
+    client.logger.info('anime card icon image selected', {
+      animeEntryId: normalizedEntry?.id || null,
+      source: iconResult?.candidate?.source || 'logo_fallback',
+      url: resolvedIconUrl
+    });
+  }
+
+  if (!resolvedIconUrl && !resolvedBannerUrl) {
+    client.logger.info('anime image no suitable main visual found', {
+      animeEntryId: normalizedEntry?.id || null,
+      officialSiteUrl: normalizedEntry?.officialSiteUrl || null
+    });
+  }
+
   return {
     ...normalizedEntry,
-    coverImageUrl: null,
-    bannerImageUrl: null
+    coverImageUrl: resolvedIconUrl || null,
+    bannerImageUrl: resolvedBannerUrl || null,
+    resolvedIconUrl: resolvedIconUrl || null,
+    resolvedBannerUrl: resolvedBannerUrl || null
   };
 }
 

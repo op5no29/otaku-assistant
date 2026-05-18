@@ -334,11 +334,32 @@ const MALID_QUERY = `
   }
 `;
 
+const TITLE_IMAGE_QUERY = `
+  query AnimeImageByTitle($search: String!) {
+    Page(page: 1, perPage: 3) {
+      media(search: $search, type: ANIME, sort: [SEARCH_MATCH, POPULARITY_DESC]) {
+        id
+        title { native romaji english }
+        coverImage { large extraLarge }
+        bannerImage
+      }
+    }
+  }
+`;
+
 async function getAnimeByMalId(client, malId) {
   const data = await postGraphql(client, 'AnimeByMalId', MALID_QUERY, {
     malId: Number(malId)
   });
   return data?.Media || null;
+}
+
+async function getAnimeImageByTitle(client, title) {
+  const data = await postGraphql(client, 'AnimeImageByTitle', TITLE_IMAGE_QUERY, {
+    search: String(title || '').trim()
+  });
+  const items = Array.isArray(data?.Page?.media) ? data.Page.media.filter(Boolean) : [];
+  return items[0] || null;
 }
 
 module.exports = {
@@ -347,5 +368,6 @@ module.exports = {
   getAnimeCastById,
   getCurrentSeasonAnime,
   getNextSeasonAnime,
-  getAnimeByMalId
+  getAnimeByMalId,
+  getAnimeImageByTitle
 };

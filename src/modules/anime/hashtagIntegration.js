@@ -1143,12 +1143,22 @@ async function handleAnimeHashtagPost(message, options = {}) {
       }
       const ambiguityCandidates = (
         confidenceResult.sameSeasonCandidateCount > 1
-          ? confidenceResult.sameSeasonCandidates
+          ? confidenceResult.sameSeasonCandidates.map((result) => result.media)
           : resolved.results
               .filter((result) => result.score >= Math.max((confidenceResult.top?.score || 0) - 12, 75))
               .filter((result) => !Array.isArray(result.crossoverOrSpecialPenaltyReasons) || result.crossoverOrSpecialPenaltyReasons.length === 0)
               .map((result) => result.media)
       ).slice(0, 5);
+      logger.info('anime ambiguity picker shown', {
+        sourceMessageId: message.id,
+        sourceChannelId: message.channelId,
+        skipReason,
+        candidateCount: ambiguityCandidates.length,
+        candidates: ambiguityCandidates.map((m) => ({
+          providerMediaId: m?.providerMediaId || null,
+          title: m?.titleNative || m?.titleUserPreferred || null
+        }))
+      });
       await maybeReplyAskForSelectionUi(
         message,
         candidate.rawTitle || candidate.normalizedCandidate || '不明な作品',

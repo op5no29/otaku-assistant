@@ -3,6 +3,8 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ContainerBuilder,
+  MediaGalleryBuilder,
+  MediaGalleryItemBuilder,
   MessageFlags,
   SectionBuilder,
   TextDisplayBuilder,
@@ -119,18 +121,20 @@ function buildLinkRows({ threadUrl, siteUrl, parentUrl, provider = null }) {
 
 function buildAnimeChannelCard(entry, stats, cast = [], latestReviews = []) {
   const container = createContainer(stats?.hasSpoilerReviews ? 0xfca5a5 : ANIME_PARENT_ACCENT);
-  const image = selectAnimeImageUrls(entry);
+  const iconImageUrl = entry.resolvedIconUrl || entry.coverImageUrl || null;
+  const bannerImageUrl = entry.resolvedBannerUrl || entry.bannerImageUrl || null;
   const titleText = `### ${getPreferredAnimeDisplayTitle(entry)}`;
   const metadataText = buildMetadataLines(entry, stats).join('\n');
 
-  if (image.thumbnailUrl) {
+  // Header: title + metadata, with icon thumbnail if available
+  if (iconImageUrl) {
     const section = new SectionBuilder().addTextDisplayComponents(
       new TextDisplayBuilder().setContent(titleText),
       new TextDisplayBuilder().setContent(metadataText)
     );
     section.setThumbnailAccessory(
       new ThumbnailBuilder()
-        .setURL(image.thumbnailUrl)
+        .setURL(iconImageUrl)
         .setDescription(`${getPreferredAnimeDisplayTitle(entry)} のカバー`)
     );
     container.addSectionComponents(section);
@@ -140,6 +144,18 @@ function buildAnimeChannelCard(entry, stats, cast = [], latestReviews = []) {
       new TextDisplayBuilder().setContent(metadataText)
     );
   }
+
+  // Banner: large visual below header (MediaGallery), only when different from icon
+  if (bannerImageUrl && bannerImageUrl !== iconImageUrl) {
+    container.addMediaGalleryComponents(
+      new MediaGalleryBuilder().addItems(
+        new MediaGalleryItemBuilder()
+          .setURL(bannerImageUrl)
+          .setDescription(`${getPreferredAnimeDisplayTitle(entry)} メインビジュアル`)
+      )
+    );
+  }
+
   const castLines = Array.isArray(cast)
     ? cast
         .slice(0, Number(stats?.maxCastInCard || 5))
