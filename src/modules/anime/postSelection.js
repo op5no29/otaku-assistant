@@ -54,24 +54,33 @@ function getSelectablePostCandidates(query, candidates = [], limit = 5) {
 
 function buildPostCandidateSelectResponse(title, candidates, token, ownerUserId) {
   const selectable = getSelectablePostCandidates(title, candidates, 5);
+  const providerLabel = (entry) => entry.provider === 'annict' ? 'Annict' : 'AniList';
   const options = selectable.map((entry) => ({
     label: formatTitle(entry).slice(0, 100),
-    description: `${formatSeason(entry) || 'シーズン不明'} / ${entry.status || '状態不明'}`.slice(0, 100),
+    description: (
+      formatSeason(entry)
+        ? `${formatSeason(entry)} / ${providerLabel(entry)} ${entry.providerMediaId}`
+        : `${providerLabel(entry)} ${entry.providerMediaId}`
+    ).slice(0, 100),
     value: `${entry.provider}:${entry.providerMediaId}`
   }));
 
+  const bulletLines = selectable.map((entry) => `• ${formatTitle(entry)}`).join('\n');
+
   return {
     content: [
-      '候補が複数あるため、自動登録を止めました。',
-      `検索語: ${title}`,
-      ...buildCandidateLines(selectable)
-    ].join('\n\n'),
+      'アニメ作品の候補が複数あります。',
+      '該当する作品を選んでください。',
+      '',
+      '候補:',
+      bulletLines
+    ].join('\n'),
     components: options.length
       ? [
           new ActionRowBuilder().addComponents(
             new StringSelectMenuBuilder()
               .setCustomId(`anime:post:select:${ownerUserId}:${token}`)
-              .setPlaceholder('登録する作品を選択')
+              .setPlaceholder('作品を選択してください')
               .addOptions(options)
           )
         ]

@@ -693,7 +693,7 @@ async function maybeReplyAskForSelection(message, reason) {
     sourceChannelId: message.channelId,
     reason
   });
-  return true;
+  return 'text';
 }
 
 async function maybeReplyAskForSelectionUi(message, detectedTitle, candidates, reason) {
@@ -735,7 +735,7 @@ async function maybeReplyAskForSelectionUi(message, detectedTitle, candidates, r
     sourceChannelId: message.channelId,
     reason
   });
-  return true;
+  return 'picker';
 }
 
 function resolveRelativeUrl(value, baseUrl) {
@@ -1141,7 +1141,8 @@ async function handleAnimeHashtagPost(message, options = {}) {
           sameSeasonCandidateCount: confidenceResult.sameSeasonCandidateCount || 0
         });
       }
-      const ambiguityCandidates = (
+      // Strict filter: same-season candidates or high-confidence results without special penalties
+      const strictCandidates = (
         confidenceResult.sameSeasonCandidateCount > 1
           ? confidenceResult.sameSeasonCandidates.map((result) => result.media)
           : resolved.results
@@ -1149,27 +1150,45 @@ async function handleAnimeHashtagPost(message, options = {}) {
               .filter((result) => !Array.isArray(result.crossoverOrSpecialPenaltyReasons) || result.crossoverOrSpecialPenaltyReasons.length === 0)
               .map((result) => result.media)
       ).slice(0, 5);
+      // When strict filter is empty, fall back to top N results so the picker is always shown
+      // when Annict returned usable candidates (avoids falling back to plain text)
+      const ambiguityCandidates = strictCandidates.length > 0
+        ? strictCandidates
+        : resolved.results
+            .map((result) => result.media)
+            .filter((m) => m.titleNative || m.titleUserPreferred || m.titleRomaji || m.titleEnglish)
+            .slice(0, 5);
       logger.info('anime ambiguity picker shown', {
         sourceMessageId: message.id,
         sourceChannelId: message.channelId,
         skipReason,
         candidateCount: ambiguityCandidates.length,
+        usedFallbackFilter: strictCandidates.length === 0 && ambiguityCandidates.length > 0,
         candidates: ambiguityCandidates.map((m) => ({
           providerMediaId: m?.providerMediaId || null,
           title: m?.titleNative || m?.titleUserPreferred || null
         }))
       });
-      await maybeReplyAskForSelectionUi(
+      const pickerResult = await maybeReplyAskForSelectionUi(
         message,
-        candidate.rawTitle || candidate.normalizedCandidate || '不明な作品',
+        candidate.normalizedCandidate || candidate.rawTitle || '不明な作品',
         ambiguityCandidates,
         skipReason
       );
-      logger.info('anime hashtag final failure reply sent', {
-        sourceMessageId: message.id,
-        sourceChannelId: message.channelId,
-        reason: skipReason
-      });
+      if (pickerResult === 'picker') {
+        logger.info('anime hashtag ambiguity picker flow completed', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          skipReason,
+          candidateCount: ambiguityCandidates.length
+        });
+      } else {
+        logger.info('anime hashtag final failure reply sent', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          reason: skipReason
+        });
+      }
       return;
     }
 

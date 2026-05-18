@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, StringSelectMenuBuilder } = require('discord.js');
+const { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, StringSelectMenuBuilder } = require('discord.js');
 const {
   searchAnime,
   resolveAnimeFromTitle,
@@ -765,13 +765,28 @@ module.exports = {
         buttons.push(new ButtonBuilder().setLabel(`${getExternalLabel(result.entry)}で開く`).setStyle(ButtonStyle.Link).setURL(result.entry.siteUrl));
       }
       const components = buttons.length ? [new ActionRowBuilder().addComponents(...buttons.slice(0, 3))] : [];
-      await interaction.editReply({
+      const confirmedMessage = await interaction.editReply({
         content: [
           result.created ? '作品カードとスレッドを作成しました。' : '既に登録済みです。',
           `**${formatTitle(result.entry)}**`
         ].join('\n'),
         components
       }).catch(() => null);
+      // Add ❌ reaction only when the picker was on a public message (not ephemeral slash command)
+      const isEphemeralSource = Boolean(interaction.message?.flags?.has?.(MessageFlags.Ephemeral));
+      if (!isEphemeralSource && confirmedMessage?.id) {
+        await registerDeletableMessage(
+          confirmedMessage,
+          interaction.user.id,
+          'anime_selection_confirmation',
+          1000 * 60 * 60 * 24
+        ).catch(() => null);
+        client.logger.info('anime selection confirmation made deletable', {
+          interactionId: interaction.id,
+          messageId: confirmedMessage.id,
+          userId: interaction.user.id
+        });
+      }
       return true;
     }
 
