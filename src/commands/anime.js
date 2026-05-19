@@ -20,8 +20,8 @@ const {
   buildCandidateLines,
   ensurePostSelectionStore,
   prunePostSelectionStore,
-  buildPostCandidateSelectResponse,
-  shouldRequirePostSelection
+  analyzePostSelectionPolicy,
+  buildPostCandidateSelectResponse
 } = require('../modules/anime/postSelection');
 const { normalizeAnimeSearchQuery } = require('../modules/anime/titleAliases');
 
@@ -384,15 +384,15 @@ module.exports = {
         const rawTitle = interaction.options.getString('title', true);
         const aliasResolved = normalizeAnimeSearchQuery(rawTitle);
         const searchTitle = aliasResolved.canonicalQuery;
-        if (aliasResolved.aliasMatched) {
-          client.logger.info('anime title alias matched', {
-            guildId: interaction.guildId,
-            userId: interaction.user.id,
-            original: aliasResolved.original,
-            alias: aliasResolved.aliasMatched,
-            canonical: searchTitle
-          });
-        }
+        client.logger.info('anime search alias kind detected', {
+          guildId: interaction.guildId,
+          userId: interaction.user.id,
+          original: aliasResolved.original,
+          canonicalQuery: searchTitle,
+          aliasMatched: aliasResolved.aliasMatched || null,
+          aliasKind: aliasResolved.aliasKind,
+          franchiseKey: aliasResolved.franchiseKey || null
+        });
         const resolved = await resolveAnimeFromTitle(client, searchTitle, interaction.guildId);
         if (!resolved.media) {
           const hint = aliasResolved.aliasMatched
@@ -401,17 +401,53 @@ module.exports = {
           await interaction.editReply(`${hint}\n別のタイトルや正式名称で試してみてください。`);
           return;
         }
-        if (shouldRequirePostSelection(searchTitle, resolved.candidates)) {
+        const pickerPolicy = analyzePostSelectionPolicy(searchTitle, resolved.candidates, {
+          queryInfo: aliasResolved,
+          rankedRows: resolved.rankedRows
+        });
+        if (pickerPolicy.requireSelection) {
+          if (pickerPolicy.reason === 'franchise_alias') {
+            client.logger.info('anime auto-register skipped due to franchise alias', {
+              guildId: interaction.guildId,
+              userId: interaction.user.id,
+              original: rawTitle,
+              canonicalQuery: searchTitle,
+              aliasKind: aliasResolved.aliasKind,
+              aliasMatched: aliasResolved.aliasMatched || null
+            });
+          } else if (pickerPolicy.reason === 'broad_franchise_results') {
+            client.logger.info('anime auto-register skipped due to broad franchise results', {
+              guildId: interaction.guildId,
+              userId: interaction.user.id,
+              original: rawTitle,
+              canonicalQuery: searchTitle,
+              aliasKind: aliasResolved.aliasKind,
+              franchiseKey: aliasResolved.franchiseKey || null
+            });
+          }
           prunePostSelectionStore(client);
           const token = interaction.id;
           ensurePostSelectionStore(client).set(token, {
             userId: interaction.user.id,
             guildId: interaction.guildId,
             title: searchTitle,
-            candidates: resolved.candidates.slice(0, 5),
+            candidates: pickerPolicy.selectableCandidates.length ? pickerPolicy.selectableCandidates : resolved.candidates.slice(0, 10),
             expiresAt: Date.now() + (1000 * 60 * 10)
           });
-          await interaction.editReply(buildPostCandidateSelectResponse(searchTitle, resolved.candidates, token, interaction.user.id));
+          if (pickerPolicy.reason === 'franchise_alias' || pickerPolicy.reason === 'broad_franchise_results') {
+            client.logger.info('anime candidate picker shown for franchise search', {
+              guildId: interaction.guildId,
+              userId: interaction.user.id,
+              original: rawTitle,
+              canonicalQuery: searchTitle,
+              aliasKind: aliasResolved.aliasKind,
+              reason: pickerPolicy.reason
+            });
+          }
+          await interaction.editReply(buildPostCandidateSelectResponse(searchTitle, resolved.candidates, token, interaction.user.id, {
+            queryInfo: aliasResolved,
+            rankedRows: resolved.rankedRows
+          }));
           return;
         }
         let result;

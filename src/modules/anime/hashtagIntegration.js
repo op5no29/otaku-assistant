@@ -16,10 +16,12 @@ const {
 const {
   prunePostSelectionStore,
   ensurePostSelectionStore,
+  analyzePostSelectionPolicy,
   getSelectablePostCandidates,
   buildPostCandidateSelectResponse
 } = require('./postSelection');
 const { normalizeAnimeImageCandidate } = require('./imagePolicy');
+const { normalizeAnimeSearchQuery } = require('./titleAliases');
 
 const GENERIC_SHORT_COMMENTS = new Set([
   '見た',
@@ -567,8 +569,9 @@ function scoreAniListCandidate(candidate, media) {
 
   const candidateSeasonContext = extractCandidateSeasonContext(candidate);
   const mediaSeasonInfo = extractMediaSeasonInfo(media);
-  const baseAnalysis = analyzeResolvedWorkMatch(candidate.rawTitle || candidate.normalizedCandidate || '', media);
-  const candidateTitle = canonicalTitle(candidate.normalizedCandidate || candidate.rawTitle || '');
+  const matchQuery = candidate.searchQueryInfo?.canonicalQuery || candidate.normalizedCandidate || candidate.rawTitle || '';
+  const baseAnalysis = analyzeResolvedWorkMatch(matchQuery, media);
+  const candidateTitle = canonicalTitle(matchQuery);
   const titles = [
     media.titleNative,
     media.titleUserPreferred,
@@ -655,6 +658,9 @@ function shouldAutoRegisterAnime(scoreResult) {
   if (scoreResult.candidate?.sourceType === 'anilist_url' || scoreResult.candidate?.sourceType === 'annict_url') {
     return true;
   }
+  if (scoreResult.pickerPolicy?.requireSelection) {
+    return false;
+  }
   if ((scoreResult.sameSeasonCandidateCount || 0) > 1) {
     return false;
   }
@@ -676,6 +682,12 @@ function shouldAutoRegisterAnime(scoreResult) {
 function getAutoRegisterSkipReason(scoreResult) {
   if (!scoreResult?.top) {
     return 'no_search_result';
+  }
+  if (scoreResult.pickerPolicy?.reason === 'franchise_alias') {
+    return 'franchise_alias';
+  }
+  if (scoreResult.pickerPolicy?.reason === 'broad_franchise_results') {
+    return 'broad_franchise_results';
   }
   if (scoreResult.sameSeasonCandidateCount > 1) {
     return 'same_season_ambiguity';
@@ -750,7 +762,7 @@ async function maybeReplyAskForSelection(message, reason) {
   return 'text';
 }
 
-async function maybeReplyAskForSelectionUi(message, detectedTitle, candidates, reason) {
+async function maybeReplyAskForSelectionUi(message, detectedTitle, candidates, reason, options = {}) {
   if (!Array.isArray(candidates) || !candidates.length) {
     return maybeReplyAskForSelection(message, reason);
   }
@@ -764,7 +776,7 @@ async function maybeReplyAskForSelectionUi(message, detectedTitle, candidates, r
     return false;
   }
 
-  const selectable = getSelectablePostCandidates(detectedTitle, candidates, 5);
+  const selectable = getSelectablePostCandidates(detectedTitle, candidates, options);
   if (!selectable.length) {
     return maybeReplyAskForSelection(message, reason);
   }
@@ -781,7 +793,7 @@ async function maybeReplyAskForSelectionUi(message, detectedTitle, candidates, r
   store.add(message.id);
   setIntegrationState(message.client, message.id, { replied: true });
   await message.reply({
-    ...buildPostCandidateSelectResponse(detectedTitle, selectable, message.id, message.author.id),
+    ...buildPostCandidateSelectResponse(detectedTitle, selectable, message.id, message.author.id, options),
     allowedMentions: { parse: [] }
   }).catch(() => null);
   message.client.logger.info('anime hashtag source reply sent', {
@@ -845,7 +857,8 @@ async function resolveAnimeCandidate(client, candidate) {
     };
   }
 
-  const results = await searchAnime(client, candidate.normalizedCandidate || candidate.rawTitle);
+  const queryInfo = candidate.searchQueryInfo || normalizeAnimeSearchQuery(candidate.normalizedCandidate || candidate.rawTitle);
+  const results = await searchAnime(client, queryInfo.canonicalQuery || candidate.normalizedCandidate || candidate.rawTitle);
   const scored = results.map((media) => ({
     media,
     ...scoreAniListCandidate(candidate, media)
@@ -862,6 +875,7 @@ async function resolveAnimeCandidate(client, candidate) {
 
   return {
     candidate,
+    queryInfo,
     results: scored,
     top: scored[0] || null,
     second: scored[1] || null,
@@ -1050,6 +1064,16 @@ async function handleAnimeHashtagPost(message, options = {}) {
       normalizedCandidate: candidate.normalizedCandidate || null,
       whyItWon: candidate.sourceType === 'content_title' ? 'fallback_after_embed_sources' : 'higher_priority_source'
     });
+    const searchQueryInfo = normalizeAnimeSearchQuery(candidate.normalizedCandidate || candidate.rawTitle || '');
+    logger.info('anime search alias kind detected', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      original: searchQueryInfo.original,
+      canonicalQuery: searchQueryInfo.canonicalQuery,
+      aliasMatched: searchQueryInfo.aliasMatched || null,
+      aliasKind: searchQueryInfo.aliasKind,
+      franchiseKey: searchQueryInfo.franchiseKey || null
+    });
 
     if (!candidate.providerMediaId && !candidate.normalizedCandidate) {
       setIntegrationState(client, message.id, {
@@ -1071,12 +1095,17 @@ async function handleAnimeHashtagPost(message, options = {}) {
       sourceMessageId: message.id,
       sourceChannelId: message.channelId,
       sourceType: candidate.sourceType,
-      query: candidate.normalizedCandidate || candidate.rawTitle || null,
+      query: searchQueryInfo.canonicalQuery || candidate.normalizedCandidate || candidate.rawTitle || null,
       normalizedCandidate: candidate.normalizedCandidate || null,
+      canonicalQuery: searchQueryInfo.canonicalQuery || null,
+      aliasKind: searchQueryInfo.aliasKind,
       providerMediaId: candidate.providerMediaId || null
     });
 
-    const resolved = await resolveAnimeCandidate(client, candidate);
+    const resolved = await resolveAnimeCandidate(client, {
+      ...candidate,
+      searchQueryInfo
+    });
     logger.info('anime hashtag provider search result', {
       sourceMessageId: message.id,
       sourceChannelId: message.channelId,
@@ -1140,12 +1169,18 @@ async function handleAnimeHashtagPost(message, options = {}) {
 
     const confidenceResult = {
       candidate,
+      queryInfo: searchQueryInfo,
       top: resolved.top,
       second: resolved.second,
       scoreGap: resolved.scoreGap,
       sameSeasonCandidates: resolved.sameSeasonCandidates,
       sameSeasonCandidateCount: resolved.sameSeasonCandidateCount
     };
+    const pickerPolicy = analyzePostSelectionPolicy(searchQueryInfo.canonicalQuery || candidate.rawTitle || '', resolved.results.map((result) => result.media), {
+      queryInfo: searchQueryInfo,
+      rankedRows: resolved.results
+    });
+    confidenceResult.pickerPolicy = pickerPolicy;
 
     logger.info('anime hashtag confidence result', {
       sourceMessageId: message.id,
@@ -1153,6 +1188,8 @@ async function handleAnimeHashtagPost(message, options = {}) {
       confidenceScore: confidenceResult.top?.score || 0,
       scoreGap: confidenceResult.scoreGap,
       sourceType: candidate.sourceType,
+      aliasKind: searchQueryInfo.aliasKind,
+      pickerReason: pickerPolicy.reason || null,
       providerMediaId: confidenceResult.top?.media?.providerMediaId || null,
       titleNative: confidenceResult.top?.media?.titleNative || null
     });
@@ -1194,16 +1231,44 @@ async function handleAnimeHashtagPost(message, options = {}) {
           normalizedCandidate: candidate.normalizedCandidate || candidate.rawTitle || null,
           sameSeasonCandidateCount: confidenceResult.sameSeasonCandidateCount || 0
         });
+      } else if (skipReason === 'franchise_alias') {
+        logger.info('anime auto-register skipped due to franchise alias', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          normalizedCandidate: candidate.normalizedCandidate || candidate.rawTitle || null,
+          canonicalQuery: searchQueryInfo.canonicalQuery || null,
+          aliasMatched: searchQueryInfo.aliasMatched || null
+        });
+      } else if (skipReason === 'broad_franchise_results') {
+        logger.info('anime auto-register skipped due to broad franchise results', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          normalizedCandidate: candidate.normalizedCandidate || candidate.rawTitle || null,
+          canonicalQuery: searchQueryInfo.canonicalQuery || null,
+          franchiseKey: searchQueryInfo.franchiseKey || null
+        });
+      }
+      const franchiseOrBroadPicker = skipReason === 'franchise_alias' || skipReason === 'broad_franchise_results';
+      if (franchiseOrBroadPicker) {
+        logger.info('anime candidate picker shown for franchise search', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          normalizedCandidate: candidate.normalizedCandidate || candidate.rawTitle || null,
+          canonicalQuery: searchQueryInfo.canonicalQuery || null,
+          reason: skipReason
+        });
       }
       // Strict filter: same-season candidates or high-confidence results without special penalties
       const strictCandidates = (
         confidenceResult.sameSeasonCandidateCount > 1
           ? confidenceResult.sameSeasonCandidates.map((result) => result.media)
-          : resolved.results
-              .filter((result) => result.score >= Math.max((confidenceResult.top?.score || 0) - 12, 75))
-              .filter((result) => !Array.isArray(result.crossoverOrSpecialPenaltyReasons) || result.crossoverOrSpecialPenaltyReasons.length === 0)
-              .map((result) => result.media)
-      ).slice(0, 5);
+          : (pickerPolicy.selectableCandidates.length
+              ? pickerPolicy.selectableCandidates
+              : resolved.results
+                  .filter((result) => result.score >= Math.max((confidenceResult.top?.score || 0) - 12, 75))
+                  .filter((result) => !Array.isArray(result.crossoverOrSpecialPenaltyReasons) || result.crossoverOrSpecialPenaltyReasons.length === 0)
+                  .map((result) => result.media))
+      ).slice(0, 10);
       // When strict filter is empty, fall back to top N results so the picker is always shown
       // when Annict returned usable candidates (avoids falling back to plain text)
       const ambiguityCandidates = strictCandidates.length > 0
@@ -1211,7 +1276,7 @@ async function handleAnimeHashtagPost(message, options = {}) {
         : resolved.results
             .map((result) => result.media)
             .filter((m) => m.titleNative || m.titleUserPreferred || m.titleRomaji || m.titleEnglish)
-            .slice(0, 5);
+            .slice(0, 10);
 
       // When there are no search results at all, bypass the picker (which would
       // misleadingly say "候補が複数あります") and show an accurate failure message.
@@ -1239,9 +1304,13 @@ async function handleAnimeHashtagPost(message, options = {}) {
       });
       const pickerResult = await maybeReplyAskForSelectionUi(
         message,
-        candidate.normalizedCandidate || candidate.rawTitle || '不明な作品',
+        searchQueryInfo.canonicalQuery || candidate.normalizedCandidate || candidate.rawTitle || '不明な作品',
         ambiguityCandidates,
-        skipReason
+        skipReason,
+        {
+          queryInfo: searchQueryInfo,
+          rankedRows: resolved.results
+        }
       );
       if (pickerResult === 'picker') {
         logger.info('anime hashtag ambiguity picker flow completed', {

@@ -24,6 +24,7 @@ const {
   getAnimeImageCandidateRejectionReason,
   selectPreferredAnimeImageCandidates
 } = require('./imagePolicy');
+const { normalizeAnimeSearchQuery } = require('./titleAliases');
 const { registerDeletableMessage } = require('../deletableMessages');
 const { extractPlainMessagePost } = require('../timelineRelay/extractFirstPost');
 const { buildTimelineMessage } = require('../timelineRelay/buildTimelineMessage');
@@ -523,17 +524,19 @@ function validateAnimePayload(payload, logger, context = {}) {
 }
 
 async function searchAnime(client, title) {
+  const queryInfo = normalizeAnimeSearchQuery(title);
+  const searchTitle = queryInfo.canonicalQuery || title;
   const provider = getConfiguredProvider(client);
   if (provider === 'annict') {
-    const direct = await searchWorks(client, title, { perPage: 20 });
-    const normalizedQuery = normalizeSearchText(title);
-    const normalizedResults = normalizedQuery && normalizeSearchText(title) !== normalizedQuery
+    const direct = await searchWorks(client, searchTitle, { perPage: 20 });
+    const normalizedQuery = normalizeSearchText(searchTitle);
+    const normalizedResults = normalizedQuery && normalizeSearchText(searchTitle) !== normalizedQuery
       ? await searchWorks(client, normalizedQuery, { perPage: 20 }).catch(() => [])
       : [];
     const merged = mergeProviderResults([...direct, ...normalizedResults]);
-    return rankResolvedWorks(title, merged).map((row) => row.entry).slice(0, 10);
+    return rankResolvedWorks(searchTitle, merged).map((row) => row.entry).slice(0, 10);
   }
-  return searchAnimeByTitle(client, title, 10);
+  return searchAnimeByTitle(client, searchTitle, 10);
 }
 
 function mergeProviderResults(results = []) {
@@ -548,8 +551,10 @@ function mergeProviderResults(results = []) {
 }
 
 async function resolveAnimeFromTitle(client, title, guildId = null) {
-  const localMatches = guildId ? client.db.anime.searchEntries(guildId, title, 10).map(normalizeEntry) : [];
-  const remoteMatches = await searchAnime(client, title);
+  const queryInfo = normalizeAnimeSearchQuery(title);
+  const searchTitle = queryInfo.canonicalQuery || title;
+  const localMatches = guildId ? client.db.anime.searchEntries(guildId, searchTitle, 10).map(normalizeEntry) : [];
+  const remoteMatches = await searchAnime(client, searchTitle);
   const merged = mergeProviderResults([
     ...localMatches.map((entry) => ({
       ...entry,
@@ -557,10 +562,12 @@ async function resolveAnimeFromTitle(client, title, guildId = null) {
     })),
     ...remoteMatches
   ]);
-  const ranked = rankResolvedWorks(title, merged);
+  const ranked = rankResolvedWorks(searchTitle, merged);
   return {
+    queryInfo,
     media: ranked[0]?.entry || merged[0] || null,
-    candidates: ranked.length ? ranked.map((row) => row.entry) : merged
+    candidates: ranked.length ? ranked.map((row) => row.entry) : merged,
+    rankedRows: ranked
   };
 }
 
