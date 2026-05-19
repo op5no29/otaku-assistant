@@ -5,6 +5,7 @@ const {
   postAnimeToChannel,
   getAnimeStats,
   saveAnimeReview,
+  buildAnimeReviewSavedLines,
   getAnimeByThreadId,
   findRegisteredAnime,
   listAnimeIndex,
@@ -535,11 +536,7 @@ module.exports = {
           interaction.id,
           interaction.channelId
         );
-        await interaction.editReply([
-          '感想を保存しました。',
-          `感想投稿済み作品数: ${result.reviewedCount}`,
-          result.grantedRoleIds.length ? `新規付与ロール数: ${result.grantedRoleIds.length}` : null
-        ].filter(Boolean).join('\n'));
+        await interaction.editReply(buildAnimeReviewSavedLines(result).join('\n'));
         return;
       }
 

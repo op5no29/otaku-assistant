@@ -4,6 +4,7 @@ const { saveMessageToArchive } = require('../modules/messageArchive');
 const { handleLlmMessage } = require('../modules/llm');
 const { handleIntroDmMessage } = require('../modules/introDm');
 const { saveIntroProfileFromMessage } = require('../modules/introProfiles');
+const { handleAnimeWatchedPromptReply } = require('../modules/anime');
 
 module.exports = {
   async execute(message) {
@@ -46,6 +47,19 @@ module.exports = {
       await applyWelcomeReactionsToMessage(message);
     } catch (error) {
       client.logger.error('Failed to apply welcome reactions', {
+        messageId: message.id,
+        channelId: message.channelId,
+        error: error.message
+      });
+    }
+
+    try {
+      const handledAnimeWatchedPromptReply = await handleAnimeWatchedPromptReply(message);
+      if (handledAnimeWatchedPromptReply) {
+        return;
+      }
+    } catch (error) {
+      client.logger.error('Failed to handle anime watched prompt reply', {
         messageId: message.id,
         channelId: message.channelId,
         error: error.message

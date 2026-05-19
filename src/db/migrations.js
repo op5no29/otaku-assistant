@@ -324,6 +324,8 @@ function runMigrations(database) {
       anime_entry_id INTEGER NOT NULL,
       user_id TEXT NOT NULL,
       prompt_type TEXT NOT NULL,
+      prompt_message_id TEXT,
+      thread_id TEXT,
       prompted_at TEXT NOT NULL,
       PRIMARY KEY (guild_id, anime_entry_id, user_id, prompt_type)
     );
@@ -518,6 +520,21 @@ function runMigrations(database) {
 
   if (musicLinkCacheColumns.size && !musicLinkCacheColumns.has('platform_links_json')) {
     database.exec('ALTER TABLE music_link_cache ADD COLUMN platform_links_json TEXT');
+  }
+
+  const animeReviewPromptStateColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(anime_review_prompt_state)')
+      .all()
+      .map((column) => column.name)
+  );
+
+  if (animeReviewPromptStateColumns.size && !animeReviewPromptStateColumns.has('prompt_message_id')) {
+    database.exec('ALTER TABLE anime_review_prompt_state ADD COLUMN prompt_message_id TEXT');
+  }
+
+  if (animeReviewPromptStateColumns.size && !animeReviewPromptStateColumns.has('thread_id')) {
+    database.exec('ALTER TABLE anime_review_prompt_state ADD COLUMN thread_id TEXT');
   }
 }
 

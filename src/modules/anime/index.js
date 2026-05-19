@@ -45,6 +45,7 @@ const REVIEW_PROMPT_TYPES = {
   WATCHED: 'watched'
 };
 const IMAGE_VALIDATION_TTL_MS = 1000 * 60 * 60 * 6;
+const WATCHED_PROMPT_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 
 function parseAliases(value) {
   try {
@@ -1230,6 +1231,169 @@ async function saveAnimeReview(client, guildId, animeEntryId, userId, text, spoi
   return roleResult;
 }
 
+function buildAnimeReviewSavedLines(result) {
+  return [
+    '感想を保存しました。',
+    `感想投稿済み作品数: ${result.reviewedCount}`,
+    result.grantedRoleIds.length ? `新規付与ロール数: ${result.grantedRoleIds.length}` : null
+  ].filter(Boolean);
+}
+
+function buildWatchedPromptContent(userId) {
+  return [
+    `<@${userId}> さんが「視聴済み」にしました。`,
+    '感想があれば、このスレッドで `/anime review` を使って投稿できます。',
+    'もしくは、このメッセージに返信してもらえれば、その内容を感想として記録できます。',
+    '感想を投稿すると、視聴作品がカウントされ、数に応じて記念のロールが付与されます。'
+  ].join('\n');
+}
+
+function parseAnimeReplyReview(message) {
+  const raw = String(message?.content || '').trim();
+  if (!raw) {
+    return {
+      text: '',
+      spoiler: false
+    };
+  }
+
+  const spoilerMatch = raw.match(/^(?:\[spoiler\]|\[ネタバレ\]|spoiler[:：]|ネタバレ[:：])\s*/iu);
+  if (!spoilerMatch) {
+    return {
+      text: raw,
+      spoiler: false
+    };
+  }
+
+  return {
+    text: raw.slice(spoilerMatch[0].length).trim(),
+    spoiler: true
+  };
+}
+
+async function sendAnimeReplyReviewNotice(message, ownerUserId, lines, purpose) {
+  const replyMessage = await message.reply({
+    content: Array.isArray(lines) ? lines.filter(Boolean).join('\n') : String(lines || ''),
+    allowedMentions: { repliedUser: false, parse: [] }
+  }).catch(() => null);
+  if (replyMessage) {
+    await registerDeletableMessage(replyMessage, ownerUserId, purpose).catch(() => null);
+  }
+  return replyMessage;
+}
+
+async function handleAnimeWatchedPromptReply(message) {
+  if (!message?.inGuild?.() || message.author?.bot) {
+    return false;
+  }
+
+  const referencedMessageId = message.reference?.messageId;
+  if (!referencedMessageId) {
+    return false;
+  }
+
+  const promptState = message.client.db.anime.getReviewPromptStateByMessageId(
+    message.guildId,
+    referencedMessageId,
+    REVIEW_PROMPT_TYPES.WATCHED
+  );
+  if (!promptState) {
+    return false;
+  }
+
+  const client = message.client;
+  client.logger.info('anime watched prompt reply detected', {
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    referencedMessageId,
+    animeEntryId: promptState.animeEntryId,
+    targetUserId: promptState.userId
+  });
+  client.logger.info('anime watched prompt reply suppressed llm', {
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    referencedMessageId
+  });
+
+  if (String(promptState.userId) !== String(message.author.id)) {
+    client.logger.info('anime watched prompt reply ignored wrong user', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      referencedMessageId,
+      targetUserId: promptState.userId,
+      replyingUserId: message.author.id
+    });
+    await sendAnimeReplyReviewNotice(
+      message,
+      message.author.id,
+      'この感想入力は「視聴済み」にした本人用です。自分の感想は `/anime review` から投稿してください。',
+      'anime_watched_prompt_wrong_user'
+    );
+    return true;
+  }
+
+  const parsedReview = parseAnimeReplyReview(message);
+  if (!parsedReview.text) {
+    await sendAnimeReplyReviewNotice(
+      message,
+      message.author.id,
+      '感想本文が空です。感想を書いて、このメッセージに返信してください。',
+      'anime_watched_prompt_empty_review'
+    );
+    return true;
+  }
+
+  const result = await saveAnimeReview(
+    client,
+    message.guildId,
+    promptState.animeEntryId,
+    message.author.id,
+    parsedReview.text,
+    parsedReview.spoiler,
+    message.id,
+    message.channelId
+  );
+  client.logger.info('anime watched prompt reply saved as review', {
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    referencedMessageId,
+    animeEntryId: promptState.animeEntryId,
+    userId: message.author.id,
+    spoiler: parsedReview.spoiler
+  });
+
+  await sendAnimeReplyReviewNotice(
+    message,
+    message.author.id,
+    buildAnimeReviewSavedLines(result),
+    'anime_review_saved_reply_confirmation'
+  );
+
+  client.db.anime.deleteReviewPromptStateByMessageId(message.guildId, referencedMessageId);
+  try {
+    const referencedMessage = await message.channel.messages.fetch(referencedMessageId).catch(() => null);
+    if (referencedMessage) {
+      await referencedMessage.delete().catch((error) => {
+        throw error;
+      });
+      client.logger.info('anime watched prompt deleted after review', {
+        promptMessageId: referencedMessageId,
+        animeEntryId: promptState.animeEntryId,
+        userId: message.author.id
+      });
+    }
+  } catch (error) {
+    client.logger.warn('anime watched prompt delete failed', {
+      promptMessageId: referencedMessageId,
+      animeEntryId: promptState.animeEntryId,
+      userId: message.author.id,
+      error: error.message
+    });
+  }
+
+  return true;
+}
+
 async function handleAnimeReactionAdd(reaction, user) {
   if (user?.bot) {
     return;
@@ -1263,20 +1427,28 @@ async function handleAnimeReactionAdd(reaction, user) {
 
   if (watchedMatch) {
     const promptState = client.db.anime.getReviewPromptState(message.guildId, entry.id, user.id, REVIEW_PROMPT_TYPES.WATCHED);
-    if (!promptState && entry.threadId) {
+    if (entry.threadId) {
       const thread = await safeFetchChannel(client, entry.threadId);
-      if (thread?.isTextBased?.()) {
+      const existingPromptMessage = promptState?.promptMessageId
+        ? await safeFetchMessage(thread, promptState.promptMessageId)
+        : null;
+      if (!existingPromptMessage && promptState?.promptMessageId) {
+        client.db.anime.deleteReviewPromptStateByMessageId(message.guildId, promptState.promptMessageId);
+      }
+      if (!existingPromptMessage && thread?.isTextBased?.()) {
         const promptMessage = await thread.send({
-          content: `<@${user.id}> さんが「視聴済み」にしました。\n感想があれば、このスレッドで \`/anime review\` を使って投稿できます。`,
+          content: buildWatchedPromptContent(user.id),
           allowedMentions: { parse: [], users: [user.id] }
         }).catch(() => null);
         if (promptMessage) {
-          await registerDeletableMessage(promptMessage, user.id, 'anime_watched_prompt', 1000 * 60 * 60 * 24 * 30).catch(() => null);
+          await registerDeletableMessage(promptMessage, user.id, 'anime_watched_prompt', WATCHED_PROMPT_TTL_MS).catch(() => null);
           client.db.anime.upsertReviewPromptState({
             guildId: message.guildId,
             animeEntryId: entry.id,
             userId: user.id,
-            promptType: REVIEW_PROMPT_TYPES.WATCHED
+            promptType: REVIEW_PROMPT_TYPES.WATCHED,
+            promptMessageId: promptMessage.id,
+            threadId: entry.threadId
           });
         }
       }
@@ -1398,6 +1570,7 @@ async function handleAnimeParentMessageDeleted(client, message) {
   if (!message?.guildId || !message?.id) {
     return false;
   }
+  client.db.anime.deleteReviewPromptStateByMessageId(message.guildId, message.id);
   const entry = normalizeEntry(client.db.anime.getEntryByChannelMessageId(message.guildId, message.id));
   if (!entry) {
     return false;
@@ -1660,9 +1833,11 @@ module.exports = {
   getAnimeStats,
   addAnimeUserReactionStatus,
   saveAnimeReview,
+  buildAnimeReviewSavedLines,
   updateReviewRoles,
   handleAnimeReactionAdd,
   handleAnimeReactionRemove,
+  handleAnimeWatchedPromptReply,
   findRegisteredAnime,
   listAnimeIndex,
   cleanupAnimeEntry,

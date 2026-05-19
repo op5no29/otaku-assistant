@@ -1557,9 +1557,13 @@ function createDatabase(databasePath) {
         anime_entry_id,
         user_id,
         prompt_type,
+        prompt_message_id,
+        thread_id,
         prompted_at
-      ) VALUES (?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(guild_id, anime_entry_id, user_id, prompt_type) DO UPDATE SET
+        prompt_message_id = excluded.prompt_message_id,
+        thread_id = excluded.thread_id,
         prompted_at = excluded.prompted_at
     `),
     getAnimeReviewPromptState: sqlite.prepare(`
@@ -1568,14 +1572,33 @@ function createDatabase(databasePath) {
         anime_entry_id AS animeEntryId,
         user_id AS userId,
         prompt_type AS promptType,
+        prompt_message_id AS promptMessageId,
+        thread_id AS threadId,
         prompted_at AS promptedAt
       FROM anime_review_prompt_state
       WHERE guild_id = ? AND anime_entry_id = ? AND user_id = ? AND prompt_type = ?
       LIMIT 1
     `),
+    getAnimeReviewPromptStateByMessageId: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        anime_entry_id AS animeEntryId,
+        user_id AS userId,
+        prompt_type AS promptType,
+        prompt_message_id AS promptMessageId,
+        thread_id AS threadId,
+        prompted_at AS promptedAt
+      FROM anime_review_prompt_state
+      WHERE guild_id = ? AND prompt_message_id = ? AND prompt_type = ?
+      LIMIT 1
+    `),
     deleteAnimeReviewPromptStateByEntryId: sqlite.prepare(`
       DELETE FROM anime_review_prompt_state
       WHERE anime_entry_id = ?
+    `),
+    deleteAnimeReviewPromptStateByMessageId: sqlite.prepare(`
+      DELETE FROM anime_review_prompt_state
+      WHERE guild_id = ? AND prompt_message_id = ?
     `),
     upsertAnimeHashtagSource: sqlite.prepare(`
       INSERT INTO anime_hashtag_sources (
@@ -2485,11 +2508,33 @@ function createDatabase(databasePath) {
       setRoleAwardDmSentAt(guildId, userId, threshold, dmSentAt = new Date().toISOString()) {
         statements.setAnimeRoleAwardDmSentAt.run(dmSentAt, guildId, userId, threshold);
       },
-      upsertReviewPromptState({ guildId, animeEntryId, userId, promptType, promptedAt = new Date().toISOString() }) {
-        statements.upsertAnimeReviewPromptState.run(guildId, animeEntryId, userId, promptType, promptedAt);
+      upsertReviewPromptState({
+        guildId,
+        animeEntryId,
+        userId,
+        promptType,
+        promptMessageId = null,
+        threadId = null,
+        promptedAt = new Date().toISOString()
+      }) {
+        statements.upsertAnimeReviewPromptState.run(
+          guildId,
+          animeEntryId,
+          userId,
+          promptType,
+          promptMessageId,
+          threadId,
+          promptedAt
+        );
       },
       getReviewPromptState(guildId, animeEntryId, userId, promptType) {
         return statements.getAnimeReviewPromptState.get(guildId, animeEntryId, userId, promptType) || null;
+      },
+      getReviewPromptStateByMessageId(guildId, promptMessageId, promptType) {
+        return statements.getAnimeReviewPromptStateByMessageId.get(guildId, promptMessageId, promptType) || null;
+      },
+      deleteReviewPromptStateByMessageId(guildId, promptMessageId) {
+        statements.deleteAnimeReviewPromptStateByMessageId.run(guildId, promptMessageId);
       },
       upsertHashtagSource(record) {
         const now = new Date().toISOString();
