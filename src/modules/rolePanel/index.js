@@ -8,6 +8,7 @@ const {
 
 const ANNOUNCEMENT_CHANNEL_ID = '1224747669604536382';
 const TEMP_ROLE_PANEL_KIND = 'temp_role_panel';
+const TEMP_ROLE_PANEL_OVERFLOW_KIND = 'temp_role_panel_overflow';
 const ROLE_PANEL_ACCENT_COLOR = 0xef4444;
 
 const ROLE_MAPPINGS = [
@@ -39,9 +40,23 @@ function normalizeEmojiKey(value) {
   return String(value || '').normalize('NFC').replace(/\uFE0F/gu, '');
 }
 
-const ROLE_BY_EMOJI = new Map(
-  ROLE_MAPPINGS.map((entry) => [normalizeEmojiKey(entry.emoji), entry])
-);
+const MAIN_ROLE_MAPPINGS = ROLE_MAPPINGS.slice(0, 15);
+const OVERFLOW_ROLE_MAPPINGS = ROLE_MAPPINGS.slice(15);
+const TRACKED_ROLE_PANEL_KINDS = new Set([
+  TEMP_ROLE_PANEL_KIND,
+  TEMP_ROLE_PANEL_OVERFLOW_KIND
+]);
+
+const ROLE_BY_EMOJI_BY_PANEL_KIND = new Map([
+  [
+    TEMP_ROLE_PANEL_KIND,
+    new Map(MAIN_ROLE_MAPPINGS.map((entry) => [normalizeEmojiKey(entry.emoji), entry]))
+  ],
+  [
+    TEMP_ROLE_PANEL_OVERFLOW_KIND,
+    new Map(OVERFLOW_ROLE_MAPPINGS.map((entry) => [normalizeEmojiKey(entry.emoji), entry]))
+  ]
+]);
 
 function buildSectionBlock(title, lines) {
   return [`**${title}**`, '', ...lines].join('\n');
@@ -78,7 +93,37 @@ function buildRolePanelPayload() {
       '6️⃣ Houdini',
       '7️⃣ Cinema 4D / C4D',
       '8️⃣ Unreal Engine'
-    ]),
+    ])
+  ];
+
+  textBlocks.forEach((block, index) => {
+    if (index > 1) {
+      container.addSeparatorComponents(
+        new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+      );
+    }
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(block));
+  });
+
+  return {
+    flags: MessageFlags.IsComponentsV2,
+    components: [container],
+    allowedMentions: { parse: ['everyone'] }
+  };
+}
+
+function buildRolePanelOverflowPayload() {
+  const container = new ContainerBuilder().setAccentColor(ROLE_PANEL_ACCENT_COLOR);
+  const textBlocks = [
+    '@everyone',
+    [
+      'ロール付与用の追加パネルです。',
+      '',
+      'イラスト系ソフト、DAW・音楽制作ソフト、知識共有系のロールはこちらから付け外しできます。',
+      '',
+      'リアクションを押すとロールが付き、リアクションを外すとロールも外れます。',
+      'すでに持っているロールのリアクションを押しても、特に追加の通知はありません。'
+    ].join('\n'),
     buildSectionBlock('イラスト系ソフト', [
       '9️⃣ CLIP STUDIO PAINT / クリスタ'
     ]),
@@ -112,19 +157,23 @@ function buildRolePanelPayload() {
   };
 }
 
-async function addRolePanelReactions(message, logger) {
-  for (const entry of ROLE_MAPPINGS) {
+async function addRolePanelReactions(message, logger, roleMappings, panelKind) {
+  const isOverflow = panelKind === TEMP_ROLE_PANEL_OVERFLOW_KIND;
+
+  for (const entry of roleMappings) {
     try {
       await message.react(entry.emoji);
-      logger.info('role panel reaction added', {
+      logger.info(isOverflow ? 'role panel overflow reaction added' : 'role panel reaction added', {
         messageId: message.id,
+        panelKind,
         emoji: entry.emoji,
         roleId: entry.roleId,
         label: entry.label
       });
     } catch (error) {
-      logger.warn('role panel reaction add failed', {
+      logger.warn(isOverflow ? 'role panel overflow reaction add failed' : 'role panel reaction add failed', {
         messageId: message.id,
+        panelKind,
         emoji: entry.emoji,
         roleId: entry.roleId,
         label: entry.label,
@@ -134,51 +183,96 @@ async function addRolePanelReactions(message, logger) {
   }
 }
 
-async function postTempRolePanel(client, guildId) {
+async function upsertRolePanelMessage({
+  client,
+  guildId,
+  channel,
+  panelKind,
+  payload,
+  roleMappings
+}) {
   const logger = client.logger;
+  const existing = client.db.rolePanels.get(guildId, panelKind);
+  const existingMessage = existing?.messageId
+    ? await channel.messages.fetch(existing.messageId).catch(() => null)
+    : null;
+
+  if (existingMessage) {
+    try {
+      await existingMessage.delete();
+      logger.info('role panel existing message deleted for repost', {
+        guildId,
+        channelId: channel.id,
+        messageId: existingMessage.id,
+        panelKind
+      });
+    } catch (error) {
+      logger.warn('role panel existing message delete failed', {
+        guildId,
+        channelId: channel.id,
+        messageId: existingMessage.id,
+        panelKind,
+        error: error.message
+      });
+      throw error;
+    }
+  }
+
+  const message = await channel.send(payload);
+  logger.info(panelKind === TEMP_ROLE_PANEL_OVERFLOW_KIND
+    ? 'role panel overflow message posted'
+    : 'role panel message posted', {
+    guildId,
+    channelId: channel.id,
+    messageId: message.id,
+    panelKind,
+    replacedMessageId: existingMessage?.id || null,
+    replacedMissingMessageId: existingMessage ? null : existing?.messageId || null
+  });
+
+  client.db.rolePanels.upsert({
+    guildId,
+    panelKind,
+    channelId: channel.id,
+    messageId: message.id
+  });
+  await addRolePanelReactions(message, logger, roleMappings, panelKind);
+
+  return message;
+}
+
+async function postTempRolePanel(client, guildId) {
   const guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId);
   const channel = await guild.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
   if (!channel?.isTextBased?.()) {
     throw new Error(`Role panel announcement channel is unavailable: ${ANNOUNCEMENT_CHANNEL_ID}`);
   }
 
-  const existing = client.db.rolePanels.get(guildId, TEMP_ROLE_PANEL_KIND);
-  let message = existing?.messageId
-    ? await channel.messages.fetch(existing.messageId).catch(() => null)
-    : null;
-  const payload = buildRolePanelPayload();
-
-  if (message) {
-    message = await message.edit({
-      ...payload,
-      attachments: []
-    });
-    logger.info('role panel message updated', {
-      guildId,
-      channelId: channel.id,
-      messageId: message.id,
-      panelKind: TEMP_ROLE_PANEL_KIND
-    });
-  } else {
-    message = await channel.send(payload);
-    logger.info('role panel message posted', {
-      guildId,
-      channelId: channel.id,
-      messageId: message.id,
-      panelKind: TEMP_ROLE_PANEL_KIND,
-      replacedMissingMessageId: existing?.messageId || null
-    });
-  }
-
-  client.db.rolePanels.upsert({
+  const mainMessage = await upsertRolePanelMessage({
+    client,
     guildId,
+    channel,
     panelKind: TEMP_ROLE_PANEL_KIND,
-    channelId: channel.id,
-    messageId: message.id
+    payload: buildRolePanelPayload(),
+    roleMappings: MAIN_ROLE_MAPPINGS
   });
-  await addRolePanelReactions(message, logger);
+  const overflowMessage = await upsertRolePanelMessage({
+    client,
+    guildId,
+    channel,
+    panelKind: TEMP_ROLE_PANEL_OVERFLOW_KIND,
+    payload: buildRolePanelOverflowPayload(),
+    roleMappings: OVERFLOW_ROLE_MAPPINGS
+  });
 
-  return message;
+  return {
+    mainMessage,
+    overflowMessage
+  };
+}
+
+function getRoleMappingForPanelKind(panelKind, emojiName) {
+  return ROLE_BY_EMOJI_BY_PANEL_KIND.get(panelKind)?.get(normalizeEmojiKey(emojiName)) || null;
 }
 
 async function resolveRolePanelContext(reaction, user) {
@@ -197,7 +291,19 @@ async function resolveRolePanelContext(reaction, user) {
   }
 
   const panel = message.client.db.rolePanels.getByMessageId(message.id);
-  if (!panel || panel.panelKind !== TEMP_ROLE_PANEL_KIND) {
+  if (!panel) {
+    if (message.channelId === ANNOUNCEMENT_CHANNEL_ID) {
+      message.client.logger.info('role panel reaction ignored untracked message', {
+        messageId: message.id,
+        channelId: message.channelId,
+        guildId: message.guildId,
+        emoji: fullReaction.emoji?.name || null,
+        userId: user?.id || null
+      });
+    }
+    return null;
+  }
+  if (!TRACKED_ROLE_PANEL_KINDS.has(panel.panelKind)) {
     return null;
   }
 
@@ -212,12 +318,13 @@ async function resolveRolePanelContext(reaction, user) {
     return null;
   }
 
-  const roleMapping = ROLE_BY_EMOJI.get(normalizeEmojiKey(fullReaction.emoji?.name));
+  const roleMapping = getRoleMappingForPanelKind(panel.panelKind, fullReaction.emoji?.name);
   if (!roleMapping) {
     message.client.logger.info('role panel reaction ignored unmapped emoji', {
       messageId: message.id,
       channelId: message.channelId,
       guildId: message.guildId,
+      panelKind: panel.panelKind,
       emoji: fullReaction.emoji?.name || null,
       userId: user?.id || null
     });
@@ -227,6 +334,17 @@ async function resolveRolePanelContext(reaction, user) {
       roleMapping: null
     };
   }
+
+  message.client.logger.info('role panel reaction matched tracked panel', {
+    messageId: message.id,
+    channelId: message.channelId,
+    guildId: message.guildId,
+    panelKind: panel.panelKind,
+    emoji: roleMapping.emoji,
+    roleId: roleMapping.roleId,
+    label: roleMapping.label,
+    userId: user?.id || null
+  });
 
   return {
     message,
@@ -401,8 +519,12 @@ async function handleRolePanelReactionRemove(reaction, user) {
 module.exports = {
   ANNOUNCEMENT_CHANNEL_ID,
   TEMP_ROLE_PANEL_KIND,
+  TEMP_ROLE_PANEL_OVERFLOW_KIND,
   ROLE_MAPPINGS,
+  MAIN_ROLE_MAPPINGS,
+  OVERFLOW_ROLE_MAPPINGS,
   buildRolePanelPayload,
+  buildRolePanelOverflowPayload,
   postTempRolePanel,
   handleRolePanelReactionAdd,
   handleRolePanelReactionRemove,

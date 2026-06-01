@@ -1,5 +1,5 @@
 const { PermissionFlagsBits, SlashCommandBuilder } = require('discord.js');
-const { postTempRolePanel, ANNOUNCEMENT_CHANNEL_ID } = require('../modules/rolePanel');
+const { postTempRolePanel } = require('../modules/rolePanel');
 
 function canManageRolePanel(member) {
   return Boolean(
@@ -36,12 +36,12 @@ module.exports = {
     await interaction.deferReply({ ephemeral: true });
 
     try {
-      const message = await postTempRolePanel(interaction.client, interaction.guildId);
+      const { mainMessage, overflowMessage } = await postTempRolePanel(interaction.client, interaction.guildId);
       await interaction.editReply({
         content: [
-          'ロール付与パネルを投稿または更新しました。',
-          `投稿先: <#${ANNOUNCEMENT_CHANNEL_ID}>`,
-          `メッセージ: ${message.url}`
+          'ロールパネルを投稿しました。',
+          `メイン: ${mainMessage.url}`,
+          `追加: ${overflowMessage.url}`
         ].join('\n'),
         allowedMentions: { parse: [] }
       });
