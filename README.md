@@ -150,6 +150,7 @@ Important sections:
 - `voiceProfile.channelStatusLabels`: Optional map of voice channel ID to a status label shown when Discord's voice channel status text is not exposed by discord.js/API.
 - `globalHashtagRoutes`: Route tags such as tech/anime/food. These can also relay to timeline.
 - `botHashtagRoutes`: Bot-specific route tags such as `##いい映像` and `##いい音楽`.
+- `posthocRelay`: Controls reply-based hashtag relays, including rejection threshold and admin override user IDs.
 - `vcListenOnlyChannelIds`: Channels where route tags can be listened for without normal tweet relay.
 - `anime`: Anime system settings and review role thresholds.
 - `annict`: Annict API settings. `accessTokenEnv` defaults to `ANNICT_ACCESS_TOKEN`.

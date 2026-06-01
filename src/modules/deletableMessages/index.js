@@ -3,6 +3,7 @@ const DEFAULT_TTL_MS = 1000 * 60 * 60 * 24;
 const WRONG_USER_MESSAGE = 'このリアクションは、この操作をした本人だけが使えます。';
 const POSTHOC_WRONG_USER_MESSAGE = 'このリアクションは、元の投稿者だけが使えます。';
 const POSTHOC_PURPOSE = 'posthoc_route_relay';
+const { cleanupRelayedBotMessageState } = require('../timelineRelay/relayDeletionCleanup');
 
 function parseMetadataJson(value) {
   if (!value) {
@@ -40,6 +41,7 @@ async function registerDeletableMessage(message, ownerUserId, purpose, ttlMs = D
 async function registerPosthocDeletableCard(message, {
   ownerUserId,
   sourceMessageId,
+  sourceChannelId,
   destinationChannelId,
   taggerUserId,
   relayKind,
@@ -47,6 +49,7 @@ async function registerPosthocDeletableCard(message, {
 }) {
   await registerDeletableMessage(message, ownerUserId, POSTHOC_PURPOSE, null, {
     sourceMessageId,
+    sourceChannelId,
     destinationChannelId,
     taggerUserId,
     relayKind,
@@ -64,21 +67,51 @@ async function registerPosthocDeletableCard(message, {
   });
 }
 
-function cleanupPosthocRelayState(message, record) {
+function recordPosthocRelayRejection(message, record, user) {
   const metadata = parseMetadataJson(record.metadataJson);
   const sourceMessageId = metadata?.sourceMessageId;
-  const destinationChannelId = metadata?.destinationChannelId || record.channelId;
 
-  if (!sourceMessageId || !destinationChannelId) {
-    return;
+  if (!sourceMessageId) {
+    message.client.logger.warn('posthoc relay rejection record skipped missing source', {
+      messageId: message.id,
+      channelId: message.channelId,
+      ownerUserId: record.ownerUserId,
+      reactingUserId: user.id,
+      metadataJson: record.metadataJson || null
+    });
+    return null;
   }
 
-  message.client.db.relays.deleteMessageRelayTarget(sourceMessageId, destinationChannelId);
-  message.client.db.timelineDestination?.deleteIfCurrent?.(
-    record.guildId,
-    destinationChannelId,
-    record.messageId
-  );
+  const result = message.client.db.posthocRelayRejections.record({
+    guildId: record.guildId || message.guildId || '',
+    sourceMessageId,
+    sourceChannelId: metadata?.sourceChannelId || null,
+    originalAuthorId: record.ownerUserId || null,
+    rejectedByUserId: user.id,
+    destinationChannelId: metadata?.destinationChannelId || record.channelId || null,
+    relayKind: metadata?.relayKind || record.purpose || null,
+    displayTagsJson: JSON.stringify(Array.isArray(metadata?.displayTags) ? metadata.displayTags : []),
+    rejectedRelayedMessageId: record.messageId || message.id
+  });
+
+  message.client.logger.info('posthoc relay rejection recorded', {
+    messageId: message.id,
+    channelId: message.channelId,
+    ownerUserId: record.ownerUserId,
+    reactingUserId: user.id,
+    sourceMessageId,
+    destinationChannelId: metadata?.destinationChannelId || record.channelId || null,
+    relayKind: metadata?.relayKind || null,
+    displayTags: Array.isArray(metadata?.displayTags) ? metadata.displayTags : []
+  });
+  message.client.logger.info('posthoc relay rejection count updated', {
+    guildId: result?.guildId || record.guildId || message.guildId || '',
+    sourceMessageId,
+    rejectionCount: Number(result?.rejectionCount || 0),
+    lastRejectedAt: result?.lastRejectedAt || null
+  });
+
+  return result;
 }
 
 async function handleDeletableMessageReaction(reaction, user) {
@@ -154,6 +187,15 @@ async function handleDeletableMessageReaction(reaction, user) {
         error: error.message
       });
     }
+    if (posthocPurpose) {
+      message.client.logger.info('posthoc relay rejection skipped non-owner deletion', {
+        messageId: message.id,
+        channelId: message.channelId,
+        ownerUserId: record.ownerUserId,
+        reactingUserId: user.id,
+        purpose: record.purpose || null
+      });
+    }
     return true;
   }
 
@@ -167,9 +209,12 @@ async function handleDeletableMessageReaction(reaction, user) {
   });
 
   if (posthocPurpose) {
+    message.client.posthocRelayReactionDeletes = message.client.posthocRelayReactionDeletes || new Set();
+    message.client.posthocRelayReactionDeletes.add(message.id);
     try {
       await message.delete();
     } catch (error) {
+      message.client.posthocRelayReactionDeletes.delete(message.id);
       message.client.logger.warn('posthoc delete reaction delete failed', {
         messageId: message.id,
         channelId: message.channelId,
@@ -182,7 +227,14 @@ async function handleDeletableMessageReaction(reaction, user) {
     }
 
     try {
-      cleanupPosthocRelayState(message, record);
+      recordPosthocRelayRejection(message, record, user);
+      await cleanupRelayedBotMessageState(message.client, {
+        messageId: message.id,
+        guildId: message.guildId || record.guildId || null,
+        channelId: message.channelId || record.channelId || null,
+        reason: 'reaction_delete',
+        logNoState: false
+      });
     } catch (error) {
       message.client.logger.warn('posthoc delete reaction state cleanup failed', {
         messageId: message.id,
@@ -193,6 +245,13 @@ async function handleDeletableMessageReaction(reaction, user) {
         metadataJson: record.metadataJson || null,
         error: error.message
       });
+    } finally {
+      const timer = setTimeout(() => {
+        message.client.posthocRelayReactionDeletes?.delete?.(message.id);
+      }, 30_000);
+      if (typeof timer.unref === 'function') {
+        timer.unref();
+      }
     }
 
     message.client.db.deletableMessages.delete(message.id);

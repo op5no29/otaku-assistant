@@ -406,6 +406,27 @@ function runMigrations(database) {
     CREATE INDEX IF NOT EXISTS idx_bot_deletable_messages_owner
       ON bot_deletable_messages (guild_id, owner_user_id, expires_at);
 
+    CREATE TABLE IF NOT EXISTS posthoc_relay_rejections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      source_message_id TEXT NOT NULL,
+      source_channel_id TEXT,
+      original_author_id TEXT,
+      rejected_by_user_id TEXT,
+      destination_channel_id TEXT,
+      relay_kind TEXT,
+      display_tags_json TEXT,
+      rejected_relayed_message_id TEXT,
+      rejection_count INTEGER NOT NULL DEFAULT 0,
+      last_rejected_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(guild_id, source_message_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_posthoc_relay_rejections_source
+      ON posthoc_relay_rejections (guild_id, source_message_id, rejection_count);
+
     CREATE TABLE IF NOT EXISTS user_llm_memories (
       guild_id TEXT NOT NULL,
       user_id TEXT NOT NULL,

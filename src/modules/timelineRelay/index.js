@@ -19,6 +19,7 @@ const { getSilentRelayControl, parseRelayHashtagPrefixes } = require('../../util
 const { resolveRouteAccentColor } = require('../../utils/accentColors');
 const { handleAnimeHashtagPost } = require('../anime/hashtagIntegration');
 const { registerPosthocDeletableCard } = require('../deletableMessages');
+const { cleanupRelayedBotMessageState } = require('./relayDeletionCleanup');
 
 const QUESTION_ROLE_SELECT_PREFIX = 'question-role-select:';
 const QUESTION_ROLE_SKIP_PREFIX = 'question-role-skip:';
@@ -187,6 +188,110 @@ function buildPosthocDisplayTags(routing) {
   return [...new Set((Array.isArray(routing?.displayTags) ? routing.displayTags : [])
     .map(normalizePosthocDisplayTag)
     .filter(Boolean))];
+}
+
+async function isPosthocRelayAdminOverride(message, config, logger) {
+  const userId = String(message.author?.id || '');
+  const configuredOverrideIds = new Set((config.posthocRelay?.adminOverrideUserIds || []).map(String));
+  if (userId && configuredOverrideIds.has(userId)) {
+    logger.info('posthoc relay admin override user matched', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      userId,
+      matchType: 'configured_user_id'
+    });
+    return true;
+  }
+
+  const member = message.member || await message.guild?.members.fetch(userId).catch(() => null);
+  const permissionMatched = Boolean(
+    member?.permissions?.has?.('Administrator') ||
+    member?.permissions?.has?.('ManageMessages')
+  );
+  if (permissionMatched) {
+    logger.info('posthoc relay admin override user matched', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      userId,
+      matchType: 'permission'
+    });
+    return true;
+  }
+
+  return false;
+}
+
+async function blockPosthocRelayByRejectionCount(message, targetMessage, rejectionRecord, config, logger) {
+  const threshold = Number(config.posthocRelay?.rejectionBlockThreshold ?? 2);
+  logger.info('posthoc relay blocked by rejection count', {
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    replyTargetMessageId: targetMessage.id,
+    replyTargetChannelId: targetMessage.channelId,
+    taggerUserId: message.author?.id || null,
+    rejectionCount: Number(rejectionRecord?.rejectionCount || 0),
+    threshold
+  });
+
+  try {
+    await message.delete();
+    logger.info('posthoc rejected retry reply deleted', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      replyTargetMessageId: targetMessage.id,
+      taggerUserId: message.author?.id || null
+    });
+  } catch (error) {
+    logger.warn('posthoc rejected retry reply delete failed', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      replyTargetMessageId: targetMessage.id,
+      taggerUserId: message.author?.id || null,
+      error: error.message
+    });
+  }
+
+  const warning = await message.channel?.send?.({
+    content: `<@${message.author.id}> 該当の投稿は元の投稿者により${threshold}回タグ付けを拒否されているため共有できません。`,
+    allowedMentions: { users: [message.author.id], parse: [] }
+  }).catch((error) => {
+    logger.warn('posthoc rejected retry warning send failed', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      replyTargetMessageId: targetMessage.id,
+      taggerUserId: message.author?.id || null,
+      error: error.message
+    });
+    return null;
+  });
+
+  if (warning) {
+    logger.info('posthoc rejected retry warning sent', {
+      sourceMessageId: message.id,
+      warningMessageId: warning.id,
+      sourceChannelId: message.channelId,
+      taggerUserId: message.author?.id || null
+    });
+    const timer = setTimeout(() => {
+      warning.delete().catch((error) => {
+        logger.warn('posthoc rejected retry warning delete failed', {
+          sourceMessageId: message.id,
+          warningMessageId: warning.id,
+          sourceChannelId: message.channelId,
+          error: error.message
+        });
+      });
+    }, 60_000);
+    if (typeof timer.unref === 'function') {
+      timer.unref();
+    }
+    logger.info('posthoc rejected retry warning delete scheduled', {
+      sourceMessageId: message.id,
+      warningMessageId: warning.id,
+      sourceChannelId: message.channelId,
+      delayMs: 60_000
+    });
+  }
 }
 
 function shouldPromptQuestionRoles(config) {
@@ -2595,6 +2700,25 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
     return true;
   }
 
+  const rejectionRecord = db.posthocRelayRejections.get(targetMessage.guildId, targetMessage.id);
+  const rejectionThreshold = Number(config.posthocRelay?.rejectionBlockThreshold ?? 2);
+  if (rejectionThreshold > 0 && Number(rejectionRecord?.rejectionCount || 0) >= rejectionThreshold) {
+    const adminOverride = await isPosthocRelayAdminOverride(message, config, logger);
+    if (!adminOverride) {
+      await blockPosthocRelayByRejectionCount(message, targetMessage, rejectionRecord, config, logger);
+      return true;
+    }
+    logger.info('posthoc relay rejection block bypassed by admin override', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      replyTargetMessageId: targetMessage.id,
+      replyTargetChannelId: targetMessage.channelId,
+      taggerUserId: message.author?.id || null,
+      rejectionCount: Number(rejectionRecord?.rejectionCount || 0),
+      threshold: rejectionThreshold
+    });
+  }
+
   const post = await extractPlainMessagePost(targetMessage, config, logger);
   const posthocDisplayTags = buildPosthocDisplayTags(replyRouting);
   post.displayBotHashtags = replyRouting.displayTags;
@@ -2679,17 +2803,36 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
     for (const target of destinationTargets) {
       const existingRelay = db.relays.getMessageRelayTarget(targetMessage.id, target.destinationChannelId);
       if (existingRelay?.relayedMessageId) {
-        relayedRouteMessageIds[target.destinationChannelId] = existingRelay.relayedMessageId;
-        if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
-          relayedTimelineMessageId = existingRelay.relayedMessageId;
+        const existingDestinationChannel = await getTextChannel(message.guild, target.destinationChannelId);
+        const existingRelayedMessage = existingDestinationChannel
+          ? await existingDestinationChannel.messages.fetch(existingRelay.relayedMessageId).catch(() => null)
+          : null;
+        if (existingRelayedMessage) {
+          relayedRouteMessageIds[target.destinationChannelId] = existingRelay.relayedMessageId;
+          if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
+            relayedTimelineMessageId = existingRelay.relayedMessageId;
+          }
+          skippedCount += 1;
+          logger.info('posthoc hashtag duplicate skipped', {
+            replyTargetMessageId: targetMessage.id,
+            destinationChannelId: target.destinationChannelId,
+            existingRelayedMessageId: existingRelay.relayedMessageId
+          });
+          continue;
         }
-        skippedCount += 1;
-        logger.info('posthoc hashtag duplicate skipped', {
+
+        await cleanupRelayedBotMessageState(message.client, {
+          messageId: existingRelay.relayedMessageId,
+          guildId: targetMessage.guildId,
+          channelId: target.destinationChannelId,
+          reason: 'stale_duplicate_check',
+          logNoState: false
+        });
+        logger.info('posthoc hashtag stale duplicate state cleaned', {
           replyTargetMessageId: targetMessage.id,
           destinationChannelId: target.destinationChannelId,
-          existingRelayedMessageId: existingRelay.relayedMessageId
+          staleRelayedMessageId: existingRelay.relayedMessageId
         });
-        continue;
       }
 
       const relayInFlightKey = buildRelayInFlightKey(targetMessage.id, target.destinationChannelId, target.relayKind);
@@ -2736,6 +2879,7 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
         await registerPosthocDeletableCard(sentMessage, {
           ownerUserId: targetMessage.author?.id || '',
           sourceMessageId: targetMessage.id,
+          sourceChannelId,
           destinationChannelId: target.destinationChannelId,
           taggerUserId: message.author.id,
           relayKind: target.relayKind,

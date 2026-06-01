@@ -258,6 +258,20 @@ function ensureQuestionRolePromptConfig(value) {
   };
 }
 
+function ensurePosthocRelayConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      rejectionBlockThreshold: 2,
+      adminOverrideUserIds: []
+    };
+  }
+
+  return {
+    rejectionBlockThreshold: Number(value.rejectionBlockThreshold ?? 2),
+    adminOverrideUserIds: ensureArray(value.adminOverrideUserIds || [], 'posthocRelay.adminOverrideUserIds')
+  };
+}
+
 function ensureAnimeConfig(value) {
   const defaultReviewRoles = [
     { threshold: 10, roleId: null, name: 'アニメ視聴者 Lv.1' },
@@ -428,6 +442,7 @@ function loadConfig(configPath) {
       moderatorRoleIds: ensureArray(parsed.questions?.moderatorRoleIds || [], 'questions.moderatorRoleIds')
     },
     questionRolePrompt: ensureQuestionRolePromptConfig(parsed.questionRolePrompt),
+    posthocRelay: ensurePosthocRelayConfig(parsed.posthocRelay),
     introDm: ensureIntroDmConfig(parsed.introDm, parsed.introChannelId),
     welcomeDm: ensureWelcomeDmConfig(parsed.welcomeDm, parsed.ops?.logChannelId || ''),
     anime: ensureAnimeConfig(parsed.anime),

@@ -121,6 +121,12 @@
     "knowWantRoleId": "1510927153246502972",
     "knowWantChannelIds": []
   },
+  "posthocRelay": {
+    "rejectionBlockThreshold": 2,
+    "adminOverrideUserIds": [
+      "323041740963446785"
+    ]
+  },
   "introDm": {
     "enabled": false,
     "devTestMode": false,

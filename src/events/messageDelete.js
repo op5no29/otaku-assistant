@@ -34,6 +34,25 @@ module.exports = {
     }
 
     try {
+      const { cleanupRelayedBotMessageState } = require('../modules/timelineRelay/relayDeletionCleanup');
+      const reactionDeleteSet = client.posthocRelayReactionDeletes;
+      const reason = reactionDeleteSet?.has?.(messageId) ? 'reaction_delete' : 'message_delete';
+      await cleanupRelayedBotMessageState(client, {
+        messageId,
+        guildId: message.guildId || null,
+        channelId: message.channelId || null,
+        reason,
+        logNoState: String(message.author?.id || '') === String(client.user?.id || '')
+      });
+    } catch (error) {
+      client.logger.error('relayed bot message DB cleanup failed', {
+        messageId,
+        channelId: message.channelId || null,
+        error: error.message
+      });
+    }
+
+    try {
       client.db.deletableMessages.delete(messageId);
     } catch (error) {
       client.logger.error('delete deletable message reference failed', {

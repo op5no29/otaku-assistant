@@ -49,6 +49,23 @@ function createDatabase(databasePath) {
       WHERE message_id = ?
       LIMIT 1
     `),
+    listMessageRelaysByTimelineMessageId: sqlite.prepare(`
+      SELECT
+        message_id AS messageId,
+        thread_id AS threadId,
+        parent_channel_id AS parentChannelId,
+        forum_type AS forumType,
+        timeline_message_id AS timelineMessageId,
+        author_id AS authorId,
+        relayed_at AS relayedAt
+      FROM relayed_messages
+      WHERE timeline_message_id = ?
+      ORDER BY relayed_at ASC
+    `),
+    deleteMessageRelaysByTimelineMessageId: sqlite.prepare(`
+      DELETE FROM relayed_messages
+      WHERE timeline_message_id = ?
+    `),
     listMessageRelayTargets: sqlite.prepare(`
       SELECT
         source_message_id AS sourceMessageId,
@@ -81,6 +98,22 @@ function createDatabase(databasePath) {
       WHERE source_message_id = ? AND destination_channel_id = ?
       LIMIT 1
     `),
+    listMessageRelayTargetsByRelayedMessageId: sqlite.prepare(`
+      SELECT
+        source_message_id AS sourceMessageId,
+        destination_channel_id AS destinationChannelId,
+        thread_id AS threadId,
+        parent_channel_id AS parentChannelId,
+        forum_type AS forumType,
+        relay_kind AS relayKind,
+        relayed_message_id AS relayedMessageId,
+        author_id AS authorId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM relayed_message_targets
+      WHERE relayed_message_id = ?
+      ORDER BY created_at ASC
+    `),
     upsertMessageRelayTarget: sqlite.prepare(`
       INSERT INTO relayed_message_targets (
         source_message_id,
@@ -106,6 +139,10 @@ function createDatabase(databasePath) {
     deleteMessageRelayTarget: sqlite.prepare(`
       DELETE FROM relayed_message_targets
       WHERE source_message_id = ? AND destination_channel_id = ?
+    `),
+    deleteMessageRelayTargetsByRelayedMessageId: sqlite.prepare(`
+      DELETE FROM relayed_message_targets
+      WHERE relayed_message_id = ?
     `),
     insertMessageRelay: sqlite.prepare(`
       INSERT INTO relayed_messages (
@@ -1959,6 +1996,71 @@ function createDatabase(databasePath) {
         AND destination_channel_id = ?
         AND relayed_message_id = ?
     `),
+    listTimelineDestinationStatesByRelayedMessageId: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        destination_channel_id AS destinationChannelId,
+        relayed_message_id AS relayedMessageId,
+        source_message_id AS sourceMessageId,
+        source_thread_id AS sourceThreadId,
+        author_id AS authorId,
+        updated_at AS updatedAt
+      FROM timeline_destination_state
+      WHERE relayed_message_id = ?
+      ORDER BY updated_at ASC
+    `),
+    deleteTimelineDestinationStatesByRelayedMessageId: sqlite.prepare(`
+      DELETE FROM timeline_destination_state
+      WHERE relayed_message_id = ?
+    `),
+    getPosthocRelayRejection: sqlite.prepare(`
+      SELECT
+        id,
+        guild_id AS guildId,
+        source_message_id AS sourceMessageId,
+        source_channel_id AS sourceChannelId,
+        original_author_id AS originalAuthorId,
+        rejected_by_user_id AS rejectedByUserId,
+        destination_channel_id AS destinationChannelId,
+        relay_kind AS relayKind,
+        display_tags_json AS displayTagsJson,
+        rejected_relayed_message_id AS rejectedRelayedMessageId,
+        rejection_count AS rejectionCount,
+        last_rejected_at AS lastRejectedAt,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM posthoc_relay_rejections
+      WHERE guild_id = ? AND source_message_id = ?
+      LIMIT 1
+    `),
+    upsertPosthocRelayRejection: sqlite.prepare(`
+      INSERT INTO posthoc_relay_rejections (
+        guild_id,
+        source_message_id,
+        source_channel_id,
+        original_author_id,
+        rejected_by_user_id,
+        destination_channel_id,
+        relay_kind,
+        display_tags_json,
+        rejected_relayed_message_id,
+        rejection_count,
+        last_rejected_at,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+      ON CONFLICT(guild_id, source_message_id) DO UPDATE SET
+        source_channel_id = COALESCE(excluded.source_channel_id, posthoc_relay_rejections.source_channel_id),
+        original_author_id = COALESCE(excluded.original_author_id, posthoc_relay_rejections.original_author_id),
+        rejected_by_user_id = excluded.rejected_by_user_id,
+        destination_channel_id = excluded.destination_channel_id,
+        relay_kind = excluded.relay_kind,
+        display_tags_json = excluded.display_tags_json,
+        rejected_relayed_message_id = excluded.rejected_relayed_message_id,
+        rejection_count = posthoc_relay_rejections.rejection_count + 1,
+        last_rejected_at = excluded.last_rejected_at,
+        updated_at = excluded.updated_at
+    `),
     upsertUserLlmMemory: sqlite.prepare(`
       INSERT INTO user_llm_memories (
         guild_id, user_id, memory_key, memory_text, source, confidence, created_at, updated_at
@@ -2032,6 +2134,9 @@ function createDatabase(databasePath) {
       getMessageRelayTarget(messageId, destinationChannelId) {
         return statements.getMessageRelayTarget.get(messageId, destinationChannelId) || null;
       },
+      listMessageRelayTargetsByRelayedMessageId(relayedMessageId) {
+        return statements.listMessageRelayTargetsByRelayedMessageId.all(relayedMessageId);
+      },
       upsertMessageRelayTarget({
         sourceMessageId,
         destinationChannelId,
@@ -2057,7 +2162,10 @@ function createDatabase(databasePath) {
         );
       },
       deleteMessageRelayTarget(messageId, destinationChannelId) {
-        statements.deleteMessageRelayTarget.run(messageId, destinationChannelId);
+        return statements.deleteMessageRelayTarget.run(messageId, destinationChannelId).changes;
+      },
+      deleteMessageRelayTargetsByRelayedMessageId(relayedMessageId) {
+        return statements.deleteMessageRelayTargetsByRelayedMessageId.run(relayedMessageId).changes;
       },
       insertMessageRelay({ messageId, threadId, parentChannelId, forumType, timelineMessageId, authorId }) {
         statements.insertMessageRelay.run(
@@ -2069,6 +2177,12 @@ function createDatabase(databasePath) {
           authorId,
           new Date().toISOString()
         );
+      },
+      listMessageRelaysByTimelineMessageId(timelineMessageId) {
+        return statements.listMessageRelaysByTimelineMessageId.all(timelineMessageId);
+      },
+      deleteMessageRelaysByTimelineMessageId(timelineMessageId) {
+        return statements.deleteMessageRelaysByTimelineMessageId.run(timelineMessageId).changes;
       }
     },
     questions: {
@@ -2808,7 +2922,7 @@ function createDatabase(databasePath) {
         return statements.getBotDeletableMessage.get(messageId) || null;
       },
       delete(messageId) {
-        statements.deleteBotDeletableMessage.run(messageId);
+        return statements.deleteBotDeletableMessage.run(messageId).changes;
       },
       deleteExpired(nowIso = new Date().toISOString()) {
         statements.deleteExpiredBotDeletableMessages.run(nowIso);
@@ -2870,7 +2984,46 @@ function createDatabase(databasePath) {
         );
       },
       deleteIfCurrent(guildId, destinationChannelId, relayedMessageId) {
-        statements.deleteTimelineDestinationStateIfCurrent.run(guildId, destinationChannelId, relayedMessageId);
+        return statements.deleteTimelineDestinationStateIfCurrent.run(guildId, destinationChannelId, relayedMessageId).changes;
+      },
+      listByRelayedMessageId(relayedMessageId) {
+        return statements.listTimelineDestinationStatesByRelayedMessageId.all(relayedMessageId);
+      },
+      deleteByRelayedMessageId(relayedMessageId) {
+        return statements.deleteTimelineDestinationStatesByRelayedMessageId.run(relayedMessageId).changes;
+      }
+    },
+    posthocRelayRejections: {
+      get(guildId, sourceMessageId) {
+        return statements.getPosthocRelayRejection.get(guildId, sourceMessageId) || null;
+      },
+      record({
+        guildId,
+        sourceMessageId,
+        sourceChannelId = null,
+        originalAuthorId = null,
+        rejectedByUserId,
+        destinationChannelId = null,
+        relayKind = null,
+        displayTagsJson = null,
+        rejectedRelayedMessageId = null
+      }) {
+        const now = new Date().toISOString();
+        statements.upsertPosthocRelayRejection.run(
+          guildId,
+          sourceMessageId,
+          sourceChannelId,
+          originalAuthorId,
+          rejectedByUserId,
+          destinationChannelId,
+          relayKind,
+          displayTagsJson,
+          rejectedRelayedMessageId,
+          now,
+          now,
+          now
+        );
+        return statements.getPosthocRelayRejection.get(guildId, sourceMessageId) || null;
       }
     },
     userMemories: {
