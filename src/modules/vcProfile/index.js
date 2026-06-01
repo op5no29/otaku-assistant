@@ -3,6 +3,9 @@ const { buildProfileMessage } = require('./buildProfileMessage');
 const { findLatestIntroMessage } = require('./findLatestIntroMessage');
 const { resolveVcProfileAccentColor } = require('../../utils/accentColors');
 
+const DISCORD_COMPONENT_LIMIT = 40;
+const DEFAULT_MEMBERS_PER_PAGE = 6;
+
 async function initializeVoiceProfileMappings(client) {
   client.voiceProfileCategoryMap.clear();
 
@@ -626,6 +629,199 @@ async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapp
   };
 }
 
+function chunkArray(values, chunkSize) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += chunkSize) {
+    chunks.push(values.slice(index, index + chunkSize));
+  }
+  return chunks;
+}
+
+function getComponentJson(component) {
+  try {
+    return typeof component?.toJSON === 'function' ? component.toJSON() : component;
+  } catch {
+    return component;
+  }
+}
+
+function countComponentTree(component) {
+  const raw = getComponentJson(component);
+  if (!raw || typeof raw !== 'object') {
+    return 0;
+  }
+
+  let count = 1;
+  for (const child of raw.components || []) {
+    count += countComponentTree(child);
+  }
+  if (raw.accessory) {
+    count += countComponentTree(raw.accessory);
+  }
+  return count;
+}
+
+function countPayloadComponents(payload) {
+  return (payload.components || []).reduce((total, component) => total + countComponentTree(component), 0);
+}
+
+function buildProfilePagePayload({
+  contextName,
+  voiceChannelName,
+  statusText,
+  members,
+  totalMemberCount,
+  pageIndex,
+  totalPages,
+  accentColor,
+  compact = false
+}) {
+  const payload = buildProfileMessage({
+    contextName,
+    voiceChannelName,
+    statusText,
+    members,
+    totalMemberCount,
+    pageIndex,
+    totalPages,
+    accentColor,
+    compact
+  });
+  return {
+    payload,
+    componentCount: countPayloadComponents(payload)
+  };
+}
+
+function buildPaginatedProfilePayloads({
+  client,
+  guildId,
+  categoryId,
+  mapping,
+  snapshot,
+  accentColor
+}) {
+  const maxInitialPageSize = Math.max(1, Math.min(DEFAULT_MEMBERS_PER_PAGE, snapshot.members.length));
+
+  for (const compact of [false, true]) {
+    for (let membersPerPage = maxInitialPageSize; membersPerPage >= 1; membersPerPage -= 1) {
+      const memberPages = chunkArray(snapshot.members, membersPerPage);
+      const totalPages = memberPages.length;
+      const pages = memberPages.map((members, pageIndex) => {
+        const normal = buildProfilePagePayload({
+          contextName: mapping.name,
+          voiceChannelName: snapshot.voiceChannelName,
+          statusText: snapshot.statusText,
+          members,
+          totalMemberCount: snapshot.members.length,
+          pageIndex,
+          totalPages,
+          accentColor,
+          compact
+        });
+        const compactFallback = compact
+          ? normal
+          : buildProfilePagePayload({
+            contextName: mapping.name,
+            voiceChannelName: snapshot.voiceChannelName,
+            statusText: snapshot.statusText,
+            members,
+            totalMemberCount: snapshot.members.length,
+            pageIndex,
+            totalPages,
+            accentColor,
+            compact: true
+          });
+
+        client.logger.info('vc profile page payload built', {
+          guildId,
+          categoryId,
+          profileChannelId: mapping.profileChannelId,
+          pageIndex,
+          totalPages,
+          memberCount: members.length,
+          totalMemberCount: snapshot.members.length,
+          compact,
+          componentCount: normal.componentCount,
+          compactFallbackComponentCount: compactFallback.componentCount
+        });
+
+        return {
+          pageIndex,
+          totalPages,
+          members,
+          payload: normal.payload,
+          componentCount: normal.componentCount,
+          retryPayload: compactFallback.payload,
+          retryComponentCount: compactFallback.componentCount,
+          compact
+        };
+      });
+
+      const overLimit = pages.some((page) => page.componentCount > DISCORD_COMPONENT_LIMIT);
+      if (!overLimit) {
+        client.logger.info('vc profile pagination calculated', {
+          guildId,
+          categoryId,
+          profileChannelId: mapping.profileChannelId,
+          totalMemberCount: snapshot.members.length,
+          totalPages,
+          membersPerPage,
+          compact
+        });
+        return pages;
+      }
+
+      client.logger.warn('vc profile page component overflow detected', {
+        guildId,
+        categoryId,
+        profileChannelId: mapping.profileChannelId,
+        totalMemberCount: snapshot.members.length,
+        membersPerPage,
+        compact,
+        pageCounts: pages.map((page) => ({
+          pageIndex: page.pageIndex,
+          componentCount: page.componentCount
+        }))
+      });
+    }
+  }
+
+  const membersPerPage = 1;
+  const memberPages = chunkArray(snapshot.members, membersPerPage);
+  const totalPages = memberPages.length;
+  client.logger.warn('vc profile page compact fallback used', {
+    guildId,
+    categoryId,
+    profileChannelId: mapping.profileChannelId,
+    totalMemberCount: snapshot.members.length,
+    reason: 'component_budget_exhausted'
+  });
+  return memberPages.map((members, pageIndex) => {
+    const fallback = buildProfilePagePayload({
+      contextName: mapping.name,
+      voiceChannelName: snapshot.voiceChannelName,
+      statusText: snapshot.statusText,
+      members,
+      totalMemberCount: snapshot.members.length,
+      pageIndex,
+      totalPages,
+      accentColor,
+      compact: true
+    });
+    return {
+      pageIndex,
+      totalPages,
+      members,
+      payload: fallback.payload,
+      componentCount: fallback.componentCount,
+      retryPayload: fallback.payload,
+      retryComponentCount: fallback.componentCount,
+      compact: true
+    };
+  });
+}
+
 function collectTextDisplayContent(component, collected = []) {
   if (!component) {
     return collected;
@@ -671,11 +867,22 @@ async function cleanupDuplicateCategoryCards(client, {
   profileChannel,
   mapping,
   keepMessageId = null,
+  keepMessageIds = [],
   includeTracked = false,
   reason
 }) {
   const duplicateIds = new Set();
-  const tracked = client.db.vcProfiles.getCategoryMessage({
+  const keepIds = new Set(
+    [keepMessageId, ...keepMessageIds]
+      .map((messageId) => String(messageId || ''))
+      .filter(Boolean)
+  );
+  const trackedSingle = client.db.vcProfiles.getCategoryMessage({
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id
+  });
+  const trackedPages = client.db.vcProfiles.listCategoryPages({
     guildId,
     categoryId,
     profileChannelId: profileChannel.id
@@ -685,7 +892,7 @@ async function cleanupDuplicateCategoryCards(client, {
     .filter((record) => String(record.profileChannelId) === String(profileChannel.id));
 
   for (const record of roomRecords) {
-    if (!includeTracked && String(record.messageId) === String(keepMessageId || tracked?.messageId || '')) {
+    if (!includeTracked && (keepIds.has(String(record.messageId)) || String(record.messageId) === String(trackedSingle?.messageId || ''))) {
       continue;
     }
     duplicateIds.add(String(record.messageId));
@@ -693,7 +900,7 @@ async function cleanupDuplicateCategoryCards(client, {
 
   const recentMessages = await profileChannel.messages.fetch({ limit: 50 }).catch(() => null);
   for (const message of recentMessages?.values?.() || []) {
-    if (String(message.id) === String(keepMessageId || '')) {
+    if (keepIds.has(String(message.id))) {
       continue;
     }
     if (isVcProfileCardMessage(client, message, mapping)) {
@@ -701,12 +908,17 @@ async function cleanupDuplicateCategoryCards(client, {
     }
   }
 
-  if (tracked?.messageId && includeTracked) {
-    duplicateIds.add(String(tracked.messageId));
+  if (includeTracked && trackedSingle?.messageId) {
+    duplicateIds.add(String(trackedSingle.messageId));
+  }
+  if (includeTracked) {
+    for (const page of trackedPages) {
+      duplicateIds.add(String(page.messageId));
+    }
   }
 
   for (const messageId of duplicateIds) {
-    if (String(messageId) === String(keepMessageId || '')) {
+    if (keepIds.has(String(messageId))) {
       continue;
     }
 
@@ -771,6 +983,12 @@ async function cleanupEmptyCategoryProfile(client, {
   mapping,
   reason
 }) {
+  client.logger.info('vc profile all pages cleanup started', {
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id,
+    reason
+  });
   client.logger.info('vc profile empty category cleanup started', {
     guildId,
     categoryId,
@@ -793,30 +1011,178 @@ async function cleanupEmptyCategoryProfile(client, {
     categoryId,
     profileChannelId: profileChannel.id
   });
+  const deletedPageRows = client.db.vcProfiles.deleteCategoryPages({
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id
+  });
 
   client.logger.info('vc profile empty category cleanup finished', {
     guildId,
     categoryId,
     profileChannelId: profileChannel.id,
     deletedCategoryRows,
+    deletedPageRows,
+    reason
+  });
+  client.logger.info('vc profile all pages cleanup finished', {
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id,
+    deletedCategoryRows,
+    deletedPageRows,
     reason
   });
 }
 
-async function fetchTrackedCategoryMessage(client, profileChannel, existing) {
-  if (!existing?.messageId) {
+async function fetchTrackedCategoryPageMessage(client, profileChannel, pageRecord) {
+  if (!pageRecord?.messageId) {
     return null;
   }
 
-  const message = await profileChannel.messages.fetch(existing.messageId).catch(() => null);
+  const message = await profileChannel.messages.fetch(pageRecord.messageId).catch(() => null);
   if (message) {
-    client.logger.info('vc profile existing card fetched', {
-      categoryId: existing.categoryId,
+    client.logger.info('vc profile page existing message fetched', {
+      categoryId: pageRecord.categoryId,
       profileChannelId: profileChannel.id,
-      messageId: existing.messageId
+      pageIndex: pageRecord.pageIndex,
+      messageId: pageRecord.messageId
     });
   }
   return message;
+}
+
+function listTrackedCategoryPagesWithLegacy(client, {
+  guildId,
+  categoryId,
+  profileChannelId
+}) {
+  const pages = client.db.vcProfiles.listCategoryPages({
+    guildId,
+    categoryId,
+    profileChannelId
+  });
+  if (pages.length > 0) {
+    return pages;
+  }
+
+  const legacy = client.db.vcProfiles.getCategoryMessage({
+    guildId,
+    categoryId,
+    profileChannelId
+  });
+  if (!legacy?.messageId) {
+    return [];
+  }
+
+  client.db.vcProfiles.upsertCategoryPage({
+    guildId,
+    categoryId,
+    profileChannelId,
+    pageIndex: 0,
+    messageId: legacy.messageId
+  });
+
+  return [{
+    guildId,
+    categoryId,
+    profileChannelId,
+    pageIndex: 0,
+    messageId: legacy.messageId,
+    updatedAt: legacy.updatedAt
+  }];
+}
+
+function isComponentOverflowError(error) {
+  const text = [
+    error?.code,
+    error?.message,
+    error?.rawError?.message,
+    JSON.stringify(error?.rawError || {})
+  ].filter(Boolean).join(' ');
+  return /COMPONENT_MAX_TOTAL_COMPONENTS_EXCEEDED|Total number of components cannot exceed 40/i.test(text);
+}
+
+async function sendOrEditProfilePage(client, {
+  profileChannel,
+  existingMessage,
+  page,
+  guildId,
+  categoryId,
+  reason
+}) {
+  client.logger.info('vc profile page component count final', {
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id,
+    pageIndex: page.pageIndex,
+    totalPages: page.totalPages,
+    componentCount: page.componentCount,
+    compact: page.compact,
+    reason
+  });
+
+  const action = existingMessage ? 'edit' : 'send';
+  try {
+    const message = existingMessage
+      ? await existingMessage.edit(page.payload)
+      : await profileChannel.send(page.payload);
+    client.logger.info(existingMessage ? 'vc profile page edited' : 'vc profile page created', {
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      pageIndex: page.pageIndex,
+      totalPages: page.totalPages,
+      messageId: message.id,
+      componentCount: page.componentCount,
+      reason
+    });
+    return message;
+  } catch (error) {
+    if (!isComponentOverflowError(error)) {
+      client.logger.error('vc profile page send/edit failed', {
+        guildId,
+        categoryId,
+        profileChannelId: profileChannel.id,
+        pageIndex: page.pageIndex,
+        action,
+        error: error.message
+      });
+      throw error;
+    }
+
+    client.logger.warn('vc profile page component overflow detected', {
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      pageIndex: page.pageIndex,
+      action,
+      componentCount: page.componentCount,
+      retryComponentCount: page.retryComponentCount,
+      error: error.message
+    });
+    client.logger.warn('vc profile page compact fallback used', {
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      pageIndex: page.pageIndex,
+      action
+    });
+
+    const message = existingMessage
+      ? await existingMessage.edit(page.retryPayload)
+      : await profileChannel.send(page.retryPayload);
+    client.logger.info('vc profile page send/edit retry succeeded', {
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      pageIndex: page.pageIndex,
+      action,
+      messageId: message.id,
+      componentCount: page.retryComponentCount
+    });
+    return message;
+  }
 }
 
 function resolveCategoryAccentColor(client, mapping, activeChannels) {
@@ -863,100 +1229,119 @@ async function syncVoiceProfileCategoryLocked(client, guild, categoryId, mapping
     return;
   }
 
-  const existing = client.db.vcProfiles.getCategoryMessage({
+  const accentColor = resolveCategoryAccentColor(client, mapping, snapshot.activeChannels);
+  const pages = buildPaginatedProfilePayloads({
+    client,
+    guildId,
+    categoryId,
+    mapping,
+    snapshot,
+    accentColor
+  });
+  const existingPages = listTrackedCategoryPagesWithLegacy(client, {
     guildId,
     categoryId,
     profileChannelId: profileChannel.id
   });
-  const existingMessage = await fetchTrackedCategoryMessage(client, profileChannel, existing);
-  const accentColor = resolveCategoryAccentColor(client, mapping, snapshot.activeChannels);
-  const payload = buildProfileMessage({
-    contextName: mapping.name,
-    voiceChannelName: snapshot.voiceChannelName,
-    statusText: snapshot.statusText,
-    members: snapshot.members,
-    accentColor
-  });
+  const existingPagesByIndex = new Map(existingPages.map((page) => [Number(page.pageIndex), page]));
+  const keptMessageIds = [];
 
-  if (existingMessage) {
-    await existingMessage.edit(payload);
+  for (const page of pages) {
+    const existingPage = existingPagesByIndex.get(page.pageIndex);
+    const existingMessage = await fetchTrackedCategoryPageMessage(client, profileChannel, existingPage);
+    const message = await sendOrEditProfilePage(client, {
+      profileChannel,
+      existingMessage,
+      page,
+      guildId,
+      categoryId,
+      reason
+    });
+
+    keptMessageIds.push(message.id);
+    client.db.vcProfiles.upsertCategoryPage({
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      pageIndex: page.pageIndex,
+      messageId: message.id
+    });
+    client.logger.info('vc profile page db upserted', {
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      pageIndex: page.pageIndex,
+      messageId: message.id,
+      reason
+    });
+  }
+
+  if (keptMessageIds[0]) {
     client.db.vcProfiles.upsertCategoryMessage({
       guildId,
       categoryId,
       profileChannelId: profileChannel.id,
-      messageId: existingMessage.id
+      messageId: keptMessageIds[0]
     });
-    client.logger.info('vc profile existing card edited', {
+  }
+
+  for (const pageRecord of existingPages) {
+    if (Number(pageRecord.pageIndex) < pages.length) {
+      continue;
+    }
+    const message = await profileChannel.messages.fetch(pageRecord.messageId).catch(() => null);
+    if (message) {
+      try {
+        await deleteMessageIfExists(message);
+        client.logger.info('vc profile surplus page deleted', {
+          guildId,
+          categoryId,
+          profileChannelId: profileChannel.id,
+          pageIndex: pageRecord.pageIndex,
+          messageId: pageRecord.messageId,
+          reason
+        });
+      } catch (error) {
+        client.logger.warn('vc profile duplicate cleanup skipped', {
+          guildId,
+          categoryId,
+          profileChannelId: profileChannel.id,
+          pageIndex: pageRecord.pageIndex,
+          messageId: pageRecord.messageId,
+          reason: 'surplus_page_delete_failed',
+          error: error.message
+        });
+      }
+    }
+    const deletedRows = client.db.vcProfiles.deleteCategoryPage({
       guildId,
       categoryId,
       profileChannelId: profileChannel.id,
-      messageId: existingMessage.id,
-      activeVoiceChannelIds: snapshot.activeChannels.map((channel) => channel.id),
-      memberCount: snapshot.members.length,
-      reason
+      pageIndex: pageRecord.pageIndex
     });
-    await cleanupDuplicateCategoryCards(client, {
+    client.logger.info('vc profile page db deleted', {
       guildId,
       categoryId,
-      profileChannel,
-      mapping,
-      keepMessageId: existingMessage.id,
-      reason
+      profileChannelId: profileChannel.id,
+      pageIndex: pageRecord.pageIndex,
+      deletedRows,
+      reason: `${reason}_surplus_page`
     });
-    return;
   }
+
+  client.db.vcProfiles.deleteCategoryPagesFromIndex({
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id,
+    pageIndex: pages.length
+  });
 
   await cleanupDuplicateCategoryCards(client, {
     guildId,
     categoryId,
     profileChannel,
     mapping,
-    keepMessageId: null,
-    includeTracked: true,
-    reason: `${reason}_before_create`
-  });
-
-  const latestAfterCleanup = client.db.vcProfiles.getCategoryMessage({
-    guildId,
-    categoryId,
-    profileChannelId: profileChannel.id
-  });
-  const recoveredMessage = await fetchTrackedCategoryMessage(client, profileChannel, latestAfterCleanup);
-  if (recoveredMessage) {
-    await recoveredMessage.edit(payload);
-    client.db.vcProfiles.upsertCategoryMessage({
-      guildId,
-      categoryId,
-      profileChannelId: profileChannel.id,
-      messageId: recoveredMessage.id
-    });
-    client.logger.info('vc profile existing card edited', {
-      guildId,
-      categoryId,
-      profileChannelId: profileChannel.id,
-      messageId: recoveredMessage.id,
-      recovered: true,
-      activeVoiceChannelIds: snapshot.activeChannels.map((channel) => channel.id),
-      memberCount: snapshot.members.length,
-      reason
-    });
-    return;
-  }
-
-  const sentMessage = await profileChannel.send(payload);
-  client.db.vcProfiles.upsertCategoryMessage({
-    guildId,
-    categoryId,
-    profileChannelId: profileChannel.id,
-    messageId: sentMessage.id
-  });
-  client.logger.info('vc profile new card created', {
-    guildId,
-    categoryId,
-    profileChannelId: profileChannel.id,
-    messageId: sentMessage.id,
-    activeVoiceChannelIds: snapshot.activeChannels.map((channel) => channel.id),
-    memberCount: snapshot.members.length,
+    keepMessageIds: keptMessageIds,
     reason
   });
 }
