@@ -125,7 +125,46 @@ function addImageIfPresent(container, firstImageUrl) {
   );
 }
 
-function addMediaIfPresent(container, post) {
+function buildMediaGalleryItem(item, logger = null, context = {}) {
+  const mediaItem = new MediaGalleryItemBuilder().setURL(item.url);
+  if (item.description) {
+    mediaItem.setDescription(item.description);
+  }
+
+  if (item.spoiler === true || item.isSpoiler === true) {
+    const supportsSpoiler = typeof mediaItem.setSpoiler === 'function';
+    logger?.info?.('media gallery spoiler capability detected', {
+      ...context,
+      mediaUrl: item.url,
+      supportsSetSpoiler: supportsSpoiler
+    });
+
+    if (supportsSpoiler) {
+      mediaItem.setSpoiler(true);
+      const payload = mediaItem.toJSON();
+      logger?.info?.('media gallery spoiler item payload', {
+        ...context,
+        mediaUrl: item.url,
+        payload
+      });
+      logger?.info?.('spoiler media gallery item marked spoiler', {
+        ...context,
+        mediaUrl: item.url,
+        spoiler: payload.spoiler === true
+      });
+    } else {
+      logger?.warn?.('spoiler media gallery unsupported fallback', {
+        ...context,
+        mediaUrl: item.url,
+        fallback: 'media_gallery_item_without_spoiler_setter'
+      });
+    }
+  }
+
+  return mediaItem;
+}
+
+function addMediaIfPresent(container, post, logger = null) {
   const explicitMediaGalleryItems = Array.isArray(post.mediaGalleryItems)
     ? post.mediaGalleryItems.filter((item) => item?.url)
     : [];
@@ -162,11 +201,9 @@ function addMediaIfPresent(container, post) {
   const limitedItems = galleryItems.slice(0, MAX_MEDIA_ITEMS);
 
   for (const item of limitedItems) {
-    const mediaItem = new MediaGalleryItemBuilder().setURL(item.url);
-    if (item.description) {
-      mediaItem.setDescription(item.description);
-    }
-    gallery.addItems(mediaItem);
+    gallery.addItems(buildMediaGalleryItem(item, logger, {
+      sourceMessageId: post.messageId || null
+    }));
   }
 
   container.addMediaGalleryComponents(gallery);
@@ -178,11 +215,26 @@ function addMediaIfPresent(container, post) {
   }
 }
 
-function addFileComponentsIfPresent(container, post) {
+function addFileComponentsIfPresent(container, post, logger = null) {
   const fileComponentUrls = Array.isArray(post.fileComponentUrls) ? post.fileComponentUrls : [];
 
-  for (const fileUrl of fileComponentUrls) {
-    container.addFileComponents(new FileBuilder().setURL(fileUrl));
+  for (const fileEntry of fileComponentUrls) {
+    const fileUrl = typeof fileEntry === 'string' ? fileEntry : fileEntry?.url;
+    if (!fileUrl) {
+      continue;
+    }
+
+    const file = new FileBuilder().setURL(fileUrl);
+    if (fileEntry?.spoiler === true && typeof file.setSpoiler === 'function') {
+      file.setSpoiler(true);
+      logger?.info?.('spoiler attachment standard file fallback', {
+        sourceMessageId: post.messageId || null,
+        fileUrl,
+        name: fileEntry.name || null,
+        payload: file.toJSON()
+      });
+    }
+    container.addFileComponents(file);
   }
 }
 
@@ -418,7 +470,7 @@ function addAttachmentNamesSection(container, post, { showOnlyAsFallback = false
   return true;
 }
 
-function buildTweetTimelineMessage({ post, config }) {
+function buildTweetTimelineMessage({ post, config, logger = null }) {
   const container = createBaseContainer(post.accentColor || ACCENT_COLORS.timeline);
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
   const body = formatPrimaryTweetBody(trimmedContent);
@@ -448,7 +500,7 @@ function buildTweetTimelineMessage({ post, config }) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent('（本文はまだありません）'));
   }
   addBotHashtagSection(container, post);
-  addMediaIfPresent(container, post);
+  addMediaIfPresent(container, post, logger);
   addMusicLinkPreviewIfPresent(container, post);
   if (!post.musicLink) {
     addSocialPreviewIfPresent(
@@ -457,7 +509,7 @@ function buildTweetTimelineMessage({ post, config }) {
       primaryMediaUrls
     );
   }
-  addFileComponentsIfPresent(container, post);
+  addFileComponentsIfPresent(container, post, logger);
   if (post.hasMoreDownloadableAttachments) {
     container.addTextDisplayComponents(
       new TextDisplayBuilder().setContent('他にも添付ファイルがあります')
@@ -475,7 +527,7 @@ function buildTweetTimelineMessage({ post, config }) {
   };
 }
 
-function buildQuestionTimelineMessage({ post, config }) {
+function buildQuestionTimelineMessage({ post, config, logger = null }) {
   const accentColor = post.isResolved ? ACCENT_COLORS.questionResolved : ACCENT_COLORS.question;
   const container = createBaseContainer(accentColor);
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
@@ -522,13 +574,13 @@ function buildQuestionTimelineMessage({ post, config }) {
       new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
     );
   }
-  addMediaIfPresent(container, post);
+  addMediaIfPresent(container, post, logger);
   addSocialPreviewIfPresent(
     container,
     post.socialPreview,
     primaryMediaUrls
   );
-  addFileComponentsIfPresent(container, post);
+  addFileComponentsIfPresent(container, post, logger);
   if (post.hasMoreDownloadableAttachments) {
     container.addTextDisplayComponents(
       new TextDisplayBuilder().setContent('他にも添付ファイルがあります')
@@ -546,7 +598,7 @@ function buildQuestionTimelineMessage({ post, config }) {
   };
 }
 
-function buildKnowledgeTimelineMessage({ post, config }) {
+function buildKnowledgeTimelineMessage({ post, config, logger = null }) {
   const container = createBaseContainer(ACCENT_COLORS.knowledge);
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
   const body = trimmedContent || null;
@@ -589,9 +641,9 @@ function buildKnowledgeTimelineMessage({ post, config }) {
   if (body && buildAttachmentFileNameBlock(post)) {
     addAttachmentNamesSection(container, post);
   }
-  addMediaIfPresent(container, post);
+  addMediaIfPresent(container, post, logger);
   addSocialPreviewIfPresent(container, post.socialPreview, primaryMediaUrls);
-  addFileComponentsIfPresent(container, post);
+  addFileComponentsIfPresent(container, post, logger);
   if (post.hasMoreDownloadableAttachments) {
     container.addTextDisplayComponents(
       new TextDisplayBuilder().setContent('他にも添付ファイルがあります')
@@ -609,17 +661,17 @@ function buildKnowledgeTimelineMessage({ post, config }) {
   };
 }
 
-function buildTimelineMessage({ post, config, forumType }) {
+function buildTimelineMessage({ post, config, forumType, logger = null }) {
   if (forumType === 'question') {
-    return buildQuestionTimelineMessage({ post, config });
+    return buildQuestionTimelineMessage({ post, config, logger });
   }
 
   if (forumType === 'knowledge') {
-    return buildKnowledgeTimelineMessage({ post, config });
+    return buildKnowledgeTimelineMessage({ post, config, logger });
   }
 
   return {
-    ...buildTweetTimelineMessage({ post, config })
+    ...buildTweetTimelineMessage({ post, config, logger })
   };
 }
 

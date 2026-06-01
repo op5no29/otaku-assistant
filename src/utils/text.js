@@ -1,3 +1,5 @@
+const { MessageFlags } = require('discord.js');
+
 function truncateText(value, maxLength) {
   if (!value || value.length <= maxLength) {
     return value;
@@ -8,9 +10,55 @@ function truncateText(value, maxLength) {
 
 const SILENT_CONTROL_TOKEN_PATTERN = /(^|[\s　])@silent(?=$|[\s　])/u;
 const SILENT_CONTROL_TOKEN_GLOBAL_PATTERN = /(^|[\s　])@silent(?=$|[\s　])/gu;
+const SUPPRESS_NOTIFICATIONS_FLAG = 1 << 12;
 
 function hasSilentControlToken(content) {
   return SILENT_CONTROL_TOKEN_PATTERN.test(String(content || ''));
+}
+
+function getMessageFlagsBitfield(message) {
+  const rawFlags = message?.flags;
+  const rawBitfield = rawFlags?.bitfield ?? rawFlags ?? 0;
+  const bitfield = Number(rawBitfield);
+  return Number.isFinite(bitfield) ? bitfield : 0;
+}
+
+function hasSilentMessageFlag(message) {
+  if (!message) {
+    return false;
+  }
+
+  if (typeof message.flags?.has === 'function' && MessageFlags?.SuppressNotifications != null) {
+    try {
+      if (message.flags.has(MessageFlags.SuppressNotifications)) {
+        return true;
+      }
+    } catch {
+      // Fall through to the raw bitfield check below.
+    }
+  }
+
+  const bitfield = getMessageFlagsBitfield(message);
+  return (bitfield & SUPPRESS_NOTIFICATIONS_FLAG) === SUPPRESS_NOTIFICATIONS_FLAG;
+}
+
+function getSilentRelayControl(messageOrContent) {
+  const isMessageLike = messageOrContent && typeof messageOrContent === 'object';
+  const content = isMessageLike ? messageOrContent.content : messageOrContent;
+  const token = hasSilentControlToken(content || '');
+  const flag = isMessageLike ? hasSilentMessageFlag(messageOrContent) : false;
+  const flagsBitfield = isMessageLike ? getMessageFlagsBitfield(messageOrContent) : 0;
+
+  return {
+    silent: token || flag,
+    token,
+    flag,
+    flagsBitfield
+  };
+}
+
+function hasSilentRelayControl(messageOrContent) {
+  return getSilentRelayControl(messageOrContent).silent;
 }
 
 function stripSilentControlToken(content) {
@@ -670,6 +718,10 @@ function restoreCustomEmojiTokens(content, guild) {
 module.exports = {
   truncateText,
   hasSilentControlToken,
+  hasSilentMessageFlag,
+  hasSilentRelayControl,
+  getSilentRelayControl,
+  getMessageFlagsBitfield,
   stripSilentControlToken,
   parseBotHashtagRoutes,
   parseGlobalHashtagRoutes,

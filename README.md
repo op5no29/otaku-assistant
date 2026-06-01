@@ -1,412 +1,422 @@
 # Otaku Assistant
 
-Otaku Assistant is a Discord bot for a Japanese creator community. Version 1 focuses on relaying selected forum posts to a timeline channel and handling question resolution inside forum threads.
+Otaku Assistant is a Discord community assistant bot built with Node.js, discord.js, SQLite, and Discord Components V2.
 
-Credits: the timeline card direction is inspired by Gnu Assistant.
+It was originally built for a Japanese creator community, but the repository is public and can be configured for other Discord servers. It helps a server turn everyday posts into organized timeline cards, route tagged posts to topic channels, manage anime discussion cards and reviews, show voice-channel profile cards, and run lightweight welcome/self-introduction workflows.
 
-## Features
+The bot is systemd-compatible and stores its local state in SQLite.
 
-- Relay question thread starters, tweet-thread messages, and knowledge-thread starters from configured forum channels to the timeline channel
-- Sync edited tweet-thread messages back to the existing timeline card
-- Route tweet-thread posts with bot-specific `##` hashtags to additional channels
-- Build timeline cards with pure Discord Components V2 using `MessageFlags.IsComponentsV2`
-- Post the official entrance guide as editable Components V2 cards with channel move buttons
-- Match the existing "Gnu Assistant" style with compact Components V2 cards, original text, jump link, and first image or video
-- Generate a thumbnail preview for video attachments when `ffmpeg` is available, with graceful fallback to download-only when it is not
-- Re-upload previewable attachments such as audio, video, and PDF files up to a safe size limit so Discord can show native file UI when possible
-- Mirror Discord reply relationships into relayed timeline copies when the referenced source message was already relayed
-- Prevent duplicate relays by storing processed thread IDs and tweet message IDs in SQLite
-- Support `/resolve` and `/unresolve` inside watched question forum threads
-- Toggle question status forum tags between `受付中` and `解決済み`
-- Keep future extension points ready for unanswered-question reminders and profile registration, while supporting category-based VC profile cards
-- Support Discord-side operational maintenance with `/maintenance status`, `/maintenance portal`, and `/maintenance restart`
+## Main Features
+
+- Timeline relay from configured personal/tweet forum threads.
+- Hashtag route relay for normal messages, thread messages, and replies:
+  - `##技術` / `##tool` / `##開発`
+  - `##いい映像`
+  - `##いい音楽`
+  - `##アニメ` / `##anime`
+  - `##飯` / `##food`
+- Post-hoc hashtag routing: reply to an existing message with route tags and the bot routes the original message.
+- Edit-based route adding: add route tags by editing a message; only missing destinations are created.
+- `@silent` control token to suppress timeline/route relay for a post.
+- Spoiler attachment preservation for relayed images/files where Discord supports it.
+- Anime system:
+  - Annict metadata provider.
+  - AniList read-only image fallback.
+  - Anime parent cards in the anime channel.
+  - Per-anime discussion threads.
+  - Interested/watched reactions.
+  - Discord-local reviews and review cards.
+  - Optional review milestone roles.
+- VC profile cards:
+  - Show users currently in configured voice-channel categories.
+  - Pull intro profile text/images from the self-introduction channel.
+  - Per-channel accent colors.
+  - Periodic reconciliation to clean stale cards.
+- Intro/self-introduction system:
+  - Tracks each user's first valid intro post.
+  - Intro reactions.
+  - No-intro DM reminders via queue/state tables.
+- Welcome DM:
+  - `welcome_join` prompt for new members.
+  - One-time send state in SQLite.
+- Question resolver:
+  - `/resolve` and `/unresolve`.
+  - Thread title/tag sync for open/resolved state.
+- Welcome reactions / intro reactions.
+- Optional LLM reply and user-memory features through local Ollama.
 
 ## Requirements
 
-- Node.js 20 or newer recommended
-- Discord bot token and guild application
-- `ffmpeg` optional for video thumbnail generation
-- `ODESLI_API_KEY` optional for Songlink / Odesli universal music links
+- Node.js 20 or newer recommended.
+- npm.
+- SQLite support through `better-sqlite3`.
+- A Discord application and bot token.
+- A Discord server where you can invite the bot and register guild slash commands.
+- Optional: Annict API token for anime metadata.
+- Optional: local Ollama server for LLM features.
+- Optional: `ffmpeg` for richer video thumbnails.
+- Optional: Odesli API key for richer music link previews.
 
-## Project Structure
+Required Discord gateway intents are defined in [src/client.js](src/client.js):
 
-```text
-otaku-assistant/
-  package.json
-  .env.example
-  config.example.json
-  README.md
-  scripts/
-    check.js
-  src/
-    index.js
-    client.js
-    registerCommands.js
-    config/
-      loadConfig.js
-    commands/
-      index.js
-      resolve.js
-      unresolve.js
-      profile.js
-    events/
-      ready.js
-      threadCreate.js
-      messageCreate.js
-      messageUpdate.js
-      interactionCreate.js
-      voiceStateUpdate.js
-    modules/
-      timelineRelay/
-        index.js
-        buildTimelineMessage.js
-        extractFirstPost.js
-      questionResolver/
-        index.js
-        resolveThread.js
-      questionWatcher/
-        index.js
-      vcProfile/
-        buildProfileMessage.js
-        findLatestIntroMessage.js
-        index.js
-    services/
-      discordLinks.js
-      logger.js
-    db/
-      database.js
-      migrations.js
-    utils/
-      text.js
-      permissions.js
-```
+- Guilds
+- GuildMembers
+- GuildMessages
+- GuildMessageReactions
+- DirectMessages
+- MessageContent
+- GuildVoiceStates
 
-## Discord Developer Portal Setup
+Enable the matching privileged intents in the Discord Developer Portal, especially `Message Content Intent` and `Server Members Intent`.
 
-1. Open the Discord Developer Portal and create a new application named `Otaku Assistant`.
-2. In `Bot`, create a bot user and copy the token into `.env` as `DISCORD_TOKEN`.
-3. In `OAuth2 > General`, copy the `Application ID` into `.env` as `CLIENT_ID`.
-4. Enable these Privileged Gateway Intents in `Bot`:
-   - `MESSAGE CONTENT INTENT`
-   - `SERVER MEMBERS INTENT` is not required for v1
-5. Under `OAuth2 > URL Generator`, select scopes:
-   - `bot`
-   - `applications.commands`
-6. Select bot permissions:
-   - `View Channels`
-   - `Send Messages`
-   - `Attach Files`
-   - `Read Message History`
-   - `Manage Threads`
-   - `Use Slash Commands`
-7. Open the generated invite URL, choose your server, and authorize the bot.
-
-## Required Bot Permissions
-
-- `View Channels`
-- `Send Messages`
-- `Attach Files`
-- `Read Message History`
-- `Manage Threads`
-- `Use Slash Commands`
-
-## Local Setup
-
-1. Move into the project directory:
-   ```bash
-   cd otaku-assistant
-   ```
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-3. Create `.env` from the example:
-   ```bash
-   cp .env.example .env
-   ```
-4. Create `config.json` from the example:
-   ```bash
-   cp config.example.json config.json
-   ```
-5. Fill in `.env` with:
-   - `DISCORD_TOKEN`
-   - `CLIENT_ID`
-   - `GUILD_ID`
-   - `ODESLI_API_KEY` optional
-6. Fill in `config.json` with your actual channel IDs and role IDs.
-7. Tweet forum relay works from `messageCreate` inside watched tweet threads, while question and knowledge starter relay works from `threadCreate`.
-8. Register slash commands:
-   ```bash
-   npm run register-commands
-   ```
-9. Start the bot locally:
-   ```bash
-   npm run dev
-   ```
-
-Optional for better video previews:
+## Installation
 
 ```bash
-brew install ffmpeg
+git clone https://github.com/op5no29/otaku-assistant.git
+cd otaku-assistant
+npm ci
+cp .env.example .env
+cp config.example.json config.json
 ```
 
-If `ffmpeg` is missing, the bot falls back to the `添付動画をダウンロード` button without crashing.
-Previewable attachment re-upload uses `mediaRelay.maxReuploadBytes` from `config.json` and defaults to about 25 MB per file; larger files fall back to filename display and download buttons.
+Then edit `.env` and `config.json` for your server.
 
-## How To Get Channel IDs
+Check the project:
 
-1. In Discord, open `User Settings > Advanced` and enable `Developer Mode`.
-2. Right-click each target channel and choose `Copy Channel ID`.
-3. Paste IDs into `config.json`:
-   - `entranceChannelId`: `案内 / Entrance`
-   - `timelineChannelId`: `👀・タイムライン`
-   - `introChannelId`: `👤・自己紹介`
-   - `watchedForums.question`: each `❓・質問場所` forum channel ID
-   - `watchedForums.tweet`: each `💬・つぶやき` forum channel ID
-   - `watchedForums.knowledge`: each `知りたいこと` forum channel ID
-   - `questionForumTags`: `受付中` / `解決済み` tag IDs for each watched question forum
-   - `botHashtagRoutes`: bot-specific `##` hashtags and their relay destination channels
-4. For VC profile display, copy only the profile text channel IDs into `voiceProfileChannels`. The bot resolves the parent category automatically on startup.
-5. `/resolve` and `/unresolve` currently allow only the original question author or a user with Administrator permission. `moderatorRoleIds` is reserved for future use.
+```bash
+npm run check
+```
 
-Example:
+Register guild slash commands:
+
+```bash
+npm run register-commands
+```
+
+Start locally:
+
+```bash
+npm start
+```
+
+For development with auto-restart:
+
+```bash
+npm run dev
+```
+
+## .env Setup
+
+Create `.env` from [.env.example](.env.example). Do not commit `.env`.
+
+```env
+DISCORD_TOKEN=YOUR_DISCORD_BOT_TOKEN
+CLIENT_ID=YOUR_DISCORD_APPLICATION_ID
+GUILD_ID=YOUR_DISCORD_SERVER_ID
+NODE_ENV=production
+ANNICT_ACCESS_TOKEN=YOUR_ANNICT_ACCESS_TOKEN
+ODESLI_API_KEY=
+OLLAMA_BASE_URL=http://127.0.0.1:11434
+OLLAMA_MODEL=gemma3:4b
+```
+
+- `DISCORD_TOKEN`: Bot token from the Discord Developer Portal.
+- `CLIENT_ID`: Discord application/client ID.
+- `GUILD_ID`: Target server ID. Slash commands are registered as guild commands.
+- `ANNICT_ACCESS_TOKEN`: Optional but recommended for anime features. Used read-only.
+- `ODESLI_API_KEY`: Optional Songlink/Odesli key for music links.
+- `OLLAMA_BASE_URL` / `OLLAMA_MODEL`: Optional local LLM settings.
+
+## config.json Setup
+
+Copy [config.example.json](config.example.json) to `config.json` and replace every `YOUR_*` placeholder with your own server's channel, forum, tag, role, and user IDs.
+
+`config.json` is intentionally ignored by git because it contains server-specific IDs.
+
+Important sections:
+
+- `entranceChannelId`: Channel where the entrance guide can be posted.
+- `timelineChannelId`: Main timeline relay destination.
+- `introChannelId`: Self-introduction channel. Intro profiles and VC cards read from here.
+- `welcomeChannelId`: Welcome/join notification channel for welcome reactions.
+- `ops.logChannelId`: Operational log channel for startup/errors/DM reports.
+- `watchedForums.question`: Question forum channel IDs.
+- `watchedForums.tweet`: Personal/tweet forum channel IDs.
+- `watchedForums.knowledge`: Knowledge forum channel IDs.
+- `questionForumTags`: Per-question-forum open/resolved tag IDs.
+- `voiceProfileChannels`: Text channels used to display VC profile cards. The parent category of each profile channel determines which voice channels are tracked. `voiceStatusLabel` can provide a manual fallback label for that category.
+- `voiceProfile.channelAccentColors`: Optional map of voice channel ID to accent color.
+- `voiceProfile.channelStatusLabels`: Optional map of voice channel ID to a status label shown when Discord's voice channel status text is not exposed by discord.js/API.
+- `globalHashtagRoutes`: Route tags such as tech/anime/food. These can also relay to timeline.
+- `botHashtagRoutes`: Bot-specific route tags such as `##いい映像` and `##いい音楽`.
+- `vcListenOnlyChannelIds`: Channels where route tags can be listened for without normal tweet relay.
+- `anime`: Anime system settings and review role thresholds.
+- `annict`: Annict API settings. `accessTokenEnv` defaults to `ANNICT_ACCESS_TOKEN`.
+- `introDm`: No-intro reminder queue settings.
+- `welcomeDm`: One-time new-member welcome DM settings.
+- `mediaRelay`: Attachment re-upload limits and temp directory.
+- `twitterMedia`: Link/media preview resolver options.
+- `llm*` / `ollama*`: Optional advanced LLM behavior.
+
+### Route Colors
+
+Routes and VC cards support optional accent colors:
 
 ```json
 {
-  "entranceChannelId": "123456789012345678",
-  "timelineChannelId": "123456789012345678",
-  "introChannelId": "234567890123456789",
-  "welcomeChannelId": "345678901234567890",
-  "welcomeReactionsMax": 5,
-  "watchedForums": {
-    "question": ["345678901234567890"],
-    "tweet": ["456789012345678901"],
-    "knowledge": ["567890123456789012"]
-  },
-  "voiceProfileChannels": [
-    {
-      "name": "通話1",
-      "profileChannelId": "678901234567890123"
-    }
-  ],
-  "timeline": {
-    "maxContentLength": 800,
-    "includeFirstImage": true,
-    "ignoreBotPosts": true
-  },
-  "voiceProfile": {
-    "ignoreBots": true
-  },
-  "mediaRelay": {
-    "maxReuploadBytes": 25000000,
-    "tempDir": "./tmp/relay-media"
-  },
-  "questions": {
-    "resolvedPrefix": "[解決済]",
-    "allowResolveBy": ["threadOwner", "administrator"],
-    "moderatorRoleIds": ["789012345678901234"]
-  },
-  "questionForumTags": {
-    "345678901234567890": {
-      "resolved": "890123456789012345",
-      "open": "901234567890123456"
-    }
-  },
   "botHashtagRoutes": {
     "いい映像": {
       "aliases": ["いい映像", "良い映像"],
       "display": "#良い映像",
-      "channelId": "012345678901234567"
+      "channelId": "YOUR_GOOD_VIDEO_CHANNEL_ID",
+      "accentColor": "#06b6d4"
+    }
+  },
+  "voiceProfile": {
+    "channelAccentColors": {
+      "YOUR_VOICE_CHANNEL_ID": "#14b8a6"
+    },
+    "channelStatusLabels": {
+      "YOUR_VOICE_CHANNEL_ID": "作業"
     }
   }
 }
 ```
 
-## Commands
-
-- `/resolve` - mark the current watched question thread as resolved
-- `/unresolve` - remove the resolved mark from the current watched question thread
-- `/guide-post` - post arbitrary plain text to the current channel or another chosen text channel (Administrator only)
-- `/maintenance backfill-question-tags` - backfill `受付中` / `解決済み` tags for existing question threads (Administrator only)
-- `/maintenance post-entrance-guide` - post or update the official Components V2 entrance guide (Administrator only)
-- `/maintenance resync-vc-profiles` - rebuild current VC profile cards (Administrator only)
-- `/maintenance reload-config` - explains that a restart is required for config reload (Administrator only)
-- `/maintenance status` - show a safe operational summary (Administrator only)
-- `/maintenance portal` - show the Discord Developer Portal link ephemerally (Administrator only)
-- `/maintenance restart` - acknowledge, log, and exit cleanly for systemd/pm2 restart (Administrator only)
-- `/maintenance setup-welcome-reactions` - post a setup message in the current channel and save up to 5 welcome reactions by reacting to it (Administrator only)
-- `/maintenance list-welcome-reactions` - show saved welcome reactions (Administrator only)
-- `/maintenance clear-welcome-reactions` - remove all saved welcome reactions (Administrator only)
-- `/maintenance backfill-welcome-reactions [limit]` - apply saved welcome reactions to recent Discord join notifications in the welcome channel (Administrator only)
-- `/maintenance llm-status` - show local Ollama LLM status, active request count, and archive counts (Administrator only)
-
-## Local Run Commands
-
-- `npm run dev` - start with `nodemon`
-- `npm run start` - start with `node`
-- `npm run register-commands` - register guild slash commands
-- `npm run check` - syntax check all project JavaScript files
-- `npm run backfill-question-tags` - apply `受付中` / `解決済み` tags to existing question threads
-- `npm run post-entrance-guide` - post or update the official Components V2 entrance guide from `content/entranceGuide.md`
-
-## Local LLM (Ollama)
-
-Otaku Assistant can answer when mentioned by using a local Ollama model only.
-
-Required `.env` values:
-
-- `OLLAMA_BASE_URL` (default: `http://127.0.0.1:11434`)
-- `OLLAMA_MODEL` (default: `gemma3:4b`)
-
-Recommended models:
-
-- `gemma3:4b`
-- `qwen3:4b`
-
-Example local setup:
-
-```bash
-ollama pull gemma3:4b
-ollama serve
-```
-
-Then mention the bot in Discord:
+When multiple route tags are present, the current priority is:
 
 ```text
-@Otaku Assistant この流れを要約して
+anime white > good-video > good-music > tech > food > default
 ```
 
-The bot archives guild messages into SQLite, posts `少女祈祷中...`, calls Ollama, and edits that temporary reply with the final answer.
+## Discord Permissions
 
-You can also pass a different guide source file:
+Grant the bot only the permissions it needs for your server. Typical permissions:
+
+- View Channels
+- Send Messages
+- Send Messages in Threads
+- Create Public Threads
+- Create Private Threads if your workflow uses them
+- Manage Threads if the bot needs to update/archive thread state
+- Add Reactions
+- Read Message History
+- Manage Messages for cleanup/deleting prompt messages
+- Manage Roles if anime review milestone roles are enabled
+- Attach Files
+- Embed Links
+- Use External Emojis if your reaction setup uses them
+- Use Slash Commands
+
+DMs are controlled by each user's privacy settings. If a user blocks server DMs, welcome/no-intro DMs will fail and the failure is recorded.
+
+## Slash Commands
+
+Register commands with:
 
 ```bash
-npm run post-entrance-guide -- path/to/final-guide.md
-```
-
-## Production deployment on VPS
-
-### 推奨: `systemd`
-
-本番 VPS では `systemd` を標準運用として推奨します。Linux 標準で、起動時自動実行、異常終了後の再起動、ログ確認が単純です。`pm2` は代替として使えます。
-
-### 必須環境変数
-
-- `DISCORD_TOKEN`
-- `CLIENT_ID`
-- `GUILD_ID`
-
-`.env` はコミットしないでください。
-
-### 初回セットアップ
-
-```bash
-cd /opt/otaku-assistant
-npm ci
-cp config.example.json config.json
-# .env を作成して DISCORD_TOKEN / CLIENT_ID / GUILD_ID を設定
-npm run check
 npm run register-commands
 ```
 
-詳細手順は `docs/deploy-vps.md` を参照してください。
+Command groups currently include:
 
-### `systemd` サービス
+- `/resolve`: Mark the current question thread resolved.
+- `/unresolve`: Remove resolved state from the current question thread.
+- `/anime`:
+  - `search`, `post`, `find`, `index`
+  - `cast`
+  - `season current`, `season next`
+  - `review`, `reviews`
+  - `my`, `profile`
+- `/intro`:
+  - DM status/test/enqueue/process commands.
+  - Guild member/profile backfill commands.
+  - Intro reaction setup/list/clear/backfill commands.
+- `/welcome`:
+  - Welcome reaction setup/list/clear/backfill commands.
+- `/maintenance`:
+  - `status`, `llm-status`, `hashtag-route-status`
+  - question tag backfill
+  - VC profile resync
+  - entrance guide post/update
+  - config/restart/portal helpers
+- `/guide-post`: Post an arbitrary guide message.
+- `/profile`: Placeholder profile command.
 
-サンプルユニットファイルは `deploy/otaku-assistant.service` にあります。VPS に合わせて `WorkingDirectory`、`EnvironmentFile`、`User` を修正してから以下へ配置してください。
+Some commands are intended for administrators or operators. Check the command handlers before exposing operational commands broadly.
 
-- `/etc/systemd/system/otaku-assistant.service`
+## Anime Provider Notes
 
-起動:
+Otaku Assistant uses Annict for Japanese anime metadata and AniList as a read-only image fallback.
+
+Important behavior:
+
+- Annict is used for metadata lookup/search.
+- AniList is used only to fill image gaps such as icon/banner fallback.
+- The bot does not write Annict records/statuses/activities/reviews.
+- The bot does not write AniList data.
+- Discord user reviews are stored locally in SQLite.
+
+Anime cards are designed around a dedicated anime channel. Normal user relay cards are blocked from being posted directly into the anime parent-card channel.
+
+## Timeline and Hashtag Routing
+
+Personal/tweet forum thread messages can be relayed to the timeline.
+
+Route tags can be placed in messages:
+
+```text
+##技術
+Useful tool link here
+```
+
+Users can also route an existing message after the fact:
+
+```text
+User A:
+自動ウェイト
+https://example.com/tool
+
+User B replies:
+##技術
+##tool
+```
+
+The bot routes User A's original message, not User B's route-tag reply.
+
+If a user adds route tags by editing a message, only new missing destinations are created.
+
+Use `@silent` to suppress relay:
+
+```text
+@silent
+今日のメモ...
+```
+
+The control token is not displayed in relayed cards.
+
+## Spoiler Attachments
+
+The relay layer detects Discord spoiler attachments through `attachment.spoiler` and `SPOILER_` filenames.
+
+When re-uploading files, the bot keeps or adds the `SPOILER_` prefix. If a spoiler image cannot be safely re-uploaded, the bot avoids turning it into a visible raw CDN MediaGallery preview and logs the fallback.
+
+Discord's spoiler rendering behavior can vary by component type and client version, so test spoiler relay in your own server before relying on it for sensitive content.
+
+## Database
+
+The SQLite database is created at:
+
+```text
+data/otaku-assistant.db
+```
+
+Migrations run automatically on startup and during `npm run check` against a temporary database.
+
+The database stores Discord IDs, message IDs, relay records, intro profiles, anime entries/reviews/statuses, DM send states, reaction setup state, and optional LLM memories.
+
+Back up the database before deployment updates:
+
+```bash
+cp data/otaku-assistant.db data/otaku-assistant.db.bak
+```
+
+Do not commit `data/*.db`; the repository `.gitignore` excludes local DB files.
+
+## Deployment with systemd
+
+Example service:
+
+```ini
+[Unit]
+Description=Otaku Assistant Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/path/to/otaku-assistant
+EnvironmentFile=/path/to/otaku-assistant/.env
+ExecStart=/usr/bin/node --max-old-space-size=256 src/index.js
+Restart=always
+RestartSec=5
+User=otaku-assistant
+Group=otaku-assistant
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Install and start:
 
 ```bash
 sudo systemctl daemon-reload
 sudo systemctl enable otaku-assistant
 sudo systemctl start otaku-assistant
-sudo systemctl status otaku-assistant
 journalctl -u otaku-assistant -f
 ```
 
-### 代替: `pm2`
+## Updating
+
+Suggested update flow:
 
 ```bash
-npm install -g pm2
-pm2 start src/index.js --name otaku-assistant
-pm2 save
-pm2 startup
-pm2 logs otaku-assistant
-```
-
-## GitHub update workflow
-
-初回は `rsync` で VPS に配置し、その後は private repository を VPS に clone して `git pull` で更新する運用を想定しています。
-
-更新手順:
-
-```bash
-cd /opt/otaku-assistant
+cd /path/to/otaku-assistant
 git pull
 npm ci --omit=dev
 npm run check
+npm run register-commands
 sudo systemctl restart otaku-assistant
-sudo systemctl status otaku-assistant --no-pager
+journalctl -u otaku-assistant -f
 ```
 
-補助スクリプト:
+Only run `npm run register-commands` when command definitions changed or after initial setup.
+
+## Safety and Privacy
+
+- Do not commit `.env`, `config.json`, SQLite DB files, or logs.
+- Server admins should disclose bot behavior to their community if needed.
+- The bot stores Discord IDs, message IDs, intro profiles, anime reviews, DM send states, and relay records in SQLite.
+- Welcome DMs and no-intro reminder DMs can be disabled in `config.json`.
+- LLM features are optional/advanced. If enabled, local message content may be sent to your configured Ollama endpoint.
+- Annict/AniList integrations are read-only in this bot.
+
+## Troubleshooting
+
+- `DISCORD_TOKEN is missing in .env`: Create `.env` from `.env.example` and fill required values.
+- `config.json not found`: Copy `config.example.json` to `config.json`.
+- Slash commands do not appear: Run `npm run register-commands` with correct `CLIENT_ID`, `GUILD_ID`, and token.
+- Bot cannot read message content: Enable Message Content Intent in the Discord Developer Portal.
+- Bot cannot DM a user: User DMs may be closed. The bot records failed DM state and logs it.
+- Bot cannot delete/update messages: Check channel permissions, especially Manage Messages and Read Message History.
+- Bot cannot create/update threads: Check thread permissions and forum/channel access.
+- Anime search cannot find a title: Annict provider coverage or naming may be limited. Add local aliases in code only when needed.
+- Anime images are missing: AniList fallback may not have a matching image.
+- Spoiler media appears visible: Discord component/client behavior may vary. Check logs for spoiler relay fallback.
+- VC card keeps stale users: Ensure GuildVoiceStates intent is enabled; periodic reconciliation should also correct stale cards.
+- VC status text does not show: discord.js/API support may not expose the status field in your runtime. Check `vc profile status text resolved` logs.
+- Native modules fail during install: `better-sqlite3` may require a working Node build toolchain on some platforms.
+
+## Development
+
+Useful commands:
 
 ```bash
-bash scripts/vps-update.sh
+npm run check
+git diff --check
+npm run register-commands
+npm start
 ```
 
-### Discord からの運用
+`npm run check` syntax-checks JavaScript files, creates a temporary SQLite DB to verify migrations, validates command option counts, and validates anime quote role config.
 
-- `/maintenance status`
-- `/maintenance portal`
-- `/maintenance restart`
+Logs are structured JSON-style records through the local logger, which makes `journalctl -u otaku-assistant -f` practical in production.
 
-`/maintenance restart` は Bot が自分で新しいプロセスを起動しません。現在のプロセスを正常終了し、`systemd` または `pm2` に再起動させます。
+When changing behavior, keep these invariants in mind:
 
-### 運用ログ
-
-`config.json` の `ops.logChannelId` を設定すると、以下を Discord の運用ログチャンネルへ通知します。
-
-- 起動完了
-- シャットダウン
-- 再起動要求
-- `unhandledRejection`
-- `uncaughtException`
-
-## Testing Checklist
-
-- Bot comes online and logs `Bot ready`
-- Creating a new thread in a watched `💬・つぶやき` forum relays to `👀・タイムライン`
-- Creating a new thread in a watched `❓・質問場所` forum relays to `👀・タイムライン`
-- Creating a new thread in a watched `知りたいこと` forum relays once to `👀・タイムライン`
-- Timeline relay renders as a Components V2 card, not an embed
-- Tweet posts containing configured bot hashtags such as `##いい映像` relay to the timeline and the configured destination channel
-- Exact bot hashtag lines are removed from the reposted body and shown separately as normalized tags such as `#良い映像`
-- `##良い音楽` / `##いい音楽` posts with supported music URLs resolve a Songlink / Odesli universal link and add an `音楽リンクを開く` button when lookup succeeds
-- Odesli lookup prefers `userCountry=JP`, then retries without country, then `userCountry=US`, and keeps the response with the richest available service links
-- Running `/resolve` inside a watched question thread renames it with `[解決済]`
-- Running `/unresolve` removes the `[解決済]` prefix
-- Creating a new watched question thread applies the `受付中` forum tag
-- Running `/resolve` switches the forum tag to `解決済み`
-- Running `/unresolve` switches the forum tag back to `受付中`
-- Posting multiple messages inside an existing watched `💬・つぶやき` thread relays each message once
-- Editing an already relayed tweet message updates the existing timeline card instead of posting a duplicate
-- Restarting the bot does not cause the same question or tweet message to relay again
-- New questions post a short public guide message inside the question thread after the timeline relay succeeds
-- The official entrance guide is stored in `content/entranceGuide.md` and posted as Components V2 cards with `チャンネルに移動` buttons
-- `/guide-post` stays a plain text admin utility and defaults to the current channel, while the official entrance guide uses Components V2
-- Each active voice channel keeps one live profile card in the profile text channel
-- Moving within the same voice category updates the affected room cards
-- Moving from `通話1` to `通話2` updates/deletes the old room card and updates/creates the new room card
-- Empty voice rooms delete their live profile card
-
-## Notes For Future Features
-
-- `src/modules/questionWatcher/` contains the placeholder entry for unanswered-question reminders
-- VC profile mapping now derives the category from each configured profile text channel's parent, so adding new voice channels inside that category does not require `config.json` changes
-- VC profile display is grouped by voice room, not by user
-- Discord does not support ephemeral messages from `threadCreate` events; question guidance is posted publicly inside the question thread instead
-- No DM guide is sent
+- Avoid relay loops.
+- Do not route bot messages.
+- Do not post normal relay cards into the anime parent-card channel.
+- Keep Annict and AniList read-only.
+- Preserve spoiler attachment behavior where Discord supports it.
+- Avoid repeated DM sends by using SQLite state.

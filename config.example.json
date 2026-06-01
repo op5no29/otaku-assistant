@@ -20,7 +20,9 @@
   "voiceProfileChannels": [
     {
       "name": "通話1",
-      "profileChannelId": "YOUR_VOICE_PROFILE_TEXT_CHANNEL_ID"
+      "profileChannelId": "YOUR_VOICE_PROFILE_TEXT_CHANNEL_ID",
+      "accentColor": "#3b82f6",
+      "voiceStatusLabel": ""
     }
   ],
   "timeline": {
@@ -35,7 +37,10 @@
   "voiceProfile": {
     "ignoreBots": true,
     "reconcileIntervalMinutes": 3,
-    "channelAccentColors": {}
+    "channelAccentColors": {},
+    "channelStatusLabels": {
+      "YOUR_VOICE_CHANNEL_ID": "作業"
+    }
   },
   "mediaRelay": {
     "maxReuploadBytes": 25000000,
@@ -90,10 +95,10 @@
   },
   "introDm": {
     "enabled": false,
-    "devTestMode": true,
-    "devUserId": "323041740963446785",
+    "devTestMode": false,
+    "devUserId": "YOUR_DEV_USER_ID",
     "introChannelId": "YOUR_INTRO_CHANNEL_ID",
-    "logChannelId": "1224747669604536385",
+    "logChannelId": "YOUR_OPS_LOG_CHANNEL_ID",
     "vcReminderCooldownDays": 7,
     "joinReminderHours": 48,
     "joinReminderQueueEnabled": true,
@@ -108,9 +113,9 @@
   "welcomeDm": {
     "enabled": false,
     "devTestMode": false,
-    "devUserId": "323041740963446785",
+    "devUserId": "YOUR_DEV_USER_ID",
     "delaySeconds": 30,
-    "logChannelId": "1224747669604536385"
+    "logChannelId": "YOUR_OPS_LOG_CHANNEL_ID"
   },
   "anime": {
     "enabled": true,
@@ -125,12 +130,12 @@
     "apiTimeoutMs": 15000,
     "apiCacheTtlHours": 24,
     "reviewRoles": [
-      { "threshold": 10, "roleId": "1504730447710519386", "name": "アニメ視聴者 Lv.1" },
-      { "threshold": 20, "roleId": "1504730443637854242", "name": "アニメ視聴者 Lv.2" },
-      { "threshold": 50, "roleId": "1504730439502532618", "name": "アニメ語り部" },
-      { "threshold": 100, "roleId": "1504730894383054918", "name": "アニメ仙人" },
-      { "threshold": 300, "roleId": "1504731042697842699", "name": "アニメソムリエ" },
-      { "threshold": 500, "roleId": "1504730319226404864", "name": "オタク" }
+      { "threshold": 10, "roleId": null, "name": "アニメ視聴者 Lv.1" },
+      { "threshold": 20, "roleId": null, "name": "アニメ視聴者 Lv.2" },
+      { "threshold": 50, "roleId": null, "name": "アニメ語り部" },
+      { "threshold": 100, "roleId": null, "name": "アニメ仙人" },
+      { "threshold": 300, "roleId": null, "name": "アニメソムリエ" },
+      { "threshold": 500, "roleId": null, "name": "オタク" }
     ]
   },
   "annict": {

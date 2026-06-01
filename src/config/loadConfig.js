@@ -144,10 +144,10 @@ function ensureIntroDmConfig(value, introChannelId = '') {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
       enabled: false,
-      devTestMode: true,
-      devUserId: '323041740963446785',
-      introChannelId: String(introChannelId || '1503672008930623508'),
-      logChannelId: '1224747669604536385',
+      devTestMode: false,
+      devUserId: '',
+      introChannelId: String(introChannelId || ''),
+      logChannelId: '',
       vcReminderCooldownDays: 7,
       joinReminderHours: 48,
       joinReminderQueueEnabled: true,
@@ -163,10 +163,10 @@ function ensureIntroDmConfig(value, introChannelId = '') {
 
   return {
     enabled: value.enabled === true,
-    devTestMode: value.devTestMode !== false,
-    devUserId: String(value.devUserId || '323041740963446785'),
-    introChannelId: String(value.introChannelId || introChannelId || '1503672008930623508'),
-    logChannelId: String(value.logChannelId || value.botLogChannelId || '1224747669604536385'),
+    devTestMode: value.devTestMode === true,
+    devUserId: String(value.devUserId || ''),
+    introChannelId: String(value.introChannelId || introChannelId || ''),
+    logChannelId: String(value.logChannelId || value.botLogChannelId || ''),
     vcReminderCooldownDays: Number(value.vcReminderCooldownDays ?? 7),
     joinReminderHours: Number(value.joinReminderHours ?? 48),
     joinReminderQueueEnabled: value.joinReminderQueueEnabled !== false,
@@ -185,22 +185,22 @@ function ensureWelcomeDmConfig(value, fallbackLogChannelId = '') {
     return {
       enabled: false,
       devTestMode: false,
-      devUserId: '323041740963446785',
+      devUserId: '',
       delaySeconds: 30,
       delayMinutes: null,
-      logChannelId: String(fallbackLogChannelId || '1224747669604536385')
+      logChannelId: String(fallbackLogChannelId || '')
     };
   }
 
   return {
     enabled: value.enabled === true,
     devTestMode: value.devTestMode === true,
-    devUserId: String(value.devUserId || '323041740963446785'),
+    devUserId: String(value.devUserId || ''),
     delaySeconds: Number(value.delaySeconds ?? (
       value.delayMinutes != null ? Number(value.delayMinutes) * 60 : 30
     )),
     delayMinutes: value.delayMinutes == null ? null : Number(value.delayMinutes),
-    logChannelId: String(value.logChannelId || value.botLogChannelId || fallbackLogChannelId || '1224747669604536385')
+    logChannelId: String(value.logChannelId || value.botLogChannelId || fallbackLogChannelId || '')
   };
 }
 
@@ -217,21 +217,34 @@ function ensureAccentColorMap(value, label) {
   );
 }
 
+function ensureStringMap(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, labelValue]) => [
+      String(key),
+      String(labelValue || '').trim()
+    ]).filter(([, labelValue]) => labelValue.length > 0)
+  );
+}
+
 function ensureAnimeConfig(value) {
   const defaultReviewRoles = [
-    { threshold: 10, roleId: '1504730447710519386', name: 'アニメ視聴者 Lv.1' },
-    { threshold: 20, roleId: '1504730443637854242', name: 'アニメ視聴者 Lv.2' },
-    { threshold: 50, roleId: '1504730439502532618', name: 'アニメ語り部' },
-    { threshold: 100, roleId: '1504730894383054918', name: 'アニメ仙人' },
-    { threshold: 300, roleId: '1504731042697842699', name: 'アニメソムリエ' },
-    { threshold: 500, roleId: '1504730319226404864', name: 'オタク' }
+    { threshold: 10, roleId: null, name: 'アニメ視聴者 Lv.1' },
+    { threshold: 20, roleId: null, name: 'アニメ視聴者 Lv.2' },
+    { threshold: 50, roleId: null, name: 'アニメ語り部' },
+    { threshold: 100, roleId: null, name: 'アニメ仙人' },
+    { threshold: 300, roleId: null, name: 'アニメソムリエ' },
+    { threshold: 500, roleId: null, name: 'オタク' }
   ];
 
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
       enabled: true,
       provider: 'annict',
-      channelId: '1504329024460296232',
+      channelId: '',
       autoPostOnCastLookup: false,
       interestEmoji: '👀',
       watchedEmoji: '✅',
@@ -247,7 +260,7 @@ function ensureAnimeConfig(value) {
   return {
     enabled: value.enabled !== false,
     provider: String(value.provider || 'annict'),
-    channelId: String(value.channelId || '1504329024460296232'),
+    channelId: String(value.channelId || ''),
     autoPostOnCastLookup: value.autoPostOnCastLookup === true,
     interestEmoji: String(value.interestEmoji || '👀'),
     watchedEmoji: String(value.watchedEmoji || '✅'),
@@ -322,7 +335,8 @@ function loadConfig(configPath) {
       ? parsed.voiceProfileChannels.map((entry) => ({
           name: String(entry.name || ''),
           profileChannelId: String(entry.profileChannelId || ''),
-          accentColor: parseAccentColor(entry.accentColor, null)
+          accentColor: parseAccentColor(entry.accentColor, null),
+          voiceStatusLabel: String(entry.voiceStatusLabel || entry.statusText || '').trim()
         }))
       : [],
     timeline: {
@@ -337,7 +351,8 @@ function loadConfig(configPath) {
     voiceProfile: {
       ignoreBots: parsed.voiceProfile?.ignoreBots !== false,
       reconcileIntervalMinutes: Number(parsed.voiceProfile?.reconcileIntervalMinutes ?? 3),
-      channelAccentColors: ensureAccentColorMap(parsed.voiceProfile?.channelAccentColors, 'voiceProfile.channelAccentColors')
+      channelAccentColors: ensureAccentColorMap(parsed.voiceProfile?.channelAccentColors, 'voiceProfile.channelAccentColors'),
+      channelStatusLabels: ensureStringMap(parsed.voiceProfile?.channelStatusLabels || parsed.voiceProfile?.statusText, 'voiceProfile.channelStatusLabels')
     },
     mediaRelay: {
       maxReuploadBytes: Number(parsed.mediaRelay?.maxReuploadBytes ?? 25_000_000),

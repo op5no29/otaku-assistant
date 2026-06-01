@@ -264,7 +264,8 @@ async function prepareAttachmentRelay(post, config, logger) {
         });
         mediaGalleryItems.push({
           url: attachmentUrl,
-          description: attachment.displayName
+          description: attachment.displayName,
+          spoiler: attachment.isSpoiler === true
         });
         logger.info('media gallery spoiler item', {
           ...context,
@@ -291,7 +292,8 @@ async function prepareAttachmentRelay(post, config, logger) {
         });
         mediaGalleryItems.push({
           url: attachmentUrl,
-          description: attachment.displayName
+          description: attachment.displayName,
+          spoiler: attachment.isSpoiler === true
         });
         logger.info('media gallery spoiler item', {
           ...context,
@@ -311,7 +313,11 @@ async function prepareAttachmentRelay(post, config, logger) {
           attachment: filePath,
           name: attachment.uploadFileName
         });
-        fileComponentUrls.push(`attachment://${attachment.uploadFileName}`);
+        fileComponentUrls.push({
+          url: `attachment://${attachment.uploadFileName}`,
+          spoiler: attachment.isSpoiler === true,
+          name: attachment.displayName
+        });
         logger.info('upload filename spoiler adjusted', {
           ...context,
           uploadFileName: attachment.uploadFileName,

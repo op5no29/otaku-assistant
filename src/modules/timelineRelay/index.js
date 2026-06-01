@@ -8,7 +8,7 @@ const { enrichPostWithMusicLink } = require('./musicLinks');
 const { applyQuestionStatusTag } = require('../questionResolver/threadTags');
 const { getRecentArchivedMessages } = require('../messageArchive');
 const { getMessageJumpUrl } = require('../../services/discordLinks');
-const { hasSilentControlToken, parseRelayHashtagPrefixes } = require('../../utils/text');
+const { getSilentRelayControl, parseRelayHashtagPrefixes } = require('../../utils/text');
 const { resolveRouteAccentColor } = require('../../utils/accentColors');
 const { handleAnimeHashtagPost } = require('../anime/hashtagIntegration');
 
@@ -88,6 +88,34 @@ function getRouteScanSkipReason(message, config) {
   return null;
 }
 
+function buildSilentRelayLogContext(message, state, extra = {}) {
+  return {
+    sourceMessageId: message?.id || null,
+    sourceChannelId: message?.channelId || null,
+    parentId: String(message?.channel?.parentId || ''),
+    silentTokenDetected: state.token === true,
+    silentFlagDetected: state.flag === true,
+    messageFlagsBitfield: state.flagsBitfield,
+    ...extra
+  };
+}
+
+function logSilentRelaySkip(logger, logBaseName, message, extra = {}, options = {}) {
+  const state = getSilentRelayControl(message);
+  if (!state.silent) {
+    return false;
+  }
+
+  const context = buildSilentRelayLogContext(message, state, extra);
+  if (state.flag && options.logFlagDetected !== false) {
+    logger.info('silent message flag detected', context);
+  }
+
+  const reason = state.flag ? 'flag' : 'token';
+  logger.info(`${logBaseName} ${reason}`, context);
+  return true;
+}
+
 async function buildTimelinePayload(post, { config, forumType, logger }) {
   const twitterResolved = await resolveTwitterMedia(post, config, logger);
   const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, logger);
@@ -125,7 +153,8 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
     payload: buildTimelineMessage({
       post: attachmentPrepared.post,
       config,
-      forumType
+      forumType,
+      logger
     }),
     cleanup: async () => {
       await attachmentPrepared.cleanup();
@@ -495,7 +524,8 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
     const mergePayload = buildTimelineMessage({
       post: mergedPost,
       config,
-      forumType: 'tweet'
+      forumType: 'tweet',
+      logger
     });
     await timelineMessage.edit({
       ...mergePayload,
@@ -1053,12 +1083,9 @@ async function relayTweetMessage(message, { config, db, logger }) {
     return;
   }
 
-  if (hasSilentControlToken(message.content || '')) {
-    logger.info('timeline relay skipped silent token', {
-      sourceMessageId: message.id,
-      sourceChannelId: message.channelId,
-      parentId: String(message.channel.parentId || '')
-    });
+  if (logSilentRelaySkip(logger, 'timeline relay skipped silent', message, {
+    parentId: String(message.channel.parentId || '')
+  })) {
     return;
   }
 
@@ -1275,13 +1302,10 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
     return;
   }
 
-  if (hasSilentControlToken(message.content || '')) {
-    logger.info('timeline relay skipped silent token', {
-      sourceMessageId: message.id,
-      sourceChannelId: message.channelId,
-      parentId: String(message.channel.parentId || ''),
-      update: true
-    });
+  if (logSilentRelaySkip(logger, 'timeline relay skipped silent', message, {
+    parentId: String(message.channel.parentId || ''),
+    update: true
+  })) {
     return;
   }
 
@@ -1626,12 +1650,10 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
   const hasDoublePrefix = content.split(/\r?\n/).some((line) => line.trim().startsWith('##'));
   const isTweetThread = Boolean(message.channel?.isThread?.() && getForumType(message.channel.parentId, config) === 'tweet');
 
-  if (hasSilentControlToken(content)) {
-    logger.info('route relay skipped silent token', {
-      sourceMessageId: message.id,
-      sourceChannelId,
-      parentId: String(message.channel?.parentId || '')
-    });
+  if (logSilentRelaySkip(logger, 'route relay skipped silent', message, {
+    sourceChannelId,
+    parentId: String(message.channel?.parentId || '')
+  })) {
     return;
   }
 
@@ -1972,19 +1994,14 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
     return false;
   }
 
-  if (hasSilentControlToken(message.content || '')) {
-    logger.info('posthoc relay skipped silent token', {
-      sourceMessageId: message.id,
-      sourceChannelId: message.channelId,
-      replyTargetMessageId: message.reference.messageId,
-      tokenLocation: 'reply'
-    });
-    logger.info('route relay skipped silent token', {
-      sourceMessageId: message.id,
-      sourceChannelId: message.channelId,
+  if (logSilentRelaySkip(logger, 'posthoc relay skipped silent', message, {
+    replyTargetMessageId: message.reference.messageId,
+    tokenLocation: 'reply'
+  })) {
+    logSilentRelaySkip(logger, 'route relay skipped silent', message, {
       replyTargetMessageId: message.reference.messageId,
       posthoc: true
-    });
+    }, { logFlagDetected: false });
     return true;
   }
 
@@ -2019,20 +2036,17 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
     replyTargetChannelId: targetMessage.channelId
   });
 
-  if (hasSilentControlToken(targetMessage.content || '')) {
-    logger.info('posthoc relay skipped silent token', {
-      sourceMessageId: message.id,
-      sourceChannelId: message.channelId,
-      replyTargetMessageId: targetMessage.id,
-      replyTargetChannelId: targetMessage.channelId,
-      tokenLocation: 'referenced_message'
-    });
-    logger.info('route relay skipped silent token', {
-      sourceMessageId: targetMessage.id,
-      sourceChannelId: targetMessage.channelId,
+  if (logSilentRelaySkip(logger, 'posthoc relay skipped silent', targetMessage, {
+    routedByMessageId: message.id,
+    routedByChannelId: message.channelId,
+    replyTargetMessageId: targetMessage.id,
+    replyTargetChannelId: targetMessage.channelId,
+    tokenLocation: 'referenced_message'
+  })) {
+    logSilentRelaySkip(logger, 'route relay skipped silent', targetMessage, {
       routedByMessageId: message.id,
       posthoc: true
-    });
+    }, { logFlagDetected: false });
     return true;
   }
 
@@ -2266,12 +2280,12 @@ async function handleRouteAddedOnMessageUpdate(oldMessage, newMessage, { config,
 
   const oldContent = String(oldMessage?.content || '');
   const newContent = String(message.content || '');
-  if (hasSilentControlToken(newContent)) {
-    logger.info('route relay skipped silent token', {
-      sourceMessageId: message.id,
-      sourceChannelId: message.channelId,
+  if (logSilentRelaySkip(logger, 'message edit route skipped silent', message, {
+    update: true
+  })) {
+    logSilentRelaySkip(logger, 'route relay skipped silent', message, {
       update: true
-    });
+    }, { logFlagDetected: false });
     return;
   }
 

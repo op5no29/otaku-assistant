@@ -1,3 +1,4 @@
+const { Routes } = require('discord-api-types/v10');
 const { buildProfileMessage } = require('./buildProfileMessage');
 const { findLatestIntroMessage } = require('./findLatestIntroMessage');
 const { resolveVcProfileAccentColor } = require('../../utils/accentColors');
@@ -33,7 +34,8 @@ async function initializeVoiceProfileMappings(client) {
         name: entry.name || profileChannel.parent?.name || profileChannel.name,
         categoryId: profileChannel.parentId,
         profileChannelId: profileChannel.id,
-        accentColor: entry.accentColor ?? null
+        accentColor: entry.accentColor ?? null,
+        voiceStatusLabel: entry.voiceStatusLabel || null
       });
     } catch (error) {
       client.logger.error('Failed to initialize VC profile mapping', {
@@ -67,7 +69,101 @@ async function getFreshVoiceChannel(guild, voiceChannelId) {
   return fetched?.isVoiceBased?.() ? fetched : null;
 }
 
-function resolveVoiceChannelStatusText(client, voiceChannel) {
+function normalizeStatusCandidate(value) {
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+
+  if (value && typeof value === 'object') {
+    return String(value.text || value.status || value.name || value.value || '').trim();
+  }
+
+  return '';
+}
+
+function pickStatusTextFromChannelLike(value) {
+  const rawCandidates = [
+    value?.status,
+    value?.voiceStatus,
+    value?.voiceStatus?.status,
+    value?.voice_status,
+    value?.voice_status?.status,
+    value?.rtcStatus,
+    value?.topic,
+    value?.data?.status,
+    value?.data?.voice_status,
+    value?.raw?.status,
+    value?.raw?.voice_status
+  ];
+
+  return rawCandidates
+    .map(normalizeStatusCandidate)
+    .find(Boolean) || null;
+}
+
+function safeObjectKeys(value) {
+  return value && typeof value === 'object' ? Object.keys(value).slice(0, 80) : [];
+}
+
+async function fetchRawVoiceChannelData(client, voiceChannel) {
+  if (!client?.rest || !voiceChannel?.id) {
+    return null;
+  }
+
+  try {
+    return await client.rest.get(Routes.channel(voiceChannel.id));
+  } catch (error) {
+    client.logger.warn('vc profile status raw inspection failed', {
+      voiceChannelId: voiceChannel.id,
+      error: error.message
+    });
+    return null;
+  }
+}
+
+function logVoiceChannelStatusInspection(client, voiceChannel, rawChannelData) {
+  const inspectionCache = client.voiceProfileStatusInspectionLogged || new Set();
+  client.voiceProfileStatusInspectionLogged = inspectionCache;
+  const cacheKey = String(voiceChannel?.id || '');
+  if (inspectionCache.has(cacheKey)) {
+    return;
+  }
+  inspectionCache.add(cacheKey);
+
+  let json = null;
+  try {
+    json = typeof voiceChannel?.toJSON === 'function' ? voiceChannel.toJSON() : null;
+  } catch {
+    json = null;
+  }
+
+  client.logger.info('vc profile status raw inspection', {
+    voiceChannelId: voiceChannel?.id || null,
+    channelType: voiceChannel?.constructor?.name || null,
+    ownPropertyNames: Object.getOwnPropertyNames(voiceChannel || {}).slice(0, 80),
+    prototypePropertyNames: Object.getOwnPropertyNames(Object.getPrototypeOf(voiceChannel || {}) || {}).slice(0, 80),
+    channelFields: {
+      status: normalizeStatusCandidate(voiceChannel?.status) || null,
+      voiceStatus: normalizeStatusCandidate(voiceChannel?.voiceStatus) || null,
+      topic: normalizeStatusCandidate(voiceChannel?.topic) || null,
+      rawPosition: voiceChannel?.rawPosition ?? null
+    },
+    toJSONKeys: safeObjectKeys(json),
+    toJSONStatusFields: {
+      status: normalizeStatusCandidate(json?.status) || null,
+      voiceStatus: normalizeStatusCandidate(json?.voiceStatus || json?.voice_status) || null,
+      topic: normalizeStatusCandidate(json?.topic) || null
+    },
+    rawRestKeys: safeObjectKeys(rawChannelData),
+    rawRestStatusFields: {
+      status: normalizeStatusCandidate(rawChannelData?.status) || null,
+      voiceStatus: normalizeStatusCandidate(rawChannelData?.voiceStatus || rawChannelData?.voice_status) || null,
+      topic: normalizeStatusCandidate(rawChannelData?.topic) || null
+    }
+  });
+}
+
+async function resolveVoiceChannelStatusText(client, voiceChannel, mapping = null) {
   const rawCandidates = [
     voiceChannel?.status,
     voiceChannel?.voiceStatus,
@@ -78,24 +174,56 @@ function resolveVoiceChannelStatusText(client, voiceChannel) {
   ];
 
   let statusText = rawCandidates
-    .map((value) => {
-      if (typeof value === 'string') {
-        return value.trim();
-      }
-      if (value && typeof value === 'object') {
-        return String(value.text || value.status || value.name || '').trim();
-      }
-      return '';
-    })
+    .map(normalizeStatusCandidate)
     .find(Boolean) || null;
 
   if (!statusText && typeof voiceChannel?.toJSON === 'function') {
     try {
       const json = voiceChannel.toJSON();
-      statusText = String(json?.status || json?.voiceStatus?.status || '').trim() || null;
+      statusText = pickStatusTextFromChannelLike(json);
     } catch {
       statusText = null;
     }
+  }
+
+  let rawChannelData = null;
+  if (!statusText) {
+    rawChannelData = await fetchRawVoiceChannelData(client, voiceChannel);
+    statusText = pickStatusTextFromChannelLike(rawChannelData);
+  }
+
+  logVoiceChannelStatusInspection(client, voiceChannel, rawChannelData);
+
+  if (statusText) {
+    client.logger.info('vc profile status text resolved from runtime', {
+      voiceChannelId: voiceChannel?.id || null,
+      statusText
+    });
+  }
+
+  if (!statusText) {
+    const configuredStatusText =
+      client.appConfig.voiceProfile?.channelStatusLabels?.[String(voiceChannel?.id || '')] ||
+      mapping?.voiceStatusLabel ||
+      null;
+
+    if (configuredStatusText) {
+      statusText = String(configuredStatusText).trim();
+      client.logger.info('vc profile status text resolved from config', {
+        voiceChannelId: voiceChannel?.id || null,
+        statusText,
+        source: client.appConfig.voiceProfile?.channelStatusLabels?.[String(voiceChannel?.id || '')]
+          ? 'voiceProfile.channelStatusLabels'
+          : 'voiceProfileChannels.voiceStatusLabel'
+      });
+    }
+  }
+
+  if (!statusText) {
+    client.logger.info('vc profile status unavailable in discord.js', {
+      voiceChannelId: voiceChannel?.id || null,
+      channelType: voiceChannel?.constructor?.name || null
+    });
   }
 
   const inspectKeys = Object.keys(voiceChannel || {})
@@ -224,7 +352,7 @@ async function syncVoiceChannelProfile(client, voiceChannel) {
       source: 'voiceProfileChannels'
     });
   }
-  const statusText = resolveVoiceChannelStatusText(client, freshVoiceChannel);
+  const statusText = await resolveVoiceChannelStatusText(client, freshVoiceChannel, mapping);
   const payload = buildProfileMessage({
     contextName: mapping.name,
     voiceChannelName: freshVoiceChannel.name,
