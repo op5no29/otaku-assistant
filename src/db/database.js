@@ -225,6 +225,44 @@ function createDatabase(databasePath) {
           updated_at = ?
       WHERE thread_id = ?
     `),
+    upsertRolePanelMessage: sqlite.prepare(`
+      INSERT INTO role_panel_messages (
+        guild_id,
+        panel_kind,
+        channel_id,
+        message_id,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, panel_kind) DO UPDATE SET
+        channel_id = excluded.channel_id,
+        message_id = excluded.message_id,
+        updated_at = excluded.updated_at
+    `),
+    getRolePanelMessage: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        panel_kind AS panelKind,
+        channel_id AS channelId,
+        message_id AS messageId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM role_panel_messages
+      WHERE guild_id = ? AND panel_kind = ?
+      LIMIT 1
+    `),
+    getRolePanelMessageByMessageId: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        panel_kind AS panelKind,
+        channel_id AS channelId,
+        message_id AS messageId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM role_panel_messages
+      WHERE message_id = ?
+      LIMIT 1
+    `),
     getVcProfileMessage: sqlite.prepare(`
       SELECT
         category_id AS categoryId,
@@ -2118,6 +2156,25 @@ function createDatabase(databasePath) {
           new Date().toISOString(),
           threadId
         );
+      }
+    },
+    rolePanels: {
+      upsert({ guildId, panelKind, channelId, messageId }) {
+        const now = new Date().toISOString();
+        statements.upsertRolePanelMessage.run(
+          guildId,
+          panelKind,
+          channelId,
+          messageId,
+          now,
+          now
+        );
+      },
+      get(guildId, panelKind) {
+        return statements.getRolePanelMessage.get(guildId, panelKind) || null;
+      },
+      getByMessageId(messageId) {
+        return statements.getRolePanelMessageByMessageId.get(messageId) || null;
       }
     },
     vcProfiles: {

@@ -1,10 +1,25 @@
 const { handleWelcomeReactionSetupRemoval } = require('../modules/welcomeReactions');
 const { handleIntroReactionSetupRemoval } = require('../modules/introReactions');
 const { handleAnimeReactionRemove } = require('../modules/anime');
+const { handleRolePanelReactionRemove } = require('../modules/rolePanel');
 
 module.exports = {
   async execute(reaction, user) {
     const client = reaction.message?.client;
+
+    try {
+      const handledRolePanel = await handleRolePanelReactionRemove(reaction, user);
+      if (handledRolePanel) {
+        return;
+      }
+    } catch (error) {
+      client?.logger?.error?.('Failed to handle role panel reaction remove', {
+        messageId: reaction.message?.id || null,
+        channelId: reaction.message?.channelId || null,
+        userId: user?.id || null,
+        error: error.message
+      });
+    }
 
     try {
       await handleWelcomeReactionSetupRemoval(reaction, user);

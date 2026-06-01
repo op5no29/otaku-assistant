@@ -6,6 +6,7 @@ const maintenanceCommand = require('./maintenance');
 const welcomeCommand = require('./welcome');
 const introCommand = require('./intro');
 const animeCommand = require('./anime');
+const rolePanelCommand = require('./rolePanel');
 
 const list = [
   resolveCommand,
@@ -15,7 +16,8 @@ const list = [
   maintenanceCommand,
   welcomeCommand,
   introCommand,
-  animeCommand
+  animeCommand,
+  rolePanelCommand
 ];
 
 module.exports = {
