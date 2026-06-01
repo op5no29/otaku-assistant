@@ -16,7 +16,7 @@ const {
   getAnnictAccessToken
 } = require('./annictClient');
 const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const { rankResolvedWorks, normalizeSearchText, extractSearchAliases } = require('./search');
+const { rankResolvedWorks, extractSearchAliases } = require('./search');
 const {
   normalizeAnimeImageCandidate,
   normalizeAnimeImageCandidates,
@@ -24,7 +24,7 @@ const {
   getAnimeImageCandidateRejectionReason,
   selectPreferredAnimeImageCandidates
 } = require('./imagePolicy');
-const { normalizeAnimeSearchQuery } = require('./titleAliases');
+const { normalizeAnimeSearchQuery, buildAnimeSearchQueries } = require('./titleAliases');
 const { registerDeletableMessage } = require('../deletableMessages');
 const { extractPlainMessagePost } = require('../timelineRelay/extractFirstPost');
 const { buildTimelineMessage } = require('../timelineRelay/buildTimelineMessage');
@@ -527,15 +527,78 @@ function validateAnimePayload(payload, logger, context = {}) {
 async function searchAnime(client, title) {
   const queryInfo = normalizeAnimeSearchQuery(title);
   const searchTitle = queryInfo.canonicalQuery || title;
+  const expandedQueries = buildAnimeSearchQueries(title, queryInfo);
   const provider = getConfiguredProvider(client);
   if (provider === 'annict') {
-    const direct = await searchWorks(client, searchTitle, { perPage: 20 });
-    const normalizedQuery = normalizeSearchText(searchTitle);
-    const normalizedResults = normalizedQuery && normalizeSearchText(searchTitle) !== normalizedQuery
-      ? await searchWorks(client, normalizedQuery, { perPage: 20 }).catch(() => [])
-      : [];
-    const merged = mergeProviderResults([...direct, ...normalizedResults]);
-    return rankResolvedWorks(searchTitle, merged).map((row) => row.entry).slice(0, 10);
+    client.logger.info('anime search query expansion', {
+      original: title,
+      canonicalQuery: searchTitle,
+      aliasMatched: queryInfo.aliasMatched || null,
+      aliasKind: queryInfo.aliasKind,
+      queries: expandedQueries
+    });
+    const searchResults = [];
+    let successfulSearchCount = 0;
+    const searchErrors = [];
+    for (const query of expandedQueries) {
+      client.logger.info('anime search query attempted', {
+        original: title,
+        query
+      });
+      let results = [];
+      try {
+        results = await searchWorks(client, query, { perPage: 20 });
+        successfulSearchCount += 1;
+      } catch (error) {
+        client.logger.warn('anime search query failed', {
+          original: title,
+          query,
+          error: error.message
+        });
+        searchErrors.push(error);
+      }
+      client.logger.info('anime search query result count', {
+        original: title,
+        query,
+        count: results.length
+      });
+      searchResults.push(...results);
+    }
+    if (successfulSearchCount === 0 && searchErrors.length) {
+      throw searchErrors[0];
+    }
+    const merged = mergeProviderResults(searchResults);
+    client.logger.info('anime search merged result count', {
+      original: title,
+      canonicalQuery: searchTitle,
+      count: merged.length
+    });
+    const ranked = rankResolvedWorks(title, merged, { queryInfo });
+    for (const result of ranked.slice(0, 5)) {
+      client.logger.info('anime fuzzy score computed', {
+        original: title,
+        candidateTitle: result.entry?.titleNative || result.entry?.titleUserPreferred || result.entry?.titleEnglish || null,
+        providerMediaId: result.entry?.providerMediaId || null,
+        score: result.score,
+        matchedAliasCanonical: result.matchedAliasCanonical || false,
+        matchedNormalizedSubstring: result.matchedNormalizedSubstring || false
+      });
+      if (result.matchedAliasCanonical) {
+        client.logger.info('anime candidate matched alias canonical', {
+          original: title,
+          candidateTitle: result.entry?.titleNative || result.entry?.titleUserPreferred || result.entry?.titleEnglish || null,
+          providerMediaId: result.entry?.providerMediaId || null
+        });
+      }
+      if (result.matchedNormalizedSubstring) {
+        client.logger.info('anime candidate matched normalized substring', {
+          original: title,
+          candidateTitle: result.entry?.titleNative || result.entry?.titleUserPreferred || result.entry?.titleEnglish || null,
+          providerMediaId: result.entry?.providerMediaId || null
+        });
+      }
+    }
+    return ranked.map((row) => row.entry).slice(0, 10);
   }
   return searchAnimeByTitle(client, searchTitle, 10);
 }
@@ -555,7 +618,7 @@ async function resolveAnimeFromTitle(client, title, guildId = null) {
   const queryInfo = normalizeAnimeSearchQuery(title);
   const searchTitle = queryInfo.canonicalQuery || title;
   const localMatches = guildId ? client.db.anime.searchEntries(guildId, searchTitle, 10).map(normalizeEntry) : [];
-  const remoteMatches = await searchAnime(client, searchTitle);
+  const remoteMatches = await searchAnime(client, title);
   const merged = mergeProviderResults([
     ...localMatches.map((entry) => ({
       ...entry,
@@ -563,7 +626,7 @@ async function resolveAnimeFromTitle(client, title, guildId = null) {
     })),
     ...remoteMatches
   ]);
-  const ranked = rankResolvedWorks(searchTitle, merged);
+  const ranked = rankResolvedWorks(title, merged, { queryInfo });
   return {
     queryInfo,
     media: ranked[0]?.entry || merged[0] || null,

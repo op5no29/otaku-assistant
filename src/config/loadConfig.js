@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { parseAccentColor } = require('../utils/accentColors');
 
 function ensureArray(value, label) {
   if (!Array.isArray(value)) {
@@ -47,7 +48,8 @@ function ensureGlobalHashtagRoutes(value, label) {
       displayTag: String(route.displayTag || route.display || route.tags?.[0] || ''),
       displayMode: String(route.displayMode || 'displayTag'),
       alsoTimeline: route.alsoTimeline === true,
-      relayUserPostToDestination: route.relayUserPostToDestination !== false
+      relayUserPostToDestination: route.relayUserPostToDestination !== false,
+      accentColor: parseAccentColor(route.accentColor, null)
     };
   };
 
@@ -106,7 +108,8 @@ function ensureBotHashtagRoutes(value, label) {
         {
           aliases: ensureArray(route.aliases || [], `${label}.${routeKey}.aliases`),
           display: String(route.display || `#${routeKey}`),
-          channelId: String(route.channelId || '')
+          channelId: String(route.channelId || ''),
+          accentColor: parseAccentColor(route.accentColor, null)
         }
       ];
     })
@@ -175,6 +178,43 @@ function ensureIntroDmConfig(value, introChannelId = '') {
     maxLlmReplies: Number(value.maxLlmReplies ?? 3),
     llmRepliesEnabled: value.llmRepliesEnabled === true
   };
+}
+
+function ensureWelcomeDmConfig(value, fallbackLogChannelId = '') {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      enabled: false,
+      devTestMode: false,
+      devUserId: '323041740963446785',
+      delaySeconds: 30,
+      delayMinutes: null,
+      logChannelId: String(fallbackLogChannelId || '1224747669604536385')
+    };
+  }
+
+  return {
+    enabled: value.enabled === true,
+    devTestMode: value.devTestMode === true,
+    devUserId: String(value.devUserId || '323041740963446785'),
+    delaySeconds: Number(value.delaySeconds ?? (
+      value.delayMinutes != null ? Number(value.delayMinutes) * 60 : 30
+    )),
+    delayMinutes: value.delayMinutes == null ? null : Number(value.delayMinutes),
+    logChannelId: String(value.logChannelId || value.botLogChannelId || fallbackLogChannelId || '1224747669604536385')
+  };
+}
+
+function ensureAccentColorMap(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(value).map(([key, color]) => [
+      String(key),
+      parseAccentColor(color, null)
+    ]).filter(([, color]) => color != null)
+  );
 }
 
 function ensureAnimeConfig(value) {
@@ -281,7 +321,8 @@ function loadConfig(configPath) {
     voiceProfileChannels: Array.isArray(parsed.voiceProfileChannels)
       ? parsed.voiceProfileChannels.map((entry) => ({
           name: String(entry.name || ''),
-          profileChannelId: String(entry.profileChannelId || '')
+          profileChannelId: String(entry.profileChannelId || ''),
+          accentColor: parseAccentColor(entry.accentColor, null)
         }))
       : [],
     timeline: {
@@ -294,7 +335,9 @@ function loadConfig(configPath) {
       shortMergeMaxParts: Number(parsed.timelineShortMergeMaxParts ?? 5)
     },
     voiceProfile: {
-      ignoreBots: parsed.voiceProfile?.ignoreBots !== false
+      ignoreBots: parsed.voiceProfile?.ignoreBots !== false,
+      reconcileIntervalMinutes: Number(parsed.voiceProfile?.reconcileIntervalMinutes ?? 3),
+      channelAccentColors: ensureAccentColorMap(parsed.voiceProfile?.channelAccentColors, 'voiceProfile.channelAccentColors')
     },
     mediaRelay: {
       maxReuploadBytes: Number(parsed.mediaRelay?.maxReuploadBytes ?? 25_000_000),
@@ -342,6 +385,7 @@ function loadConfig(configPath) {
       moderatorRoleIds: ensureArray(parsed.questions?.moderatorRoleIds || [], 'questions.moderatorRoleIds')
     },
     introDm: ensureIntroDmConfig(parsed.introDm, parsed.introChannelId),
+    welcomeDm: ensureWelcomeDmConfig(parsed.welcomeDm, parsed.ops?.logChannelId || ''),
     anime: ensureAnimeConfig(parsed.anime),
     annict: ensureAnnictConfig(parsed.annict),
     ops: ensureOpsConfig(parsed.ops),

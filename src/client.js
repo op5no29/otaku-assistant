@@ -51,6 +51,7 @@ function createBotClient({ appConfig, database, logger }) {
   client.questionResolveLocks = new Set();
   client.introDmQueueProcessing = false;
   client.introDmQueueInterval = null;
+  client.voiceProfileReconcileInterval = null;
 
   client.once('clientReady', (...args) => readyEvent.execute(...args));
   client.on('threadCreate', (...args) => threadCreateEvent.execute(...args));

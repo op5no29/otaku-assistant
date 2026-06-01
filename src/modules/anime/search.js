@@ -1,4 +1,8 @@
 const { toKatakana } = require('./annictClient');
+const {
+  normalizeAnimeSearchQuery,
+  buildAnimeSearchQueries
+} = require('./titleAliases');
 
 const AUXILIARY_TITLE_RULES = [
   { reason: 'crossover', patterns: [/コラボ/iu, /(?:^|\s|[「『【])x(?:\s|$)|×/iu], penalty: 140 },
@@ -13,9 +17,13 @@ const AUXILIARY_TITLE_RULES = [
 ];
 
 function normalizeSearchText(value) {
-  return toKatakana(String(value || ''))
+  return toKatakana(String(value || '').normalize('NFKC'))
     .toLowerCase()
     .replace(/[!！?？"'`“”‘’\s・･\-–—_/／:：|｜.。,、（）()［］\[\]【】『』「」]/gu, '');
+}
+
+function normalizeLooseSearchText(value) {
+  return normalizeSearchText(value).replace(/ー/gu, '');
 }
 
 function canonicalTitle(value) {
@@ -82,49 +90,140 @@ function extractSearchAliases(entry) {
   return Array.from(aliases);
 }
 
-function analyzeResolvedWorkMatch(query, entry) {
-  const normalizedQuery = normalizeSearchText(query);
+function scoreAliasAgainstQuery(queryVariant, alias) {
+  const strictQuery = normalizeSearchText(queryVariant);
+  const looseQuery = normalizeLooseSearchText(queryVariant);
+  const strictAlias = normalizeSearchText(alias);
+  const looseAlias = normalizeLooseSearchText(alias);
+
+  if (!strictQuery || !strictAlias) {
+    return {
+      score: -1_000,
+      exact: false,
+      normalizedSubstring: false,
+      kind: 'none'
+    };
+  }
+
+  if (strictAlias === strictQuery) {
+    return {
+      score: 120,
+      exact: true,
+      normalizedSubstring: false,
+      kind: 'strict_exact'
+    };
+  }
+  if (looseAlias && looseQuery && looseAlias === looseQuery) {
+    return {
+      score: 112,
+      exact: true,
+      normalizedSubstring: false,
+      kind: 'loose_exact'
+    };
+  }
+  if (strictAlias.startsWith(strictQuery)) {
+    return {
+      score: 96,
+      exact: false,
+      normalizedSubstring: false,
+      kind: 'strict_prefix'
+    };
+  }
+  if (looseAlias && looseQuery && looseAlias.startsWith(looseQuery)) {
+    return {
+      score: 92,
+      exact: false,
+      normalizedSubstring: false,
+      kind: 'loose_prefix'
+    };
+  }
+  if (strictAlias.includes(strictQuery)) {
+    return {
+      score: 84,
+      exact: false,
+      normalizedSubstring: true,
+      kind: 'strict_substring'
+    };
+  }
+  if (looseAlias && looseQuery && looseAlias.includes(looseQuery)) {
+    return {
+      score: 88,
+      exact: false,
+      normalizedSubstring: true,
+      kind: 'loose_substring'
+    };
+  }
+  if (strictQuery.includes(strictAlias) && strictAlias.length >= 3) {
+    return {
+      score: 68,
+      exact: false,
+      normalizedSubstring: false,
+      kind: 'query_contains_alias'
+    };
+  }
+  if (looseQuery && looseAlias && looseQuery.includes(looseAlias) && looseAlias.length >= 3) {
+    return {
+      score: 72,
+      exact: false,
+      normalizedSubstring: false,
+      kind: 'loose_query_contains_alias'
+    };
+  }
+
+  return {
+    score: -1_000,
+    exact: false,
+    normalizedSubstring: false,
+    kind: 'none'
+  };
+}
+
+function analyzeResolvedWorkMatch(query, entry, options = {}) {
+  const queryInfo = options.queryInfo || normalizeAnimeSearchQuery(query);
+  const queryVariants = buildAnimeSearchQueries(query, queryInfo);
+  const normalizedOriginalQuery = normalizeSearchText(queryInfo.original || query);
   const aliases = extractSearchAliases(entry);
-  const canonicalQuery = canonicalTitle(query);
   const titles = [
     entry.titleNative,
+    entry.titleKana,
     entry.titleUserPreferred,
     entry.titleRomaji,
     entry.titleEnglish,
     ...aliases
   ].filter(Boolean);
   const titleSeasonNumbers = Array.from(new Set(titles.map((value) => extractSeasonNumber(value)).filter(Number.isFinite)));
-  const explicitSeasonNumber = extractSeasonNumber(query);
-  const auxiliary = analyzeAuxiliaryTitle(query, titles);
+  const explicitSeasonNumber = extractSeasonNumber(queryInfo.original || query)
+    || extractSeasonNumber(queryInfo.canonicalQuery || query);
+  const auxiliary = analyzeAuxiliaryTitle(queryInfo.original || queryInfo.canonicalQuery || query, titles);
   let score = 0;
   let exactTitleMatch = false;
+  let matchedAliasCanonical = false;
+  let matchedNormalizedSubstring = false;
 
-  for (const alias of aliases) {
-    const normalizedAlias = normalizeSearchText(alias);
-    if (!normalizedAlias || !normalizedQuery) {
-      continue;
-    }
-    if (normalizedAlias === normalizedQuery) {
-      score = Math.max(score, 120);
-      exactTitleMatch = true;
-    } else if (normalizedAlias.startsWith(normalizedQuery)) {
-      score = Math.max(score, 95);
-    } else if (normalizedAlias.includes(normalizedQuery)) {
-      score = Math.max(score, 80);
-    } else if (normalizedQuery.includes(normalizedAlias) && normalizedAlias.length >= 3) {
-      score = Math.max(score, 65);
+  for (const queryVariant of queryVariants) {
+    const isCanonicalVariant = normalizeSearchText(queryVariant) === normalizeSearchText(queryInfo.canonicalQuery || queryVariant);
+    for (const alias of aliases) {
+      const aliasScore = scoreAliasAgainstQuery(queryVariant, alias);
+      if (aliasScore.score < 0) {
+        continue;
+      }
+      let candidateScore = aliasScore.score;
+      if (isCanonicalVariant && queryInfo.aliasMatched) {
+        candidateScore += aliasScore.exact ? 28 : 18;
+        matchedAliasCanonical = true;
+      }
+      if (aliasScore.normalizedSubstring) {
+        matchedNormalizedSubstring = true;
+      }
+      if (candidateScore > score) {
+        score = candidateScore;
+      }
+      exactTitleMatch ||= aliasScore.exact;
     }
   }
 
-  if (normalizedQuery.length <= 2 && score < 120) {
+  if (normalizedOriginalQuery.length <= 2 && score < 120) {
     score -= 30;
-  }
-
-  const primaryTitle = String(entry.titleUserPreferred || entry.titleNative || entry.titleEnglish || entry.titleRomaji || '');
-  const canonicalPrimaryTitle = canonicalTitle(primaryTitle);
-  if (canonicalPrimaryTitle && canonicalPrimaryTitle === canonicalQuery) {
-    score += 20;
-    exactTitleMatch = true;
   }
 
   let seasonMatchBonusApplied = false;
@@ -155,19 +254,23 @@ function analyzeResolvedWorkMatch(query, entry) {
     seasonMismatchPenaltyApplied,
     seasonUnknownPenaltyApplied,
     titleSeasonNumbers,
-    auxiliaryPenaltyReasons: auxiliary.reasons
+    auxiliaryPenaltyReasons: auxiliary.reasons,
+    queryInfo,
+    queryVariants,
+    matchedAliasCanonical,
+    matchedNormalizedSubstring
   };
 }
 
-function scoreResolvedWork(query, entry) {
-  return analyzeResolvedWorkMatch(query, entry).score;
+function scoreResolvedWork(query, entry, options = {}) {
+  return analyzeResolvedWorkMatch(query, entry, options).score;
 }
 
-function rankResolvedWorks(query, entries = []) {
+function rankResolvedWorks(query, entries = [], options = {}) {
   return entries
     .map((entry) => ({
       entry,
-      ...analyzeResolvedWorkMatch(query, entry)
+      ...analyzeResolvedWorkMatch(query, entry, options)
     }))
     .filter((row) => row.score > 0)
     .sort((left, right) => right.score - left.score);
@@ -175,6 +278,7 @@ function rankResolvedWorks(query, entries = []) {
 
 module.exports = {
   normalizeSearchText,
+  normalizeLooseSearchText,
   canonicalTitle,
   titleLooksLikeSeasonSpecific,
   extractSeasonNumber,

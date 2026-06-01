@@ -44,13 +44,16 @@ function buildMemberSection(member) {
   return section;
 }
 
-function buildProfileMessage({ contextName, voiceChannelName, members }) {
-  const container = new ContainerBuilder().setAccentColor(0x3b82f6);
+function buildProfileMessage({ contextName, voiceChannelName, statusText = null, members, accentColor = 0x3b82f6 }) {
+  const container = new ContainerBuilder().setAccentColor(accentColor);
   const countLabel = `${members.length}名`;
+  const statusLine = statusText?.trim()
+    ? `**ステータス**\n${statusText.trim()}\n\n`
+    : '';
 
   container.addTextDisplayComponents(
     new TextDisplayBuilder().setContent(`## ${contextName} / ${voiceChannelName}`),
-    new TextDisplayBuilder().setContent(`**現在いる人**\n${countLabel}`)
+    new TextDisplayBuilder().setContent(`${statusLine}**現在いる人**\n${countLabel}`)
   );
 
   for (const member of members) {

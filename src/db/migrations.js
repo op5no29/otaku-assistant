@@ -138,6 +138,7 @@ function runMigrations(database) {
       guild_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
       prompt_type TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
       sent_at TEXT,
       replied_count INTEGER NOT NULL DEFAULT 0,
       opt_out INTEGER NOT NULL DEFAULT 0,
@@ -520,6 +521,17 @@ function runMigrations(database) {
 
   if (musicLinkCacheColumns.size && !musicLinkCacheColumns.has('platform_links_json')) {
     database.exec('ALTER TABLE music_link_cache ADD COLUMN platform_links_json TEXT');
+  }
+
+  const introDmStateColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(intro_dm_state)')
+      .all()
+      .map((column) => column.name)
+  );
+
+  if (introDmStateColumns.size && !introDmStateColumns.has('status')) {
+    database.exec("ALTER TABLE intro_dm_state ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'");
   }
 
   const animeReviewPromptStateColumns = new Set(

@@ -551,13 +551,15 @@ function createDatabase(databasePath) {
         guild_id,
         user_id,
         prompt_type,
+        status,
         sent_at,
         replied_count,
         opt_out,
         last_error,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(guild_id, user_id, prompt_type) DO UPDATE SET
+        status = excluded.status,
         sent_at = excluded.sent_at,
         replied_count = excluded.replied_count,
         opt_out = excluded.opt_out,
@@ -569,6 +571,7 @@ function createDatabase(databasePath) {
         guild_id AS guildId,
         user_id AS userId,
         prompt_type AS promptType,
+        status,
         sent_at AS sentAt,
         replied_count AS repliedCount,
         opt_out AS optOut,
@@ -583,6 +586,7 @@ function createDatabase(databasePath) {
         guild_id AS guildId,
         user_id AS userId,
         prompt_type AS promptType,
+        status,
         sent_at AS sentAt,
         replied_count AS repliedCount,
         opt_out AS optOut,
@@ -2152,11 +2156,13 @@ function createDatabase(databasePath) {
       }
     },
     introDm: {
-      upsertState({ guildId, userId, promptType, sentAt, repliedCount = 0, optOut = false, lastError = null }) {
+      upsertState({ guildId, userId, promptType, status = null, sentAt, repliedCount = 0, optOut = false, lastError = null }) {
+        const normalizedStatus = status || (sentAt ? 'sent' : lastError ? 'failed' : 'pending');
         statements.upsertIntroDmState.run(
           guildId,
           userId,
           promptType,
+          normalizedStatus,
           sentAt || null,
           repliedCount,
           optOut ? 1 : 0,

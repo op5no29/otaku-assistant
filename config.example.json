@@ -33,7 +33,9 @@
   "timelineShortMergeWindowSeconds": 180,
   "timelineShortMergeMaxParts": 5,
   "voiceProfile": {
-    "ignoreBots": true
+    "ignoreBots": true,
+    "reconcileIntervalMinutes": 3,
+    "channelAccentColors": {}
   },
   "mediaRelay": {
     "maxReuploadBytes": 25000000,
@@ -103,6 +105,13 @@
     "maxLlmReplies": 3,
     "llmRepliesEnabled": false
   },
+  "welcomeDm": {
+    "enabled": false,
+    "devTestMode": false,
+    "devUserId": "323041740963446785",
+    "delaySeconds": 30,
+    "logChannelId": "1224747669604536385"
+  },
   "anime": {
     "enabled": true,
     "provider": "annict",
@@ -146,12 +155,14 @@
     "いい映像": {
       "aliases": ["いい映像", "良い映像"],
       "display": "#良い映像",
-      "channelId": "YOUR_GOOD_VIDEO_CHANNEL_ID"
+      "channelId": "YOUR_GOOD_VIDEO_CHANNEL_ID",
+      "accentColor": "#06b6d4"
     },
     "いい音楽": {
       "aliases": ["いい音楽", "良い音楽"],
       "display": "#良い音楽",
-      "channelId": "YOUR_GOOD_MUSIC_CHANNEL_ID"
+      "channelId": "YOUR_GOOD_MUSIC_CHANNEL_ID",
+      "accentColor": "#db2777"
     }
   },
   "vcListenOnlyChannelIds": [
@@ -164,20 +175,23 @@
       "displayTag": "技術",
       "displayMode": "matchedTag",
       "destinationChannelId": "YOUR_TECH_SHARING_CHANNEL_ID",
-      "alsoTimeline": true
+      "alsoTimeline": true,
+      "accentColor": "#6366f1"
     },
     {
       "tags": ["アニメ", "anime", "Anime", "ANIME"],
       "displayMode": "matchedTag",
       "destinationChannelId": "YOUR_ANIME_CHANNEL_ID",
       "alsoTimeline": true,
-      "relayUserPostToDestination": false
+      "relayUserPostToDestination": false,
+      "accentColor": "#f3f4f6"
     },
     {
       "tags": ["飯", "ご飯", "ごはん", "meshi", "food", "Food", "FOOD", "ラーメン", "ramen", "Ramen", "RAMEN"],
       "displayMode": "matchedTag",
       "destinationChannelId": "YOUR_FOOD_CHANNEL_ID",
-      "alsoTimeline": true
+      "alsoTimeline": true,
+      "accentColor": "#f97316"
     }
   ]
 }

@@ -1,4 +1,8 @@
-const { initializeVoiceProfileMappings, rebuildVoiceProfileState } = require('../modules/vcProfile');
+const {
+  initializeVoiceProfileMappings,
+  rebuildVoiceProfileState,
+  startVoiceProfileReconciliation
+} = require('../modules/vcProfile');
 const pkg = require('../../package.json');
 const { getBotHealth } = require('../modules/ops/health');
 const { notifyOpsChannel } = require('../modules/ops/notify');
@@ -10,7 +14,8 @@ module.exports = {
   async execute(client) {
     client.db.deletableMessages.deleteExpired();
     await initializeVoiceProfileMappings(client);
-    await rebuildVoiceProfileState(client);
+    await rebuildVoiceProfileState(client, { reason: 'ready_resync' });
+    startVoiceProfileReconciliation(client);
 
     const health = getBotHealth(client);
     const globalHashtagRoutes = Object.entries(client.appConfig.globalHashtagRoutes || {});

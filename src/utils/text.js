@@ -6,6 +6,29 @@ function truncateText(value, maxLength) {
   return `${value.slice(0, Math.max(0, maxLength - 1))}…`;
 }
 
+const SILENT_CONTROL_TOKEN_PATTERN = /(^|[\s　])@silent(?=$|[\s　])/u;
+const SILENT_CONTROL_TOKEN_GLOBAL_PATTERN = /(^|[\s　])@silent(?=$|[\s　])/gu;
+
+function hasSilentControlToken(content) {
+  return SILENT_CONTROL_TOKEN_PATTERN.test(String(content || ''));
+}
+
+function stripSilentControlToken(content) {
+  const rawContent = String(content || '');
+  if (!rawContent) {
+    return rawContent;
+  }
+
+  return rawContent
+    .split(/\r?\n/u)
+    .map((line) => line
+      .replace(SILENT_CONTROL_TOKEN_GLOBAL_PATTERN, (match, prefix) => prefix || '')
+      .replace(/[ \t　]{2,}/gu, ' ')
+      .trim())
+    .filter((line) => line.length > 0)
+    .join('\n');
+}
+
 function parseBotHashtagRoutes(content, routeConfig = {}) {
   const rawContent = String(content || '');
   if (!rawContent) {
@@ -187,7 +210,7 @@ function parseRelayHashtagPrefixes(content, options = {}) {
 
   return {
     rawContent,
-    content: botRouting.content,
+    content: stripSilentControlToken(botRouting.content),
     globalMatchedRoutes: globalRouting.matchedRoutes,
     globalDetectedTags: globalRouting.detectedTags,
     botMatchedRoutes: botRouting.matchedRoutes,
@@ -646,6 +669,8 @@ function restoreCustomEmojiTokens(content, guild) {
 
 module.exports = {
   truncateText,
+  hasSilentControlToken,
+  stripSilentControlToken,
   parseBotHashtagRoutes,
   parseGlobalHashtagRoutes,
   parseRelayHashtagPrefixes,

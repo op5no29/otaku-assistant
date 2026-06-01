@@ -132,6 +132,14 @@ async function prepareAttachmentRelay(post, config, logger) {
       uploadFileName,
       spoilerDetected: attachment.isSpoiler === true
     });
+    if (attachment.isSpoiler === true) {
+      logger?.info?.('spoiler attachment detected', {
+        sourceMessageId: post.messageId,
+        attachmentId: attachment.id,
+        originalFileName,
+        uploadFileName
+      });
+    }
     return {
       ...attachment,
       originalFileName,
@@ -187,6 +195,13 @@ async function prepareAttachmentRelay(post, config, logger) {
         maxBytes: maxReuploadBytes,
         fallbackReason: 'file_too_large'
       });
+      if (attachment.isSpoiler) {
+        logger.warn('spoiler attachment relay fallback', {
+          ...context,
+          fallbackReason: 'file_too_large',
+          spoilerPreservedByRawPreviewSuppression: true
+        });
+      }
       downloadableAttachments.push({
         name: attachment.displayName,
         url: attachment.url,
@@ -203,6 +218,13 @@ async function prepareAttachmentRelay(post, config, logger) {
         maxCount: MAX_REUPLOAD_ATTACHMENTS,
         fallbackReason: 'preview_upload_limit_reached'
       });
+      if (attachment.isSpoiler) {
+        logger.warn('spoiler attachment relay fallback', {
+          ...context,
+          fallbackReason: 'preview_upload_limit_reached',
+          spoilerPreservedByRawPreviewSuppression: true
+        });
+      }
       downloadableAttachments.push({
         name: attachment.displayName,
         url: attachment.url,
@@ -302,12 +324,31 @@ async function prepareAttachmentRelay(post, config, logger) {
         displayFileName: attachment.displayName,
         uploadFileName: attachment.uploadFileName
       });
+      if (attachment.isSpoiler) {
+        logger.info('spoiler attachment relay preserved', {
+          ...context,
+          uploadFileName: attachment.uploadFileName,
+          spoilerPrefixPreserved: /^SPOILER_/iu.test(String(attachment.uploadFileName || ''))
+        });
+      }
     } catch (error) {
       logger.warn('Attachment re-upload failed; using fallback', {
         ...context,
         error: error.message,
         fallbackReason: 'download_or_upload_failed'
       });
+      if (attachment.isSpoiler) {
+        logger.warn('spoiler attachment relay failed', {
+          ...context,
+          error: error.message
+        });
+        logger.warn('spoiler attachment relay fallback', {
+          ...context,
+          error: error.message,
+          fallbackReason: 'download_or_upload_failed',
+          spoilerPreservedByRawPreviewSuppression: true
+        });
+      }
       attachment.reuploadSkippedReason = 'upload_failed';
       attachment.displayLine = buildAttachmentDisplayLine(attachment);
       await removeFile(filePath, logger, context);
@@ -341,21 +382,30 @@ async function prepareAttachmentRelay(post, config, logger) {
     });
   }
 
+  const spoilerPreviewUrls = new Set(
+    normalizedAttachments
+      .filter((attachment) => attachment.isSpoiler && (attachment.isGif || attachment.isImage))
+      .map((attachment) => attachment.url)
+      .filter(Boolean)
+  );
+
   return {
     post: {
       ...post,
       attachments: normalizedAttachments,
       imageUrls: (Array.isArray(post.imageUrls) ? post.imageUrls : []).filter(
-        (url) => !normalizedAttachments.some(
+        (url) => !spoilerPreviewUrls.has(url) && !normalizedAttachments.some(
           (attachment) => attachment.reuploadSucceeded && (attachment.isGif || attachment.isImage) && attachment.url === url
         )
       ),
       firstImageUrl:
-        normalizedAttachments.some(
+        spoilerPreviewUrls.has(post.firstImageUrl)
+          ? null
+          : normalizedAttachments.some(
           (attachment) => attachment.reuploadSucceeded && (attachment.isGif || attachment.isImage) && attachment.url === post.firstImageUrl
         )
-          ? null
-          : post.firstImageUrl,
+            ? null
+            : post.firstImageUrl,
       componentFiles,
       fileComponentUrls,
       downloadableAttachments,

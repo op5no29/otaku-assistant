@@ -3,7 +3,8 @@ const { hasUserIntro } = require('../guildMembers');
 
 const PROMPT_TYPES = {
   VC_NO_INTRO: 'vc_no_intro',
-  JOIN_NO_INTRO: 'join_48h_no_intro'
+  JOIN_NO_INTRO: 'join_48h_no_intro',
+  WELCOME_JOIN: 'welcome_join'
 };
 
 const INTENT_RULES = {
@@ -157,6 +158,30 @@ function buildJoinReminderMessage(introChannelId) {
   ].join('\n');
 }
 
+function buildWelcomeJoinMessage() {
+  return [
+    'パソコン映像クラブへようこそ！',
+    '',
+    'このサーバーは、映像・音楽・CG・ゲーム・デザインなど、創作や知識共有をゆるく楽しむためのコミュニティです。',
+    '',
+    'まずは[案内チャンネル](https://discord.com/channels/1224747669122056232/1224770636266868847/1503975427348365322)を読んでもらえると助かります。',
+    'https://discord.com/channels/1224747669122056232/1224770636266868847/1503975427348365322',
+    '',
+    'このサーバーでは、つぶやき用の個人スレッドを作って、作業ログ・作品・気になった情報・日常のメモなどを自由に投稿できます。',
+    'まだ個人スレッドがない場合は、[こちらのチャンネル](https://discord.com/channels/1224747669122056232/1503668971520393367)から作ってみてください。',
+    'https://discord.com/channels/1224747669122056232/1503668971520393367',
+    '',
+    'サーバーには独自の便利な機能がいくつかあります！ぜひ活用してください。',
+    '',
+    '・投稿に `##いい映像` `##いい音楽` `##技術``##Tips`  を付けると、該当のチャンネルやタイムラインに共有できます。',
+    '・`##飯` / `##food` でごはん系の投稿を共有できます',
+    '・`##アニメ` / `##anime` でアニメ作品カードや感想スレッドを作れます！！！（嬉）',
+    '・[質問チャンネル](https://discord.com/channels/1224747669122056232/1224771331623485440)で質問をするとタイムラインから全体に共有されるので、回答を得やすいです。解決したら `/resolve` で解決済みにできます。',
+    '',
+    'ゆるく使ってもらえれば大丈夫です。よろしくお願いします！'
+  ].join('\n');
+}
+
 function getIntroDmConfig(client) {
   return client.appConfig.introDm || {
     enabled: false,
@@ -177,6 +202,23 @@ function getIntroDmConfig(client) {
   };
 }
 
+function getWelcomeDmConfig(client) {
+  return client.appConfig.welcomeDm || {
+    enabled: false,
+    devTestMode: false,
+    devUserId: '323041740963446785',
+    delaySeconds: 30,
+    logChannelId: client.appConfig.ops?.logChannelId || '1224747669604536385'
+  };
+}
+
+function getPromptConfig(client, promptType) {
+  if (promptType === PROMPT_TYPES.WELCOME_JOIN) {
+    return getWelcomeDmConfig(client);
+  }
+  return getIntroDmConfig(client);
+}
+
 function getIntroChannelId(client) {
   return String(getIntroDmConfig(client).introChannelId || client.appConfig.introChannelId || '');
 }
@@ -186,6 +228,9 @@ function getIntroDmGuildId(client) {
 }
 
 function getIntroDmReasonLabel(promptType) {
+  if (promptType === PROMPT_TYPES.WELCOME_JOIN) {
+    return 'サーバー参加時の挨拶DM';
+  }
   if (promptType === PROMPT_TYPES.JOIN_NO_INTRO) {
     return '参加から一定時間経過しても自己紹介が見つからなかったため';
   }
@@ -209,15 +254,16 @@ async function sendIntroDmReport(client, {
   reason,
   errorMessage = null
 }) {
-  const config = getIntroDmConfig(client);
+  const config = getPromptConfig(client, promptType);
   const channelId = config.logChannelId;
   if (!channelId) {
     return null;
   }
 
+  const label = promptType === PROMPT_TYPES.WELCOME_JOIN ? '挨拶DM' : '自己紹介DM';
   const content = success
     ? [
-        '自己紹介DMを送信しました。',
+        `${label}を送信しました。`,
         `対象: <@${userId}> (\`${userId}\`)`,
         `種類: \`${promptType}\``,
         `理由: ${reason}`,
@@ -225,7 +271,7 @@ async function sendIntroDmReport(client, {
         `時刻: ${new Date().toISOString()}`
       ].join('\n')
     : [
-        '自己紹介DMの送信に失敗しました。',
+        `${label}の送信に失敗しました。`,
         `対象: <@${userId}> (\`${userId}\`)`,
         `種類: \`${promptType}\``,
         `理由: ${reason}`,
@@ -271,8 +317,8 @@ async function sendIntroDmReport(client, {
   }
 }
 
-function isAllowedTargetUser(client, userId) {
-  const config = getIntroDmConfig(client);
+function isAllowedTargetUser(client, userId, promptType = null) {
+  const config = getPromptConfig(client, promptType);
   if (!config.devTestMode) {
     return true;
   }
@@ -281,7 +327,7 @@ function isAllowedTargetUser(client, userId) {
 }
 
 async function sendIntroDm(client, { guildId: providedGuildId, userId, promptType }) {
-  const config = getIntroDmConfig(client);
+  const config = getPromptConfig(client, promptType);
   const logger = client.logger;
   const guildId = providedGuildId || getIntroDmGuildId(client);
 
@@ -297,7 +343,7 @@ async function sendIntroDm(client, { guildId: providedGuildId, userId, promptTyp
     };
   }
 
-  if (!isAllowedTargetUser(client, userId)) {
+  if (!isAllowedTargetUser(client, userId, promptType)) {
     logger.info('Intro DM skipped because not dev user', {
       guildId,
       userId,
@@ -323,11 +369,13 @@ async function sendIntroDm(client, { guildId: providedGuildId, userId, promptTyp
     };
   }
 
-  const content = promptType === PROMPT_TYPES.JOIN_NO_INTRO
-    ? buildJoinReminderMessage(getIntroChannelId(client))
-    : buildVcReminderMessage(getIntroChannelId(client));
+  const content = promptType === PROMPT_TYPES.WELCOME_JOIN
+    ? buildWelcomeJoinMessage()
+    : promptType === PROMPT_TYPES.JOIN_NO_INTRO
+      ? buildJoinReminderMessage(getIntroChannelId(client))
+      : buildVcReminderMessage(getIntroChannelId(client));
 
-  logger.info('Intro DM test started', {
+  logger.info(promptType === PROMPT_TYPES.WELCOME_JOIN ? 'welcome DM send started' : 'Intro DM test started', {
     guildId,
     userId,
     promptType
@@ -345,13 +393,14 @@ async function sendIntroDm(client, { guildId: providedGuildId, userId, promptTyp
       guildId,
       userId,
       promptType,
+      status: 'sent',
       sentAt: new Date().toISOString(),
       repliedCount: 0,
       optOut: false,
       lastError: null
     });
 
-    logger.info('Intro DM sent', {
+    logger.info(promptType === PROMPT_TYPES.WELCOME_JOIN ? 'welcome DM sent' : 'Intro DM sent', {
       guildId,
       userId,
       promptType,
@@ -374,10 +423,11 @@ async function sendIntroDm(client, { guildId: providedGuildId, userId, promptTyp
       guildId,
       userId,
       promptType,
+      status: 'failed',
       lastError: error.message
     });
 
-    logger.warn('Intro DM failed', {
+    logger.warn(promptType === PROMPT_TYPES.WELCOME_JOIN ? 'welcome DM failed' : 'Intro DM failed', {
       guildId,
       userId,
       promptType,
@@ -693,12 +743,105 @@ function enqueueJoinIntroDmCandidates(client, guildId, candidates) {
   };
 }
 
+function getWelcomeDmDelayMs(config) {
+  if (config.delayMinutes != null && Number.isFinite(Number(config.delayMinutes))) {
+    return Math.max(0, Number(config.delayMinutes) * 60 * 1000);
+  }
+  return Math.max(0, Number(config.delaySeconds ?? 30) * 1000);
+}
+
+async function enqueueWelcomeJoinDm(client, member) {
+  const config = getWelcomeDmConfig(client);
+  const guildId = member.guild?.id || getIntroDmGuildId(client);
+  const userId = member.id;
+
+  if (member.user?.bot) {
+    client.logger.info('welcome DM skipped bot', {
+      guildId,
+      userId
+    });
+    return { queued: false, skippedReason: 'bot' };
+  }
+
+  if (!config.enabled && !config.devTestMode) {
+    client.logger.info('welcome DM skipped existing', {
+      guildId,
+      userId,
+      skippedReason: 'disabled'
+    });
+    return { queued: false, skippedReason: 'disabled' };
+  }
+
+  if (config.devTestMode && String(userId) !== String(config.devUserId)) {
+    client.logger.info('welcome DM skipped existing', {
+      guildId,
+      userId,
+      skippedReason: 'not_dev_user'
+    });
+    return { queued: false, skippedReason: 'not_dev_user' };
+  }
+
+  const existingState = client.db.introDm.getState(guildId, userId, PROMPT_TYPES.WELCOME_JOIN);
+  if (
+    existingState?.sentAt ||
+    ['sent', 'failed', 'skipped'].includes(String(existingState?.status || ''))
+  ) {
+    client.logger.info('welcome DM skipped existing', {
+      guildId,
+      userId,
+      status: existingState.status || null,
+      sentAt: existingState.sentAt || null,
+      lastError: existingState.lastError || null
+    });
+    return { queued: false, skippedReason: 'existing_state' };
+  }
+
+  const existingQueue = client.db.introDmQueue.getPendingForUserPrompt(guildId, userId, PROMPT_TYPES.WELCOME_JOIN);
+  if (existingQueue) {
+    client.logger.info('welcome DM skipped existing', {
+      guildId,
+      userId,
+      queueId: existingQueue.id,
+      scheduledAt: existingQueue.scheduledAt,
+      skippedReason: 'pending_queue'
+    });
+    return { queued: false, skippedReason: 'pending_queue' };
+  }
+
+  const scheduledAt = new Date(Date.now() + getWelcomeDmDelayMs(config)).toISOString();
+  client.db.introDmQueue.enqueue({
+    guildId,
+    userId,
+    promptType: PROMPT_TYPES.WELCOME_JOIN,
+    reason: getIntroDmReasonLabel(PROMPT_TYPES.WELCOME_JOIN),
+    scheduledAt
+  });
+  client.db.introDm.upsertState({
+    guildId,
+    userId,
+    promptType: PROMPT_TYPES.WELCOME_JOIN,
+    status: 'pending',
+    lastError: null
+  });
+
+  client.logger.info('welcome DM queued', {
+    guildId,
+    userId,
+    scheduledAt,
+    delaySeconds: Math.round(getWelcomeDmDelayMs(config) / 1000)
+  });
+
+  return { queued: true, scheduledAt };
+}
+
 async function processIntroDmQueue(client, guildId = null, limit = null, options = {}) {
   const config = getIntroDmConfig(client);
+  const welcomeConfig = getWelcomeDmConfig(client);
   const logger = client.logger;
   const processorLabel = options.processorLabel || 'manual';
+  const welcomeQueueEnabled = welcomeConfig.enabled === true || welcomeConfig.devTestMode === true;
 
-  if (!config.joinReminderQueueEnabled) {
+  if (!config.joinReminderQueueEnabled && !welcomeQueueEnabled) {
     logger.info('intro DM queue processing skipped because queue is disabled', {
       processorLabel,
       guildId
@@ -713,7 +856,12 @@ async function processIntroDmQueue(client, guildId = null, limit = null, options
     };
   }
 
-  if (options.requireEnabled === true && !config.enabled) {
+  if (
+    options.requireEnabled === true &&
+    !config.enabled &&
+    !config.devTestMode &&
+    !welcomeQueueEnabled
+  ) {
     logger.info('auto queue skipped because disabled', {
       processorLabel,
       guildId
@@ -747,6 +895,9 @@ async function processIntroDmQueue(client, guildId = null, limit = null, options
   const batchSize = Number(limit || config.joinReminderBatchSize || 3);
   const nowIso = new Date().toISOString();
   const staleBeforeIso = new Date(Date.now() - (30 * 60 * 1000)).toISOString();
+  const promptTypeFilter = Array.isArray(options.promptTypes) && options.promptTypes.length
+    ? new Set(options.promptTypes.map(String))
+    : null;
   const recoveredCount = client.db.introDmQueue.resetStaleProcessing(staleBeforeIso);
   if (recoveredCount > 0) {
     logger.warn('intro DM queue stale processing rows reset', {
@@ -756,19 +907,27 @@ async function processIntroDmQueue(client, guildId = null, limit = null, options
   }
 
   try {
-    const allDueCount = guildId
-      ? client.db.introDmQueue.listDue(guildId, nowIso, 1000000).length
-      : client.db.introDmQueue.countDue(nowIso);
-    const dueItems = guildId
-      ? client.db.introDmQueue.listDue(guildId, nowIso, batchSize)
-      : client.db.introDmQueue.listDueAllGuilds(nowIso, batchSize);
+    const duePoolLimit = promptTypeFilter ? 1000000 : batchSize;
+    const duePool = guildId
+      ? client.db.introDmQueue.listDue(guildId, nowIso, duePoolLimit)
+      : client.db.introDmQueue.listDueAllGuilds(nowIso, duePoolLimit);
+    const filteredDuePool = promptTypeFilter
+      ? duePool.filter((item) => promptTypeFilter.has(String(item.promptType)))
+      : duePool;
+    const allDueCount = promptTypeFilter
+      ? filteredDuePool.length
+      : guildId
+        ? client.db.introDmQueue.listDue(guildId, nowIso, 1000000).length
+        : client.db.introDmQueue.countDue(nowIso);
+    const dueItems = filteredDuePool.slice(0, batchSize);
 
     logger.info(options.isAutomatic ? 'intro DM auto queue tick started' : 'intro DM queue processing started', {
       processorLabel,
       guildId,
       dueCount: allDueCount,
       selectedCount: dueItems.length,
-      batchSize
+      batchSize,
+      promptTypes: promptTypeFilter ? [...promptTypeFilter] : null
     });
 
   let sentCount = 0;
@@ -777,11 +936,19 @@ async function processIntroDmQueue(client, guildId = null, limit = null, options
 
   for (const item of dueItems) {
     client.db.introDmQueue.markStatus(item.id, 'processing');
+    const itemConfig = getPromptConfig(client, item.promptType);
 
-    if (hasUserIntro(client, item.guildId || guildId, item.userId)) {
+    if (item.promptType !== PROMPT_TYPES.WELCOME_JOIN && hasUserIntro(client, item.guildId || guildId, item.userId)) {
       client.db.introDmQueue.updateStatus(item.id, {
         status: 'skipped',
         attempts: Number(item.attempts || 0) + 1,
+        lastError: 'intro_found_before_send'
+      });
+      client.db.introDm.upsertState({
+        guildId: item.guildId || guildId,
+        userId: item.userId,
+        promptType: item.promptType,
+        status: 'skipped',
         lastError: 'intro_found_before_send'
       });
       skippedCount += 1;
@@ -794,10 +961,17 @@ async function processIntroDmQueue(client, guildId = null, limit = null, options
       continue;
     }
 
-    if (config.devTestMode && String(item.userId) !== String(config.devUserId)) {
+    if (itemConfig.devTestMode && String(item.userId) !== String(itemConfig.devUserId)) {
       client.db.introDmQueue.updateStatus(item.id, {
         status: 'skipped',
         attempts: Number(item.attempts || 0) + 1,
+        lastError: 'not_dev_user'
+      });
+      client.db.introDm.upsertState({
+        guildId: item.guildId || guildId,
+        userId: item.userId,
+        promptType: item.promptType,
+        status: 'skipped',
         lastError: 'not_dev_user'
       });
       skippedCount += 1;
@@ -821,6 +995,13 @@ async function processIntroDmQueue(client, guildId = null, limit = null, options
       client.db.introDmQueue.updateStatus(item.id, {
         status: 'skipped',
         attempts: Number(item.attempts || 0) + 1,
+        lastError: result.skippedReason
+      });
+      client.db.introDm.upsertState({
+        guildId: item.guildId || guildId,
+        userId: item.userId,
+        promptType: item.promptType,
+        status: 'skipped',
         lastError: result.skippedReason
       });
       skippedCount += 1;
@@ -871,14 +1052,16 @@ async function processIntroDmQueue(client, guildId = null, limit = null, options
 
 function startIntroDmQueueProcessor(client) {
   const config = getIntroDmConfig(client);
+  const welcomeConfig = getWelcomeDmConfig(client);
   const intervalMinutes = Number(config.queueProcessIntervalMinutes || 5);
+  const shouldAutoProcess = config.queueAutoProcessEnabled || welcomeConfig.enabled === true || welcomeConfig.devTestMode === true;
 
   if (client.introDmQueueInterval) {
     clearInterval(client.introDmQueueInterval);
     client.introDmQueueInterval = null;
   }
 
-  if (!config.queueAutoProcessEnabled) {
+  if (!shouldAutoProcess) {
     client.logger.info('intro DM auto queue processor disabled', {
       intervalMinutes,
       batchSize: Number(config.joinReminderBatchSize || 3)
@@ -888,7 +1071,9 @@ function startIntroDmQueueProcessor(client) {
 
   client.logger.info('intro DM auto queue processor enabled', {
     intervalMinutes,
-    batchSize: Number(config.joinReminderBatchSize || 3)
+    batchSize: Number(config.joinReminderBatchSize || 3),
+    welcomeDmEnabled: welcomeConfig.enabled === true,
+    welcomeDmDevTestMode: welcomeConfig.devTestMode === true
   });
 
   const runTick = async () => {
@@ -896,7 +1081,8 @@ function startIntroDmQueueProcessor(client) {
       await processIntroDmQueue(client, null, null, {
         processorLabel: 'auto_interval',
         isAutomatic: true,
-        requireEnabled: true
+        requireEnabled: true,
+        promptTypes: config.queueAutoProcessEnabled ? null : [PROMPT_TYPES.WELCOME_JOIN]
       });
     } catch (error) {
       client.logger.error('intro DM auto queue tick failed', {
@@ -922,6 +1108,7 @@ module.exports = {
   getIntroDmStatus,
   maybeSendVcNoIntroDm,
   enqueueJoinIntroDmCandidates,
+  enqueueWelcomeJoinDm,
   processIntroDmQueue,
   startIntroDmQueueProcessor,
   isPermanentIntroDmFailure

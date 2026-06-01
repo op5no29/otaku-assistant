@@ -104,7 +104,7 @@ function getSelectablePostCandidates(query, candidates = [], options = {}) {
   const queryInfo = options.queryInfo || normalizeAnimeSearchQuery(query);
   const plausibleEntries = getPlausibleEntries(candidates, options.rankedRows);
   const allEntries = dedupeEntries(candidates).slice(0, PICKER_CANDIDATE_LIMIT);
-  const seasonSource = queryInfo.canonicalQuery || query;
+  const seasonSource = queryInfo.original || queryInfo.canonicalQuery || query;
   const explicitSeasonNumber = extractSeasonNumber(seasonSource);
   if (explicitSeasonNumber) {
     const sameSeason = plausibleEntries.filter((entry) => extractSeasonNumber(getPickerTitle(entry)) === explicitSeasonNumber);
@@ -137,7 +137,7 @@ function analyzePostSelectionPolicy(query, candidates = [], options = {}) {
     };
   }
 
-  const seasonSource = queryInfo.canonicalQuery || query;
+  const seasonSource = queryInfo.original || queryInfo.canonicalQuery || query;
   const explicitSeasonNumber = extractSeasonNumber(seasonSource);
   if (explicitSeasonNumber) {
     const sameSeason = selectableCandidates.filter((entry) => extractSeasonNumber(getPickerTitle(entry)) === explicitSeasonNumber);

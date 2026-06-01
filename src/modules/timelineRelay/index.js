@@ -8,7 +8,8 @@ const { enrichPostWithMusicLink } = require('./musicLinks');
 const { applyQuestionStatusTag } = require('../questionResolver/threadTags');
 const { getRecentArchivedMessages } = require('../messageArchive');
 const { getMessageJumpUrl } = require('../../services/discordLinks');
-const { parseRelayHashtagPrefixes } = require('../../utils/text');
+const { hasSilentControlToken, parseRelayHashtagPrefixes } = require('../../utils/text');
+const { resolveRouteAccentColor } = require('../../utils/accentColors');
 const { handleAnimeHashtagPost } = require('../anime/hashtagIntegration');
 
 function buildQuestionGuideMessage(timelineMessageUrl = null) {
@@ -41,17 +42,70 @@ function getForumType(parentId, config) {
   return null;
 }
 
+function collectRouteOutputChannelIds(config) {
+  const ids = new Set([
+    String(config.timelineChannelId || ''),
+    String(config.anime?.channelId || '')
+  ].filter(Boolean));
+
+  for (const route of Object.values(config.globalHashtagRoutes || {})) {
+    if (route?.channelId) {
+      ids.add(String(route.channelId));
+    }
+  }
+
+  for (const route of Object.values(config.botHashtagRoutes || {})) {
+    if (route?.channelId) {
+      ids.add(String(route.channelId));
+    }
+  }
+
+  return ids;
+}
+
+function getRouteScanSkipReason(message, config) {
+  if (!message.inGuild?.()) {
+    return 'not_guild_message';
+  }
+  if (message.author?.bot) {
+    return 'bot_author';
+  }
+  if (!message.channel?.isTextBased?.()) {
+    return 'not_text_based';
+  }
+
+  const outputChannelIds = collectRouteOutputChannelIds(config);
+  const sourceChannelId = String(message.channelId || '');
+  const parentId = String(message.channel?.parentId || '');
+  if (outputChannelIds.has(sourceChannelId) || outputChannelIds.has(parentId)) {
+    return 'route_output_channel';
+  }
+
+  if (message.channel?.archived) {
+    return 'archived_thread';
+  }
+
+  return null;
+}
+
 async function buildTimelinePayload(post, { config, forumType, logger }) {
   const twitterResolved = await resolveTwitterMedia(post, config, logger);
   const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, logger);
   const attachmentPrepared = await prepareAttachmentRelay(videoPrepared.post, config, logger);
-  const animeChannelId = String(config.anime?.channelId || '');
   const matchedGlobalRoutes = Array.isArray(attachmentPrepared.post?.matchedGlobalHashtagRoutes)
     ? attachmentPrepared.post.matchedGlobalHashtagRoutes
     : [];
-  const isAnimeTaggedRelay = matchedGlobalRoutes.some((routeKey) => String(config.globalHashtagRoutes?.[routeKey]?.channelId || '') === animeChannelId);
-  if (forumType !== 'question' && isAnimeTaggedRelay) {
-    attachmentPrepared.post.accentColor = 0xf3f4f6;
+  const matchedBotRoutes = Array.isArray(attachmentPrepared.post?.matchedBotHashtagRoutes)
+    ? attachmentPrepared.post.matchedBotHashtagRoutes
+    : [];
+  if (forumType !== 'question' && (matchedGlobalRoutes.length || matchedBotRoutes.length)) {
+    attachmentPrepared.post.accentColor = resolveRouteAccentColor({
+      globalRouteKeys: matchedGlobalRoutes,
+      botRouteKeys: matchedBotRoutes,
+      config,
+      logger,
+      sourceMessageId: post.messageId
+    });
   }
   if (forumType === 'question') {
     logger.info('Question card built', {
@@ -999,6 +1053,15 @@ async function relayTweetMessage(message, { config, db, logger }) {
     return;
   }
 
+  if (hasSilentControlToken(message.content || '')) {
+    logger.info('timeline relay skipped silent token', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      parentId: String(message.channel.parentId || '')
+    });
+    return;
+  }
+
   const extractedPost = await extractThreadMessagePost(message, config, logger);
   const post = await enrichPostWithMusicLink(extractedPost, { db, logger });
   const desiredTargets = getTweetDestinationTargets(post, config);
@@ -1208,6 +1271,16 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
     logger.info('Ignoring messageUpdate because author is a bot', {
       messageId: message.id,
       reason: 'bot_author'
+    });
+    return;
+  }
+
+  if (hasSilentControlToken(message.content || '')) {
+    logger.info('timeline relay skipped silent token', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      parentId: String(message.channel.parentId || ''),
+      update: true
     });
     return;
   }
@@ -1524,7 +1597,24 @@ function diffAddedRoutes(previous = [], next = []) {
 }
 
 async function relayGlobalHashtagMessage(message, { config, db, logger }) {
-  if (!message.inGuild?.() || message.author?.bot) {
+  const skipReason = getRouteScanSkipReason(message, config);
+  if (skipReason) {
+    const content = String(message.content || '');
+    if (content.split(/\r?\n/).some((line) => line.trim().startsWith('##'))) {
+      logger.info('route tag global scan skipped reason', {
+        sourceMessageId: message.id,
+        sourceChannelId: message.channelId,
+        parentId: String(message.channel?.parentId || ''),
+        reason: skipReason
+      });
+      if (skipReason === 'route_output_channel') {
+        logger.info('route tag loop prevention skipped', {
+          sourceMessageId: message.id,
+          sourceChannelId: message.channelId,
+          parentId: String(message.channel?.parentId || '')
+        });
+      }
+    }
     return;
   }
 
@@ -1534,6 +1624,16 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
   const isVcListenOnly = vcListenOnlyChannelIds.includes(sourceChannelId);
   const content = String(message.content || '');
   const hasDoublePrefix = content.split(/\r?\n/).some((line) => line.trim().startsWith('##'));
+  const isTweetThread = Boolean(message.channel?.isThread?.() && getForumType(message.channel.parentId, config) === 'tweet');
+
+  if (hasSilentControlToken(content)) {
+    logger.info('route relay skipped silent token', {
+      sourceMessageId: message.id,
+      sourceChannelId,
+      parentId: String(message.channel?.parentId || '')
+    });
+    return;
+  }
 
   logger.info('global hashtag messageCreate evaluated', {
     sourceMessageId: message.id,
@@ -1545,10 +1645,15 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
   });
 
   const globalMatches = detectGlobalHashtagMatches(content, globalHashtagRoutes);
+  const routing = parseRelayHashtagPrefixes(content, {
+    globalRoutes: config.globalHashtagRoutes,
+    botRoutes: config.botHashtagRoutes
+  });
+  const botMatches = isTweetThread && !isVcListenOnly ? [] : routing.botMatchedRoutes;
   const animeChannelId = String(config.anime?.channelId || '');
   const isAnimeRouteMatched = Array.from(globalMatches.values()).some((route) => String(route?.channelId || '') === animeChannelId);
 
-  let hasAnyRoute = globalMatches.size > 0;
+  let hasAnyRoute = globalMatches.size > 0 || botMatches.length > 0;
 
   if (!hasAnyRoute && !isVcListenOnly) {
     if (hasDoublePrefix) {
@@ -1574,7 +1679,18 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
     rawContent: content,
     isVcListenOnly,
     globalMatchCount: globalMatches.size,
-    globalMatchKeys: Array.from(globalMatches.keys())
+    globalMatchKeys: Array.from(globalMatches.keys()),
+    botMatchCount: botMatches.length,
+    botMatchKeys: botMatches
+  });
+  logger.info('route tag global scan accepted', {
+    sourceMessageId: message.id,
+    sourceChannelId,
+    parentId: String(message.channel?.parentId || ''),
+    globalMatchedRoutes: Array.from(globalMatches.keys()),
+    botMatchedRoutes: botMatches,
+    isVcListenOnly,
+    isTweetThread
   });
 
   const extractedPost = await extractPlainMessagePost(message, config, logger);
@@ -1639,12 +1755,13 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
     }
   }
 
-  if (isVcListenOnly) {
-    for (const routeKey of post.matchedBotHashtagRoutes || []) {
+  if (botMatches.length > 0 || isVcListenOnly) {
+    for (const routeKey of botMatches.length > 0 ? botMatches : post.matchedBotHashtagRoutes || []) {
       const route = config.botHashtagRoutes?.[routeKey];
       if (route?.channelId) {
-        const added = addDestination(route.channelId, `vc_hashtag:${routeKey}`);
-        logger.info('VC listen-only hashtag route matched', {
+        const relayKind = isVcListenOnly ? `vc_hashtag:${routeKey}` : `hashtag:${routeKey}`;
+        const added = addDestination(route.channelId, relayKind);
+        logger.info(isVcListenOnly ? 'VC listen-only hashtag route matched' : 'Bot hashtag route matched globally', {
           sourceMessageId: message.id,
           routeKey,
           destinationChannelId: route.channelId,
@@ -1653,8 +1770,8 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
       }
     }
 
-    if (config.timelineChannelId && (post.matchedBotHashtagRoutes?.length || globalMatches.size)) {
-      addDestination(config.timelineChannelId, 'vc_hashtag:timeline');
+    if (config.timelineChannelId && (botMatches.length || post.matchedBotHashtagRoutes?.length || globalMatches.size)) {
+      addDestination(config.timelineChannelId, isVcListenOnly ? 'vc_hashtag:timeline' : 'hashtag:timeline');
     }
   }
 
@@ -1847,21 +1964,47 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
     globalRoutes: config.globalHashtagRoutes,
     botRoutes: config.botHashtagRoutes
   });
+  const hasRoutes =
+    (Array.isArray(replyRouting.globalMatchedRoutes) && replyRouting.globalMatchedRoutes.length > 0) ||
+    (Array.isArray(replyRouting.botMatchedRoutes) && replyRouting.botMatchedRoutes.length > 0);
 
-  if (!Array.isArray(replyRouting.globalMatchedRoutes) || !replyRouting.globalMatchedRoutes.length) {
+  if (!hasRoutes) {
     return false;
   }
 
-  logger.info('reply route command detected', {
+  if (hasSilentControlToken(message.content || '')) {
+    logger.info('posthoc relay skipped silent token', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      replyTargetMessageId: message.reference.messageId,
+      tokenLocation: 'reply'
+    });
+    logger.info('route relay skipped silent token', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      replyTargetMessageId: message.reference.messageId,
+      posthoc: true
+    });
+    return true;
+  }
+
+  logger.info('posthoc hashtag reply detected', {
     sourceMessageId: message.id,
     sourceChannelId: message.channelId,
     replyTargetMessageId: message.reference.messageId,
     displayTags: replyRouting.displayTags
   });
+  logger.info('posthoc hashtag routes parsed', {
+    sourceMessageId: message.id,
+    replyTargetMessageId: message.reference.messageId,
+    globalMatchedRoutes: replyRouting.globalMatchedRoutes,
+    botMatchedRoutes: replyRouting.botMatchedRoutes,
+    displayTags: replyRouting.displayTags
+  });
 
   const targetMessage = await message.fetchReference().catch(() => null);
   if (!targetMessage?.inGuild?.()) {
-    logger.warn('reply route failed', {
+    logger.warn('posthoc hashtag referenced message fetch failed', {
       sourceMessageId: message.id,
       sourceChannelId: message.channelId,
       reason: 'reply_target_unavailable'
@@ -1869,16 +2012,45 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
     return true;
   }
 
-  logger.info('reply target fetched', {
+  logger.info('posthoc hashtag referenced message fetched', {
     sourceMessageId: message.id,
     sourceChannelId: message.channelId,
     replyTargetMessageId: targetMessage.id,
     replyTargetChannelId: targetMessage.channelId
   });
 
+  if (hasSilentControlToken(targetMessage.content || '')) {
+    logger.info('posthoc relay skipped silent token', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      replyTargetMessageId: targetMessage.id,
+      replyTargetChannelId: targetMessage.channelId,
+      tokenLocation: 'referenced_message'
+    });
+    logger.info('route relay skipped silent token', {
+      sourceMessageId: targetMessage.id,
+      sourceChannelId: targetMessage.channelId,
+      routedByMessageId: message.id,
+      posthoc: true
+    });
+    return true;
+  }
+
+  const targetSkipReason = getRouteScanSkipReason(targetMessage, config);
+  if (targetSkipReason) {
+    logger.info('route tag loop prevention skipped', {
+      sourceMessageId: message.id,
+      replyTargetMessageId: targetMessage.id,
+      replyTargetChannelId: targetMessage.channelId,
+      reason: targetSkipReason
+    });
+    return true;
+  }
+
   const post = await extractPlainMessagePost(targetMessage, config, logger);
   post.displayBotHashtags = replyRouting.displayTags;
   post.matchedGlobalHashtagRoutes = replyRouting.globalMatchedRoutes;
+  post.matchedBotHashtagRoutes = replyRouting.botMatchedRoutes;
   post.detectedGlobalHashtags = replyRouting.globalDetectedTags;
   post.routedByUserId = message.author.id;
 
@@ -1906,14 +2078,33 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
     }
   }
 
-  logger.info('reply route destinations computed', {
+  for (const routeKey of replyRouting.botMatchedRoutes) {
+    const route = config.botHashtagRoutes?.[routeKey];
+    if (route?.channelId) {
+      addDestination(route.channelId, `reply_hashtag:${routeKey}`);
+    }
+    if (config.timelineChannelId) {
+      addDestination(config.timelineChannelId, `reply_hashtag:${routeKey}:timeline`);
+    }
+  }
+
+  logger.info('posthoc hashtag relay started', {
     sourceMessageId: message.id,
     replyTargetMessageId: targetMessage.id,
     destinations: destinationTargets.map((target) => target.destinationChannelId),
-    displayTags: post.displayBotHashtags
+    displayTags: post.displayBotHashtags,
+    globalMatchedRoutes: replyRouting.globalMatchedRoutes,
+    botMatchedRoutes: replyRouting.botMatchedRoutes
   });
 
   if (!destinationTargets.length) {
+    logger.info('posthoc hashtag relay finished', {
+      sourceMessageId: message.id,
+      replyTargetMessageId: targetMessage.id,
+      sentCount: 0,
+      skippedCount: 0,
+      reason: 'no_valid_destinations'
+    });
     return true;
   }
 
@@ -1923,11 +2114,21 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
     logger
   });
 
+  const relayedRouteMessageIds = {};
+  let relayedTimelineMessageId = null;
+  let sentCount = 0;
+  let skippedCount = 0;
+
   try {
     for (const target of destinationTargets) {
       const existingRelay = db.relays.getMessageRelayTarget(targetMessage.id, target.destinationChannelId);
       if (existingRelay?.relayedMessageId) {
-        logger.info('reply route skipped duplicate', {
+        relayedRouteMessageIds[target.destinationChannelId] = existingRelay.relayedMessageId;
+        if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
+          relayedTimelineMessageId = existingRelay.relayedMessageId;
+        }
+        skippedCount += 1;
+        logger.info('posthoc hashtag duplicate skipped', {
           replyTargetMessageId: targetMessage.id,
           destinationChannelId: target.destinationChannelId,
           existingRelayedMessageId: existingRelay.relayedMessageId
@@ -1937,10 +2138,18 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
 
       const relayInFlightKey = buildRelayInFlightKey(targetMessage.id, target.destinationChannelId, target.relayKind);
       if (message.client.timelineRelayMessageInFlight.has(relayInFlightKey)) {
+        skippedCount += 1;
+        logger.info('posthoc hashtag duplicate skipped', {
+          replyTargetMessageId: targetMessage.id,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
+          reason: 'in_flight'
+        });
         continue;
       }
       const destinationChannel = await getTextChannel(message.guild, target.destinationChannelId);
       if (!destinationChannel) {
+        skippedCount += 1;
         continue;
       }
 
@@ -1953,6 +2162,11 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
           sendPurpose: 'reply_global_hashtag:relay-send',
           callsiteLabel: 'reply-global-hashtag:message-create'
         });
+        sentCount += 1;
+        relayedRouteMessageIds[target.destinationChannelId] = sentMessage.id;
+        if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
+          relayedTimelineMessageId = sentMessage.id;
+        }
         db.relays.upsertMessageRelayTarget({
           sourceMessageId: targetMessage.id,
           destinationChannelId: target.destinationChannelId,
@@ -1971,9 +2185,15 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
           sourceThreadId: sourceChannelId,
           authorId: targetMessage.author?.id || null
         });
-        logger.info('reply route sent', {
+        logger.info('posthoc hashtag relay sent', {
           replyTargetMessageId: targetMessage.id,
           destinationChannelId: target.destinationChannelId,
+          relayedMessageId: sentMessage.id
+        });
+        logger.info('posthoc hashtag missing destination sent', {
+          replyTargetMessageId: targetMessage.id,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
           relayedMessageId: sentMessage.id
         });
       } finally {
@@ -1983,6 +2203,57 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
   } finally {
     await cleanup();
   }
+
+  const animeChannelId = String(config.anime?.channelId || '');
+  const isAnimeRouteMatched = replyRouting.globalMatchedRoutes.some((routeKey) => {
+    const route = config.globalHashtagRoutes?.[routeKey];
+    return String(route?.channelId || '') === animeChannelId;
+  });
+
+  if (isAnimeRouteMatched) {
+    logger.info('posthoc hashtag anime integration started', {
+      sourceMessageId: message.id,
+      replyTargetMessageId: targetMessage.id,
+      matchedRouteKeys: replyRouting.globalMatchedRoutes
+    });
+    db.anime.upsertHashtagSource({
+      guildId: targetMessage.guildId,
+      sourceMessageId: targetMessage.id,
+      sourceChannelId,
+      sourceAuthorId: targetMessage.author?.id || null,
+      relayedTimelineMessageId,
+      relayedRouteMessageIdsJson: JSON.stringify(relayedRouteMessageIds),
+      cleanedContent: String(post.content || ''),
+      displayTagsJson: JSON.stringify(Array.isArray(post.displayBotHashtags) ? post.displayBotHashtags : []),
+      detectedCandidate: null,
+      animeEntryId: null,
+      status: 'pending'
+    });
+    void handleAnimeHashtagPost(targetMessage, {
+      matchedRouteKeys: replyRouting.globalMatchedRoutes,
+      cleanedContent: post.content,
+      displayHashtags: post.displayBotHashtags
+    }).then(() => {
+      logger.info('posthoc hashtag anime integration finished', {
+        sourceMessageId: message.id,
+        replyTargetMessageId: targetMessage.id
+      });
+    }).catch((error) => {
+      logger.warn('posthoc hashtag anime integration finished', {
+        sourceMessageId: message.id,
+        replyTargetMessageId: targetMessage.id,
+        error: error.message
+      });
+    });
+  }
+
+  logger.info('posthoc hashtag relay finished', {
+    sourceMessageId: message.id,
+    replyTargetMessageId: targetMessage.id,
+    sentCount,
+    skippedCount,
+    destinationCount: destinationTargets.length
+  });
 
   return true;
 }
@@ -1995,6 +2266,27 @@ async function handleRouteAddedOnMessageUpdate(oldMessage, newMessage, { config,
 
   const oldContent = String(oldMessage?.content || '');
   const newContent = String(message.content || '');
+  if (hasSilentControlToken(newContent)) {
+    logger.info('route relay skipped silent token', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      update: true
+    });
+    return;
+  }
+
+  const skipReason = getRouteScanSkipReason(message, config);
+  if (skipReason) {
+    logger.info('route tag global scan skipped reason', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      parentId: String(message.channel?.parentId || ''),
+      reason: skipReason,
+      update: true
+    });
+    return;
+  }
+
   const oldRouting = parseRelayHashtagPrefixes(oldContent, {
     globalRoutes: config.globalHashtagRoutes,
     botRoutes: config.botHashtagRoutes
@@ -2028,10 +2320,78 @@ async function handleRouteAddedOnMessageUpdate(oldMessage, newMessage, { config,
     return;
   }
 
+  const sourceChannelId = String(message.channelId || '');
+  const editDestinations = [];
+  const seenEditDestinations = new Set();
+  const addEditDestination = (destinationChannelId, relayKind, routeKey) => {
+    const destId = String(destinationChannelId || '');
+    if (!destId || destId === sourceChannelId || seenEditDestinations.has(destId)) {
+      return;
+    }
+    seenEditDestinations.add(destId);
+    editDestinations.push({ destinationChannelId: destId, relayKind, routeKey });
+  };
+  const animeChannelId = String(config.anime?.channelId || '');
+  for (const routeKey of addedGlobalRoutes) {
+    const route = config.globalHashtagRoutes?.[routeKey];
+    const isAnimeDestinationRoute = animeChannelId && String(route?.channelId || '') === animeChannelId;
+    if (route?.channelId && route.relayUserPostToDestination !== false && !isAnimeDestinationRoute) {
+      addEditDestination(route.channelId, `global_hashtag:${routeKey}`, routeKey);
+    }
+    if (route?.alsoTimeline && config.timelineChannelId) {
+      addEditDestination(config.timelineChannelId, `global_hashtag:${routeKey}:timeline`, routeKey);
+    }
+  }
+  for (const routeKey of addedBotRoutes) {
+    const route = config.botHashtagRoutes?.[routeKey];
+    if (route?.channelId) {
+      addEditDestination(route.channelId, `hashtag:${routeKey}`, routeKey);
+    }
+    if (config.timelineChannelId) {
+      addEditDestination(config.timelineChannelId, `hashtag:${routeKey}:timeline`, routeKey);
+    }
+  }
+  const missingEditDestinations = [];
+  for (const destination of editDestinations) {
+    const existingRelay = db.relays.getMessageRelayTarget(message.id, destination.destinationChannelId);
+    if (existingRelay?.relayedMessageId) {
+      logger.info('message edit route already existed skipped', {
+        sourceMessageId: message.id,
+        sourceChannelId: message.channelId,
+        destinationChannelId: destination.destinationChannelId,
+        relayKind: destination.relayKind,
+        existingRelayedMessageId: existingRelay.relayedMessageId
+      });
+      continue;
+    }
+    missingEditDestinations.push(destination);
+  }
+
+  logger.info('message edit route tags added', {
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    addedGlobalRoutes,
+    addedBotRoutes,
+    displayTags: newRouting.displayTags
+  });
+  logger.info('message edit new route destinations', {
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    destinations: missingEditDestinations
+  });
+
+  if (addedGlobalRoutes.some((routeKey) => String(config.globalHashtagRoutes?.[routeKey]?.channelId || '') === animeChannelId)) {
+    logger.info('message edit anime integration triggered', {
+      sourceMessageId: message.id,
+      sourceChannelId: message.channelId,
+      addedGlobalRoutes
+    });
+  }
+
   const isTweetThread = Boolean(message.channel?.isThread?.() && getForumType(message.channel.parentId, config) === 'tweet');
   const isVcListenOnly = (config.vcListenOnlyChannelIds || []).includes(String(message.channelId || ''));
   const shouldRelayTweetRoutes = isTweetThread && addedBotRoutes.length > 0;
-  const shouldRelayGlobalRoutes = addedGlobalRoutes.length > 0 || (isVcListenOnly && addedBotRoutes.length > 0);
+  const shouldRelayGlobalRoutes = addedGlobalRoutes.length > 0 || (!isTweetThread && addedBotRoutes.length > 0) || (isVcListenOnly && addedBotRoutes.length > 0);
 
   logger.info('message update route destination computed', {
     sourceMessageId: message.id,

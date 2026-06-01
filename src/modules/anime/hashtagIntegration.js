@@ -569,7 +569,11 @@ function scoreAniListCandidate(candidate, media) {
 
   const candidateSeasonContext = extractCandidateSeasonContext(candidate);
   const mediaSeasonInfo = extractMediaSeasonInfo(media);
-  const matchQuery = candidate.searchQueryInfo?.canonicalQuery || candidate.normalizedCandidate || candidate.rawTitle || '';
+  const matchQuery = candidate.searchQueryInfo?.original
+    || candidate.searchQueryInfo?.canonicalQuery
+    || candidate.normalizedCandidate
+    || candidate.rawTitle
+    || '';
   const baseAnalysis = analyzeResolvedWorkMatch(matchQuery, media);
   const candidateTitle = canonicalTitle(matchQuery);
   const titles = [
@@ -858,7 +862,7 @@ async function resolveAnimeCandidate(client, candidate) {
   }
 
   const queryInfo = candidate.searchQueryInfo || normalizeAnimeSearchQuery(candidate.normalizedCandidate || candidate.rawTitle);
-  const results = await searchAnime(client, queryInfo.canonicalQuery || candidate.normalizedCandidate || candidate.rawTitle);
+  const results = await searchAnime(client, queryInfo.original || queryInfo.canonicalQuery || candidate.normalizedCandidate || candidate.rawTitle);
   const scored = results.map((media) => ({
     media,
     ...scoreAniListCandidate(candidate, media)

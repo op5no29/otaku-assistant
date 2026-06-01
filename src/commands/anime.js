@@ -394,7 +394,7 @@ module.exports = {
           aliasKind: aliasResolved.aliasKind,
           franchiseKey: aliasResolved.franchiseKey || null
         });
-        const resolved = await resolveAnimeFromTitle(client, searchTitle, interaction.guildId);
+        const resolved = await resolveAnimeFromTitle(client, rawTitle, interaction.guildId);
         if (!resolved.media) {
           const hint = aliasResolved.aliasMatched
             ? `「${searchTitle}」で検索しましたが見つかりませんでした。`
