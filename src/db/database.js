@@ -1849,12 +1849,14 @@ function createDatabase(databasePath) {
         message_id,
         owner_user_id,
         purpose,
+        metadata_json,
         expires_at,
         created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(message_id) DO UPDATE SET
         owner_user_id = excluded.owner_user_id,
         purpose = excluded.purpose,
+        metadata_json = excluded.metadata_json,
         expires_at = excluded.expires_at
     `),
     getBotDeletableMessage: sqlite.prepare(`
@@ -1864,6 +1866,7 @@ function createDatabase(databasePath) {
         message_id AS messageId,
         owner_user_id AS ownerUserId,
         purpose,
+        metadata_json AS metadataJson,
         expires_at AS expiresAt,
         created_at AS createdAt
       FROM bot_deletable_messages
@@ -1949,6 +1952,12 @@ function createDatabase(databasePath) {
         source_thread_id = excluded.source_thread_id,
         author_id = excluded.author_id,
         updated_at = excluded.updated_at
+    `),
+    deleteTimelineDestinationStateIfCurrent: sqlite.prepare(`
+      DELETE FROM timeline_destination_state
+      WHERE guild_id = ?
+        AND destination_channel_id = ?
+        AND relayed_message_id = ?
     `),
     upsertUserLlmMemory: sqlite.prepare(`
       INSERT INTO user_llm_memories (
@@ -2774,8 +2783,26 @@ function createDatabase(databasePath) {
       }
     },
     deletableMessages: {
-      upsert({ guildId, channelId, messageId, ownerUserId, purpose = null, expiresAt = null, createdAt = new Date().toISOString() }) {
-        statements.upsertBotDeletableMessage.run(guildId, channelId, messageId, ownerUserId, purpose, expiresAt, createdAt);
+      upsert({
+        guildId,
+        channelId,
+        messageId,
+        ownerUserId,
+        purpose = null,
+        metadataJson = null,
+        expiresAt = null,
+        createdAt = new Date().toISOString()
+      }) {
+        statements.upsertBotDeletableMessage.run(
+          guildId,
+          channelId,
+          messageId,
+          ownerUserId,
+          purpose,
+          metadataJson,
+          expiresAt,
+          createdAt
+        );
       },
       get(messageId) {
         return statements.getBotDeletableMessage.get(messageId) || null;
@@ -2841,6 +2868,9 @@ function createDatabase(databasePath) {
           authorId,
           new Date().toISOString()
         );
+      },
+      deleteIfCurrent(guildId, destinationChannelId, relayedMessageId) {
+        statements.deleteTimelineDestinationStateIfCurrent.run(guildId, destinationChannelId, relayedMessageId);
       }
     },
     userMemories: {

@@ -18,6 +18,7 @@ const { getMessageJumpUrl } = require('../../services/discordLinks');
 const { getSilentRelayControl, parseRelayHashtagPrefixes } = require('../../utils/text');
 const { resolveRouteAccentColor } = require('../../utils/accentColors');
 const { handleAnimeHashtagPost } = require('../anime/hashtagIntegration');
+const { registerPosthocDeletableCard } = require('../deletableMessages');
 
 const QUESTION_ROLE_SELECT_PREFIX = 'question-role-select:';
 const QUESTION_ROLE_SKIP_PREFIX = 'question-role-skip:';
@@ -157,6 +158,35 @@ function applyRoleMentionSection(post, {
     roleMentionIds: normalizedRoleIds,
     allowedMentionRoleIds: allowMentions ? normalizedRoleIds : []
   };
+}
+
+function resolveDisplayNameFromMessage(message) {
+  return (
+    message?.member?.displayName ||
+    message?.author?.globalName ||
+    message?.author?.username ||
+    '不明なユーザー'
+  );
+}
+
+function normalizePosthocDisplayTag(tag) {
+  const value = String(tag || '').trim();
+  if (!value) {
+    return null;
+  }
+  if (value.startsWith('##')) {
+    return value;
+  }
+  if (value.startsWith('#')) {
+    return `#${value}`;
+  }
+  return `##${value}`;
+}
+
+function buildPosthocDisplayTags(routing) {
+  return [...new Set((Array.isArray(routing?.displayTags) ? routing.displayTags : [])
+    .map(normalizePosthocDisplayTag)
+    .filter(Boolean))];
 }
 
 function shouldPromptQuestionRoles(config) {
@@ -2566,11 +2596,18 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
   }
 
   const post = await extractPlainMessagePost(targetMessage, config, logger);
+  const posthocDisplayTags = buildPosthocDisplayTags(replyRouting);
   post.displayBotHashtags = replyRouting.displayTags;
   post.matchedGlobalHashtagRoutes = replyRouting.globalMatchedRoutes;
   post.matchedBotHashtagRoutes = replyRouting.botMatchedRoutes;
   post.detectedGlobalHashtags = replyRouting.globalDetectedTags;
   post.routedByUserId = message.author.id;
+  post.relayOrigin = 'posthoc_hashtag';
+  post.originalAuthorId = targetMessage.author?.id || null;
+  post.originalAuthorDisplayName = post.displayName;
+  post.taggerUserId = message.author.id;
+  post.taggerDisplayName = resolveDisplayNameFromMessage(message);
+  post.posthocDisplayTags = posthocDisplayTags;
 
   const sourceChannelId = String(targetMessage.channelId || '');
   const destinationTargets = [];
@@ -2611,6 +2648,7 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
     replyTargetMessageId: targetMessage.id,
     destinations: destinationTargets.map((target) => target.destinationChannelId),
     displayTags: post.displayBotHashtags,
+    posthocDisplayTags,
     globalMatchedRoutes: replyRouting.globalMatchedRoutes,
     botMatchedRoutes: replyRouting.botMatchedRoutes
   });
@@ -2694,6 +2732,14 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
           relayKind: target.relayKind,
           relayedMessageId: sentMessage.id,
           authorId: targetMessage.author?.id || null
+        });
+        await registerPosthocDeletableCard(sentMessage, {
+          ownerUserId: targetMessage.author?.id || '',
+          sourceMessageId: targetMessage.id,
+          destinationChannelId: target.destinationChannelId,
+          taggerUserId: message.author.id,
+          relayKind: target.relayKind,
+          displayTags: posthocDisplayTags
         });
         updateTimelineDestinationState(db, {
           guildId: message.guildId,

@@ -397,6 +397,7 @@ function runMigrations(database) {
       message_id TEXT NOT NULL,
       owner_user_id TEXT NOT NULL,
       purpose TEXT,
+      metadata_json TEXT,
       expires_at TEXT,
       created_at TEXT NOT NULL,
       PRIMARY KEY (message_id)
@@ -576,6 +577,17 @@ function runMigrations(database) {
 
   if (animeReviewPromptStateColumns.size && !animeReviewPromptStateColumns.has('thread_id')) {
     database.exec('ALTER TABLE anime_review_prompt_state ADD COLUMN thread_id TEXT');
+  }
+
+  const botDeletableMessageColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(bot_deletable_messages)')
+      .all()
+      .map((column) => column.name)
+  );
+
+  if (botDeletableMessageColumns.size && !botDeletableMessageColumns.has('metadata_json')) {
+    database.exec('ALTER TABLE bot_deletable_messages ADD COLUMN metadata_json TEXT');
   }
 }
 

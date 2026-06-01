@@ -81,6 +81,35 @@ function buildTweetHeaderSection({ title, avatarUrl }) {
   return section;
 }
 
+function normalizePosthocTagLabel(label) {
+  const value = String(label || '').trim();
+  if (!value) {
+    return null;
+  }
+  if (value.startsWith('##')) {
+    return value;
+  }
+  if (value.startsWith('#')) {
+    return `#${value}`;
+  }
+  return `##${value}`;
+}
+
+function buildPosthocHashtagHeadline(post) {
+  if (post.relayOrigin !== 'posthoc_hashtag') {
+    return null;
+  }
+
+  const originalAuthorName = post.originalAuthorDisplayName || post.displayName || '不明なユーザー';
+  const taggerName = post.taggerDisplayName || '不明なユーザー';
+  const tagLabels = [...new Set((Array.isArray(post.posthocDisplayTags) ? post.posthocDisplayTags : [])
+    .map(normalizePosthocTagLabel)
+    .filter(Boolean))];
+  const tagText = tagLabels.length ? tagLabels.join(' / ') : 'タグ';
+
+  return `${originalAuthorName} さんの投稿を ${taggerName} さんが ${tagText} にタグ付けしました`;
+}
+
 function buildAuthorSection({ displayName, avatarUrl }) {
   const section = new SectionBuilder().addTextDisplayComponents(
     new TextDisplayBuilder().setContent(`### ${displayName}`)
@@ -516,7 +545,7 @@ function buildTweetTimelineMessage({ post, config, logger = null }) {
 
   container.addSectionComponents(
     buildTweetHeaderSection({
-      title: post.timelineHeadline || `${post.displayName} さんが投稿しました`,
+      title: buildPosthocHashtagHeadline(post) || post.timelineHeadline || `${post.displayName} さんが投稿しました`,
       avatarUrl: post.avatarUrl
     })
   );
