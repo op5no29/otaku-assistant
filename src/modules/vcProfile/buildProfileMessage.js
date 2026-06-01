@@ -20,7 +20,7 @@ function buildMemberSection(member) {
   const displayName = member.displayName || '不明なメンバー';
   const introSummary = member.introSummary?.trim()
     ? emphasizeSocialLinks(truncateText(member.introSummary.trim(), 260))
-    : '自己紹介はまだ見つかりませんでした。';
+    : '自己紹介がまだありません';
   const avatarUrl = member.avatarUrl || null;
 
   if (!avatarUrl) {

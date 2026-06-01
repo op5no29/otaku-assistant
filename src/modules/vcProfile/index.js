@@ -330,36 +330,58 @@ async function queueVoiceProfileCategoryUpdate(client, guild, categoryId, { reas
   return queue.promise;
 }
 
-async function buildVoiceChannelMembers(client, voiceChannel) {
+async function buildVoiceMemberProfiles(client, humanMembers, { guildId, categoryId }) {
   const introChannel = await client.channels.fetch(client.appConfig.introChannelId).catch(() => null);
-  const humans = [...voiceChannel.members.values()].filter((member) => !member.user?.bot);
 
-  client.logger.info('vc profile actual member scan', {
-    guildId: voiceChannel.guild?.id || null,
-    voiceChannelId: voiceChannel.id,
-    voiceChannelName: voiceChannel.name,
-    cachedMemberCount: voiceChannel.members.size,
-    humanMemberCount: humans.length,
-    ignoredBotCount: voiceChannel.members.size - humans.length
-  });
+  const enrichedMembers = await Promise.all(
+    humanMembers.map(async (member) => {
+      let introMessage = null;
+      if (introChannel) {
+        try {
+          introMessage = await findLatestIntroMessage(introChannel, member.id);
+        } catch (error) {
+          client.logger.warn('vc profile member missing intro fallback used', {
+            guildId,
+            categoryId,
+            userId: member.id,
+            reason: 'intro_lookup_failed',
+            error: error.message
+          });
+        }
+      }
 
-  const members = await Promise.all(
-    humans.map(async (member) => {
-      const introMessage = introChannel
-        ? await findLatestIntroMessage(introChannel, member.id)
-        : null;
+      let avatarUrl = null;
+      try {
+        avatarUrl = member.displayAvatarURL?.({ extension: 'png', size: 128 }) || null;
+      } catch (error) {
+        client.logger.warn('vc profile member missing intro fallback used', {
+          guildId,
+          categoryId,
+          userId: member.id,
+          reason: 'avatar_lookup_failed',
+          error: error.message
+        });
+      }
+
+      if (!introMessage?.content?.trim()) {
+        client.logger.info('vc profile member missing intro fallback used', {
+          guildId,
+          categoryId,
+          userId: member.id
+        });
+      }
 
       return {
         id: member.id,
         displayName: member.displayName || member.user?.globalName || member.user?.username || '不明なメンバー',
-        avatarUrl: member.displayAvatarURL?.({ extension: 'png', size: 128 }) || null,
+        avatarUrl,
         introSummary: introMessage?.content?.trim() || null
       };
     })
   );
 
-  members.sort((left, right) => left.displayName.localeCompare(right.displayName, 'ja'));
-  return members;
+  enrichedMembers.sort((left, right) => left.displayName.localeCompare(right.displayName, 'ja'));
+  return enrichedMembers;
 }
 
 function getCachedVoiceChannelsForCategory(guild, categoryId) {
@@ -392,34 +414,176 @@ function formatVoiceChannelName(activeChannels) {
   return `${names.slice(0, 3).join(' / ')} ほか${names.length - 3}件`;
 }
 
-function normalizeUniqueMembers(channelMembers) {
-  const memberMap = new Map();
-  for (const member of channelMembers.flat()) {
-    if (!memberMap.has(member.id)) {
-      memberMap.set(member.id, member);
+async function resolveVoiceStateMember(guild, voiceState) {
+  const userId = String(voiceState?.id || voiceState?.member?.id || '').trim();
+  if (!userId) {
+    return null;
+  }
+
+  return voiceState.member ||
+    guild.members.cache.get(userId) ||
+    await guild.members.fetch(userId).catch(() => null);
+}
+
+async function collectCategoryVoiceMembers(client, guild, categoryId, voiceChannels) {
+  const channelIds = new Set(voiceChannels.map((channel) => String(channel.id)));
+  const channelSourceHumans = new Map();
+  const voiceStateSourceHumans = new Map();
+  const voiceStateMemberEntries = new Map();
+  const excludedBotIds = new Set();
+  const excludedMissingMemberIds = new Set();
+
+  client.logger.info('vc profile category member scan started', {
+    guildId: guild.id,
+    categoryId,
+    voiceChannelIds: [...channelIds]
+  });
+
+  client.logger.info('vc profile category voice channels scanned', {
+    guildId: guild.id,
+    categoryId,
+    channels: voiceChannels.map((channel) => ({
+      id: channel.id,
+      name: channel.name,
+      cachedMemberCount: channel.members?.size || 0
+    }))
+  });
+
+  for (const voiceChannel of voiceChannels) {
+    for (const member of voiceChannel.members?.values?.() || []) {
+      if (!member) {
+        continue;
+      }
+
+      if (member.user?.bot) {
+        excludedBotIds.add(String(member.id));
+        client.logger.info('vc profile member excluded bot', {
+          guildId: guild.id,
+          categoryId,
+          voiceChannelId: voiceChannel.id,
+          userId: member.id,
+          source: 'channel.members'
+        });
+        continue;
+      }
+
+      if (!channelSourceHumans.has(member.id)) {
+        channelSourceHumans.set(member.id, {
+          member,
+          channelId: voiceChannel.id
+        });
+      }
     }
   }
 
-  return [...memberMap.values()]
-    .sort((left, right) => left.displayName.localeCompare(right.displayName, 'ja'));
+  const voiceStates = [...(guild.voiceStates?.cache?.values?.() || [])]
+    .filter((voiceState) => channelIds.has(String(voiceState?.channelId || voiceState?.channel?.id || '')));
+
+  for (const voiceState of voiceStates) {
+    const userId = String(voiceState?.id || voiceState?.member?.id || '').trim();
+    const voiceChannelId = String(voiceState?.channelId || voiceState?.channel?.id || '');
+    const member = await resolveVoiceStateMember(guild, voiceState);
+    if (!member) {
+      excludedMissingMemberIds.add(userId || '(unknown)');
+      client.logger.warn('vc profile member excluded missing member', {
+        guildId: guild.id,
+        categoryId,
+        voiceChannelId,
+        userId: userId || null,
+        source: 'guild.voiceStates.cache'
+      });
+      continue;
+    }
+
+    if (member.user?.bot) {
+      excludedBotIds.add(String(member.id));
+      client.logger.info('vc profile member excluded bot', {
+        guildId: guild.id,
+        categoryId,
+        voiceChannelId,
+        userId: member.id,
+        source: 'guild.voiceStates.cache'
+      });
+      continue;
+    }
+
+    voiceStateSourceHumans.set(member.id, member);
+    if (!voiceStateMemberEntries.has(member.id)) {
+      voiceStateMemberEntries.set(member.id, {
+        member,
+        channelId: voiceChannelId
+      });
+    }
+    client.logger.info('vc profile human member included', {
+      guildId: guild.id,
+      categoryId,
+      voiceChannelId,
+      userId: member.id,
+      displayName: member.displayName || member.user?.globalName || member.user?.username || null,
+      source: 'guild.voiceStates.cache'
+    });
+  }
+
+  const finalEntries = voiceStates.length > 0
+    ? voiceStateMemberEntries
+    : channelSourceHumans;
+  const finalSource = voiceStates.length > 0
+    ? 'guild.voiceStates.cache'
+    : 'channel.members_fallback';
+
+  if (finalSource === 'channel.members_fallback') {
+    for (const entry of finalEntries.values()) {
+      client.logger.info('vc profile human member included', {
+        guildId: guild.id,
+        categoryId,
+        voiceChannelId: entry.channelId,
+        userId: entry.member.id,
+        displayName: entry.member.displayName || entry.member.user?.globalName || entry.member.user?.username || null,
+        source: finalSource
+      });
+    }
+  }
+
+  client.logger.info('vc profile category member source counts', {
+    guildId: guild.id,
+    categoryId,
+    channelMemberHumanCount: channelSourceHumans.size,
+    voiceStateHumanCount: voiceStateSourceHumans.size,
+    voiceStateRawCount: voiceStates.length,
+    finalHumanCount: finalEntries.size,
+    finalSource,
+    excludedBotIds: [...excludedBotIds],
+    excludedMissingMemberIds: [...excludedMissingMemberIds]
+  });
+
+  if (channelSourceHumans.size !== voiceStateSourceHumans.size && voiceStates.length > 0) {
+    client.logger.warn('vc profile count mismatch detected', {
+      guildId: guild.id,
+      categoryId,
+      channelMemberHumanCount: channelSourceHumans.size,
+      voiceStateHumanCount: voiceStateSourceHumans.size,
+      finalHumanCount: finalEntries.size,
+      finalSource
+    });
+  }
+
+  return {
+    entries: [...finalEntries.values()],
+    finalSource,
+    channelSourceHumanCount: channelSourceHumans.size,
+    voiceStateHumanCount: voiceStateSourceHumans.size
+  };
 }
 
 async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapping) {
   const voiceChannels = await getVoiceChannelsForCategory(guild, categoryId);
-  const activeChannels = [];
-  const allMembers = [];
+  const channelById = new Map(voiceChannels.map((channel) => [String(channel.id), channel]));
+  const memberScan = await collectCategoryVoiceMembers(client, guild, categoryId, voiceChannels);
+  const activeChannelIds = new Set(memberScan.entries.map((entry) => String(entry.channelId)));
+  const activeChannels = [...activeChannelIds]
+    .map((channelId) => channelById.get(channelId))
+    .filter(Boolean);
   const statusLines = [];
-
-  for (const voiceChannel of voiceChannels) {
-    const freshVoiceChannel = await getFreshVoiceChannel(guild, voiceChannel.id) || voiceChannel;
-    const members = await buildVoiceChannelMembers(client, freshVoiceChannel);
-    if (members.length === 0) {
-      continue;
-    }
-
-    activeChannels.push(freshVoiceChannel);
-    allMembers.push(members);
-  }
 
   for (const activeChannel of activeChannels) {
     const statusText = await resolveVoiceChannelStatusText(client, activeChannel, mapping);
@@ -429,9 +593,34 @@ async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapp
     statusLines.push(activeChannels.length === 1 ? statusText : `${activeChannel.name}: ${statusText}`);
   }
 
+  const members = await buildVoiceMemberProfiles(
+    client,
+    memberScan.entries.map((entry) => entry.member),
+    { guildId: guild.id, categoryId }
+  );
+
+  client.logger.info('vc profile final rendered member count', {
+    guildId: guild.id,
+    categoryId,
+    finalSource: memberScan.finalSource,
+    renderedMemberCount: members.length,
+    scannedHumanCount: memberScan.entries.length,
+    memberIds: members.map((member) => member.id)
+  });
+
+  if (members.length !== memberScan.entries.length) {
+    client.logger.warn('vc profile count mismatch detected', {
+      guildId: guild.id,
+      categoryId,
+      renderedMemberCount: members.length,
+      scannedHumanCount: memberScan.entries.length,
+      finalSource: memberScan.finalSource
+    });
+  }
+
   return {
     activeChannels,
-    members: normalizeUniqueMembers(allMembers),
+    members,
     statusText: [...new Set(statusLines)].join('\n') || null,
     voiceChannelName: activeChannels.length ? formatVoiceChannelName(activeChannels) : ''
   };
