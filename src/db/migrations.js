@@ -20,6 +20,35 @@ function runMigrations(database) {
       guide_sent_at TEXT
     );
 
+    CREATE TABLE IF NOT EXISTS question_role_prompts (
+      thread_id TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      author_user_id TEXT NOT NULL,
+      prompt_message_id TEXT,
+      selected_role_ids_json TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      relayed_message_id TEXT,
+      expires_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_question_role_prompts_status
+      ON question_role_prompts (guild_id, status, expires_at);
+
+    CREATE TABLE IF NOT EXISTS role_panel_messages (
+      guild_id TEXT NOT NULL,
+      panel_kind TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, panel_kind)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_role_panel_messages_message
+      ON role_panel_messages (message_id);
+
     CREATE TABLE IF NOT EXISTS relayed_messages (
       message_id TEXT PRIMARY KEY,
       thread_id TEXT NOT NULL,

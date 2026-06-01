@@ -470,6 +470,37 @@ function addAttachmentNamesSection(container, post, { showOnlyAsFallback = false
   return true;
 }
 
+function normalizeRoleMentionIds(roleIds) {
+  return [...new Set((Array.isArray(roleIds) ? roleIds : [])
+    .map((roleId) => String(roleId || '').trim())
+    .filter(Boolean))];
+}
+
+function buildRoleMentionContent(label, roleIds) {
+  const normalizedRoleIds = normalizeRoleMentionIds(roleIds);
+  if (!normalizedRoleIds.length) {
+    return null;
+  }
+
+  return [
+    `**${label}**`,
+    normalizedRoleIds.map((roleId) => `<@&${roleId}>`).join(' ')
+  ].join('\n');
+}
+
+function buildAllowedMentionsForPost(post) {
+  const roleIds = normalizeRoleMentionIds(post.allowedMentionRoleIds);
+  if (!roleIds.length) {
+    return { parse: [] };
+  }
+
+  return {
+    parse: [],
+    users: [],
+    roles: roleIds
+  };
+}
+
 function buildTweetTimelineMessage({ post, config, logger = null }) {
   const container = createBaseContainer(post.accentColor || ACCENT_COLORS.timeline);
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
@@ -561,6 +592,13 @@ function buildQuestionTimelineMessage({ post, config, logger = null }) {
       avatarDescription: `${post.displayName || '質問作成者'} のアイコン`
     })
   );
+  const questionRoleMentions = buildRoleMentionContent(
+    post.roleMentionLabel || 'この質問に関係ありそうな人',
+    post.roleMentionIds
+  );
+  if (questionRoleMentions) {
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(questionRoleMentions));
+  }
   if (!body && !attachmentNamesBlock) {
     container.addTextDisplayComponents(
       new TextDisplayBuilder().setContent('（本文はまだありません）')
@@ -594,7 +632,7 @@ function buildQuestionTimelineMessage({ post, config, logger = null }) {
     flags: MessageFlags.IsComponentsV2,
     components: [container],
     files: post.componentFiles?.length ? post.componentFiles : undefined,
-    allowedMentions: { parse: [] }
+    allowedMentions: buildAllowedMentionsForPost(post)
   };
 }
 
@@ -633,6 +671,13 @@ function buildKnowledgeTimelineMessage({ post, config, logger = null }) {
       new TextDisplayBuilder().setContent(`**タグ**\n${tagLine}`)
     );
   }
+  const roleMentions = buildRoleMentionContent(
+    post.roleMentionLabel || 'この投稿に興味がありそうな人',
+    post.roleMentionIds
+  );
+  if (roleMentions) {
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(roleMentions));
+  }
   if (body) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent(body));
   } else if (!addAttachmentNamesSection(container, post, { showOnlyAsFallback: true })) {
@@ -657,7 +702,7 @@ function buildKnowledgeTimelineMessage({ post, config, logger = null }) {
     flags: MessageFlags.IsComponentsV2,
     components: [container],
     files: post.componentFiles?.length ? post.componentFiles : undefined,
-    allowedMentions: { parse: [] }
+    allowedMentions: buildAllowedMentionsForPost(post)
   };
 }
 

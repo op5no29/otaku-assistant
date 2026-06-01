@@ -9,6 +9,7 @@ const { notifyOpsChannel } = require('../modules/ops/notify');
 const { startIntroDmQueueProcessor } = require('../modules/introDm');
 const { runAnimeOrphanScan } = require('../modules/anime');
 const { getAnnictAccessToken } = require('../modules/anime/annictClient');
+const { startQuestionRolePromptTimeouts } = require('../modules/timelineRelay');
 
 module.exports = {
   async execute(client) {
@@ -16,6 +17,7 @@ module.exports = {
     await initializeVoiceProfileMappings(client);
     await rebuildVoiceProfileState(client, { reason: 'ready_resync' });
     startVoiceProfileReconciliation(client);
+    startQuestionRolePromptTimeouts(client);
 
     const health = getBotHealth(client);
     const globalHashtagRoutes = Object.entries(client.appConfig.globalHashtagRoutes || {});

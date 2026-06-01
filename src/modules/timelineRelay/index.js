@@ -1,4 +1,11 @@
-const { ChannelType } = require('discord.js');
+const {
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ChannelType,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder
+} = require('discord.js');
 const { buildTimelineMessage } = require('./buildTimelineMessage');
 const { extractFirstPost, extractThreadMessagePost, extractPlainMessagePost } = require('./extractFirstPost');
 const { prepareVideoThumbnail } = require('./videoThumbnail');
@@ -11,6 +18,9 @@ const { getMessageJumpUrl } = require('../../services/discordLinks');
 const { getSilentRelayControl, parseRelayHashtagPrefixes } = require('../../utils/text');
 const { resolveRouteAccentColor } = require('../../utils/accentColors');
 const { handleAnimeHashtagPost } = require('../anime/hashtagIntegration');
+
+const QUESTION_ROLE_SELECT_PREFIX = 'question-role-select:';
+const QUESTION_ROLE_SKIP_PREFIX = 'question-role-skip:';
 
 function buildQuestionGuideMessage(timelineMessageUrl = null) {
   return [
@@ -116,6 +126,131 @@ function logSilentRelaySkip(logger, logBaseName, message, extra = {}, options = 
   return true;
 }
 
+function normalizeRoleIds(roleIds = []) {
+  return [...new Set((Array.isArray(roleIds) ? roleIds : [])
+    .map((roleId) => String(roleId || '').trim())
+    .filter(Boolean))];
+}
+
+function getConfiguredQuestionRoleIds(config) {
+  return new Set((config.questionRolePrompt?.roles || []).map((role) => String(role.id || '')).filter(Boolean));
+}
+
+function normalizeQuestionRoleSelection(config, roleIds = []) {
+  const configuredRoleIds = getConfiguredQuestionRoleIds(config);
+  return normalizeRoleIds(roleIds).filter((roleId) => configuredRoleIds.has(roleId));
+}
+
+function applyRoleMentionSection(post, {
+  roleIds = [],
+  label,
+  allowMentions = false
+} = {}) {
+  const normalizedRoleIds = normalizeRoleIds(roleIds);
+  if (!normalizedRoleIds.length) {
+    return post;
+  }
+
+  return {
+    ...post,
+    roleMentionLabel: label,
+    roleMentionIds: normalizedRoleIds,
+    allowedMentionRoleIds: allowMentions ? normalizedRoleIds : []
+  };
+}
+
+function shouldPromptQuestionRoles(config) {
+  return Boolean(
+    config.questionRolePrompt?.enabled === true &&
+    Array.isArray(config.questionRolePrompt.roles) &&
+    config.questionRolePrompt.roles.length > 0
+  );
+}
+
+function getQuestionRolePromptTimeoutMs(config) {
+  const minutes = Number(config.questionRolePrompt?.timeoutMinutes ?? 10);
+  return Math.max(1, Number.isFinite(minutes) ? minutes : 10) * 60 * 1000;
+}
+
+function buildQuestionRolePromptPayload(threadId, authorUserId, roles) {
+  const select = new StringSelectMenuBuilder()
+    .setCustomId(`${QUESTION_ROLE_SELECT_PREFIX}${threadId}`)
+    .setPlaceholder('関連しているロールを選択')
+    .setMinValues(1)
+    .setMaxValues(Math.min(roles.length, 25))
+    .addOptions(
+      roles.slice(0, 25).map((role) =>
+        new StringSelectMenuOptionBuilder()
+          .setLabel(role.label)
+          .setValue(role.id)
+          .setDescription(role.description || role.label)
+      )
+    );
+  const skipButton = new ButtonBuilder()
+    .setCustomId(`${QUESTION_ROLE_SKIP_PREFIX}${threadId}`)
+    .setLabel('ロールを選択しないまま質問を作成')
+    .setStyle(ButtonStyle.Secondary);
+
+  return {
+    content: [
+      `<@${authorUserId}> この質問に関連しているソフトや分野のロールを選択してください。`,
+      '選択したロールの人に通知される形で、タイムラインに質問カードを共有します。'
+    ].join('\n'),
+    components: [
+      new ActionRowBuilder().addComponents(select),
+      new ActionRowBuilder().addComponents(skipButton)
+    ],
+    allowedMentions: { users: [authorUserId], parse: [] }
+  };
+}
+
+function getKnowWantRoleIdForThread(thread, config) {
+  const roleId = String(config.questionRolePrompt?.knowWantRoleId || '').trim();
+  if (!roleId) {
+    return null;
+  }
+
+  const parentId = String(thread.parentId || '');
+  const configuredChannelIds = config.questionRolePrompt?.knowWantChannelIds || [];
+  const matched = configuredChannelIds.length
+    ? configuredChannelIds.includes(parentId)
+    : config.watchedForums.knowledge.includes(parentId);
+  return matched ? roleId : null;
+}
+
+function clearQuestionRolePromptTimer(client, threadId) {
+  const key = String(threadId || '');
+  const timer = client.questionRolePromptTimers?.get(key);
+  if (timer) {
+    clearTimeout(timer);
+    client.questionRolePromptTimers.delete(key);
+  }
+}
+
+function scheduleQuestionRolePromptTimeout(client, threadId, expiresAt) {
+  if (!client.questionRolePromptTimers) {
+    client.questionRolePromptTimers = new Map();
+  }
+
+  clearQuestionRolePromptTimer(client, threadId);
+  const expiresAtMs = new Date(expiresAt).getTime();
+  const delayMs = Number.isFinite(expiresAtMs)
+    ? Math.max(0, expiresAtMs - Date.now())
+    : getQuestionRolePromptTimeoutMs(client.appConfig || {});
+  const timer = setTimeout(() => {
+    void handleQuestionRolePromptTimeout(client, threadId).catch((error) => {
+      client.logger.error('question role prompt timeout failed', {
+        threadId,
+        error: error.message
+      });
+    });
+  }, delayMs);
+  if (typeof timer.unref === 'function') {
+    timer.unref();
+  }
+  client.questionRolePromptTimers.set(String(threadId), timer);
+}
+
 async function buildTimelinePayload(post, { config, forumType, logger }) {
   const twitterResolved = await resolveTwitterMedia(post, config, logger);
   const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, logger);
@@ -146,6 +281,21 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
       questionCardStatus: post.isResolved ? '解決済み' : '受付中',
       attachmentNamesCount: Array.isArray(post.attachments) ? post.attachments.length : 0,
       duplicateBlocksSkipped: true
+    });
+  }
+  const allowedMentionRoleIds = normalizeRoleIds(attachmentPrepared.post.allowedMentionRoleIds);
+  if (forumType === 'question' && allowedMentionRoleIds.length) {
+    logger.info('question role allowed mentions applied', {
+      sourceMessageId: post.messageId,
+      threadId: post.threadId || null,
+      roleIds: allowedMentionRoleIds
+    });
+  }
+  if (forumType === 'knowledge' && allowedMentionRoleIds.length) {
+    logger.info('know-want role allowed mention applied', {
+      sourceMessageId: post.messageId,
+      threadId: post.threadId || null,
+      roleIds: allowedMentionRoleIds
     });
   }
 
@@ -841,7 +991,201 @@ function normalizeStoredRelayTargets(targets, { db, timelineChannelId, sourceMes
   return normalizedTargets;
 }
 
-async function relayForumThread(thread, { config, db, logger }) {
+async function sendForumThreadTimelineCard(thread, post, {
+  config,
+  db,
+  logger,
+  forumType,
+  questionRoleIds = [],
+  allowQuestionRoleMentions = false
+}) {
+  let relayPost = post;
+  const normalizedQuestionRoleIds = normalizeQuestionRoleSelection(config, questionRoleIds);
+  if (forumType === 'question' && normalizedQuestionRoleIds.length) {
+    relayPost = applyRoleMentionSection(relayPost, {
+      roleIds: normalizedQuestionRoleIds,
+      label: 'この質問に関係ありそうな人',
+      allowMentions: allowQuestionRoleMentions
+    });
+  }
+
+  const knowWantRoleId = forumType === 'knowledge'
+    ? getKnowWantRoleIdForThread(thread, config)
+    : null;
+  if (knowWantRoleId) {
+    relayPost = applyRoleMentionSection(relayPost, {
+      roleIds: [knowWantRoleId],
+      label: 'この投稿に興味がありそうな人',
+      allowMentions: true
+    });
+    logger.info('know-want role mention applied', {
+      threadId: thread.id,
+      parentId: String(thread.parentId || ''),
+      roleId: knowWantRoleId
+    });
+  }
+
+  const timelineChannel = await thread.guild.channels.fetch(config.timelineChannelId);
+
+  if (!timelineChannel || !timelineChannel.isTextBased()) {
+    throw new Error('Timeline channel was not found or is not text-based');
+  }
+
+  const { payload, cleanup } = await buildTimelinePayload(relayPost, {
+    config,
+    forumType,
+    logger
+  });
+
+  let sentMessage;
+  try {
+    sentMessage = await sendRelayMessage(timelineChannel, payload, logger, {
+      sourceMessageId: relayPost.messageId,
+      destinationChannelId: String(config.timelineChannelId || ''),
+      relayKind: forumType,
+      sendPurpose: 'timeline:thread-primary-card-send',
+      callsiteLabel: 'timeline:thread-create'
+    });
+  } finally {
+    await cleanup();
+  }
+
+  db.relays.insertThreadRelay({
+    threadId: thread.id,
+    parentChannelId: String(thread.parentId || ''),
+    starterMessageId: relayPost.messageId,
+    timelineMessageId: sentMessage.id,
+    authorId: relayPost.author?.id || null
+  });
+  updateTimelineDestinationState(db, {
+    guildId: thread.guildId,
+    destinationChannelId: String(config.timelineChannelId || ''),
+    relayedMessageId: sentMessage.id,
+    sourceMessageId: relayPost.messageId,
+    sourceThreadId: thread.id,
+    authorId: relayPost.author?.id || null
+  });
+
+  if (forumType === 'question') {
+    await applyQuestionStatusTag(thread, 'open', { config, logger });
+
+    const questionRecord = db.questions.getQuestionThread(thread.id);
+    if (!questionRecord?.guideMessageId) {
+      const timelineMessageUrl = getMessageJumpUrl({
+        guildId: thread.guildId,
+        channelId: config.timelineChannelId,
+        messageId: sentMessage.id
+      });
+      logger.info('Question timeline message returned', {
+        threadId: thread.id,
+        timelineMessageId: sentMessage.id,
+        timelineMessageUrl
+      });
+      await thread.send(buildQuestionGuideMessage(timelineMessageUrl))
+        .then((guideMessage) => {
+          db.questions.setGuideMessage(thread.id, guideMessage.id);
+          logger.info('Question acceptance guide posted', {
+            threadId: thread.id,
+            guideMessageId: guideMessage.id
+          });
+          logger.info('Question accepted response linked timeline', {
+            threadId: thread.id,
+            timelineMessageId: sentMessage.id
+          });
+        })
+        .catch((error) => {
+          logger.warn('Question acceptance message failed', {
+            threadId: thread.id,
+            error: error.message
+          });
+        });
+    }
+  }
+
+  return sentMessage;
+}
+
+async function postQuestionRolePrompt(thread, post, { config, db, logger }) {
+  if (!shouldPromptQuestionRoles(config)) {
+    return false;
+  }
+
+  const existingRelay = db.relays.getThreadRelay(thread.id);
+  if (existingRelay?.timelineMessageId) {
+    return false;
+  }
+
+  const existingPrompt = db.questionRolePrompts.get(thread.id);
+  if (existingPrompt) {
+    if (existingPrompt.status === 'pending') {
+      scheduleQuestionRolePromptTimeout(thread.client, thread.id, existingPrompt.expiresAt);
+      logger.info('question timeline relay waiting for role selection', {
+        threadId: thread.id,
+        promptMessageId: existingPrompt.promptMessageId,
+        expiresAt: existingPrompt.expiresAt,
+        reason: 'existing_pending_prompt'
+      });
+      return true;
+    }
+    return false;
+  }
+
+  const roles = config.questionRolePrompt.roles || [];
+  const authorUserId = post.author?.id || thread.ownerId || '';
+  if (!authorUserId) {
+    logger.warn('question role prompt skipped because author was unavailable', {
+      threadId: thread.id
+    });
+    return false;
+  }
+  const expiresAt = new Date(Date.now() + getQuestionRolePromptTimeoutMs(config)).toISOString();
+  const payload = buildQuestionRolePromptPayload(thread.id, authorUserId, roles);
+  const promptMessage = await thread.send(payload).catch((error) => {
+    logger.warn('question role prompt post failed', {
+      threadId: thread.id,
+      authorUserId,
+      error: error.message
+    });
+    return null;
+  });
+
+  if (!promptMessage) {
+    return false;
+  }
+
+  db.questionRolePrompts.upsert({
+    threadId: thread.id,
+    guildId: thread.guildId,
+    authorUserId,
+    promptMessageId: promptMessage.id,
+    status: 'pending',
+    expiresAt
+  });
+  scheduleQuestionRolePromptTimeout(thread.client, thread.id, expiresAt);
+
+  logger.info('question role prompt posted', {
+    threadId: thread.id,
+    promptMessageId: promptMessage.id,
+    authorUserId,
+    roleOptionCount: roles.length,
+    expiresAt
+  });
+  logger.info('question timeline relay waiting for role selection', {
+    threadId: thread.id,
+    promptMessageId: promptMessage.id,
+    expiresAt
+  });
+  return true;
+}
+
+async function relayForumThread(thread, {
+  config,
+  db,
+  logger,
+  skipQuestionRolePrompt = false,
+  questionRoleIds = [],
+  allowQuestionRoleMentions = false
+}) {
   if (thread.type !== ChannelType.PublicThread) {
     logger.info('Ignoring threadCreate because channel is not a public forum thread', {
       threadId: thread.id,
@@ -938,84 +1282,23 @@ async function relayForumThread(thread, { config, db, logger }) {
         questionBodySource: String(post.content || '').trim() ? 'starter_message' : 'missing',
         starterFetched: Boolean(post.messageId)
       });
-    }
 
-    const timelineChannel = await thread.guild.channels.fetch(config.timelineChannelId);
-
-    if (!timelineChannel || !timelineChannel.isTextBased()) {
-      throw new Error('Timeline channel was not found or is not text-based');
-    }
-
-    const { payload, cleanup } = await buildTimelinePayload(post, {
-      config,
-      forumType,
-      logger
-    });
-
-    let sentMessage;
-    try {
-      sentMessage = await sendRelayMessage(timelineChannel, payload, logger, {
-        sourceMessageId: post.messageId,
-        destinationChannelId: String(config.timelineChannelId || ''),
-        relayKind: forumType,
-        sendPurpose: 'timeline:thread-primary-card-send',
-        callsiteLabel: 'timeline:thread-create'
-      });
-    } finally {
-      await cleanup();
-    }
-
-    db.relays.insertThreadRelay({
-      threadId: thread.id,
-      parentChannelId: String(thread.parentId || ''),
-      starterMessageId: post.messageId,
-      timelineMessageId: sentMessage.id,
-      authorId: post.author?.id || null
-    });
-    updateTimelineDestinationState(db, {
-      guildId: thread.guildId,
-      destinationChannelId: String(config.timelineChannelId || ''),
-      relayedMessageId: sentMessage.id,
-      sourceMessageId: post.messageId,
-      sourceThreadId: thread.id,
-      authorId: post.author?.id || null
-    });
-
-    if (forumType === 'question') {
-      await applyQuestionStatusTag(thread, 'open', { config, logger });
-
-      const questionRecord = db.questions.getQuestionThread(thread.id);
-      if (!questionRecord?.guideMessageId) {
-        const timelineMessageUrl = getMessageJumpUrl({
-          guildId: thread.guildId,
-          channelId: config.timelineChannelId,
-          messageId: sentMessage.id
-        });
-        logger.info('Question timeline message returned', {
-          threadId: thread.id,
-          timelineMessageId: sentMessage.id,
-          timelineMessageUrl
-        });
-        await thread.send(buildQuestionGuideMessage(timelineMessageUrl))
-          .then((guideMessage) => {
-            db.questions.setGuideMessage(thread.id, guideMessage.id);
-            logger.info('Question acceptance guide posted', {
-              threadId: thread.id,
-              guideMessageId: guideMessage.id
-            });
-            logger.info('Question accepted response linked timeline', {
-              threadId: thread.id,
-              timelineMessageId: sentMessage.id
-            });
-          })
-          .catch((error) => {
-            logger.warn('Question acceptance message failed', {
-              threadId: thread.id,
-              error: error.message
-            });
-          });
+      if (!skipQuestionRolePrompt) {
+        const promptPosted = await postQuestionRolePrompt(thread, post, { config, db, logger });
+        if (promptPosted) {
+          return null;
+        }
       }
     }
+
+    const sentMessage = await sendForumThreadTimelineCard(thread, post, {
+      config,
+      db,
+      logger,
+      forumType,
+      questionRoleIds,
+      allowQuestionRoleMentions
+    });
 
     logger.info('Forum thread relayed', {
       threadId: thread.id,
@@ -1025,6 +1308,7 @@ async function relayForumThread(thread, { config, db, logger }) {
       timelineMessageId: sentMessage.id,
       forumType
     });
+    return sentMessage;
   } catch (error) {
     logger.error('Failed to relay forum thread', {
       threadId: thread.id,
@@ -1037,6 +1321,217 @@ async function relayForumThread(thread, { config, db, logger }) {
   } finally {
     thread.client.timelineRelayInFlight.delete(thread.id);
   }
+}
+
+async function relayQuestionThreadAfterRolePrompt(client, threadId, {
+  selectedRoleIds = [],
+  status = 'selected',
+  loggerContext = {}
+} = {}) {
+  const state = client.db.questionRolePrompts.get(threadId);
+  if (!state) {
+    return null;
+  }
+
+  if (state.status !== 'pending') {
+    client.logger.info('question role prompt relay skipped because prompt was already handled', {
+      threadId,
+      status: state.status,
+      relayedMessageId: state.relayedMessageId || null,
+      ...loggerContext
+    });
+    return client.db.relays.getThreadRelay(threadId);
+  }
+
+  clearQuestionRolePromptTimer(client, threadId);
+  const guild = await client.guilds.fetch(state.guildId).catch(() => null);
+  const thread = guild ? await guild.channels.fetch(threadId).catch(() => null) : null;
+  if (!thread?.isThread?.()) {
+    client.logger.warn('question role prompt relay failed because thread was unavailable', {
+      threadId,
+      guildId: state.guildId,
+      ...loggerContext
+    });
+    return null;
+  }
+
+  const normalizedRoleIds = normalizeQuestionRoleSelection(client.appConfig, selectedRoleIds);
+  const sentMessage = await relayForumThread(thread, {
+    config: client.appConfig,
+    db: client.db,
+    logger: client.logger,
+    skipQuestionRolePrompt: true,
+    questionRoleIds: normalizedRoleIds,
+    allowQuestionRoleMentions: normalizedRoleIds.length > 0
+  });
+  const relay = client.db.relays.getThreadRelay(threadId);
+  const relayedMessageId = sentMessage?.id || relay?.timelineMessageId || null;
+  if (!relayedMessageId) {
+    client.logger.warn('question role prompt relay did not produce timeline message', {
+      threadId,
+      status,
+      selectedRoleIds: normalizedRoleIds,
+      ...loggerContext
+    });
+    return null;
+  }
+  client.db.questionRolePrompts.markStatus(threadId, {
+    selectedRoleIds: normalizedRoleIds,
+    status,
+    relayedMessageId
+  });
+
+  client.logger.info(normalizedRoleIds.length
+    ? 'question timeline relay sent with role mentions'
+    : 'question timeline relay sent without role mentions', {
+    threadId,
+    status,
+    roleIds: normalizedRoleIds,
+    timelineMessageId: relayedMessageId,
+    ...loggerContext
+  });
+
+  if (status === 'timed_out' && state.promptMessageId) {
+    const promptMessage = await thread.messages?.fetch?.(state.promptMessageId).catch(() => null);
+    await promptMessage?.edit?.({
+      content: 'ロール選択の受付時間が過ぎたため、ロールを選択せずにタイムラインへ質問カードを共有しました。',
+      components: [],
+      allowedMentions: { parse: [] }
+    }).catch(() => null);
+  }
+
+  return client.db.questionRolePrompts.get(threadId);
+}
+
+async function handleQuestionRolePromptTimeout(client, threadId) {
+  const state = client.db.questionRolePrompts.get(threadId);
+  if (!state || state.status !== 'pending') {
+    return;
+  }
+
+  await relayQuestionThreadAfterRolePrompt(client, threadId, {
+    selectedRoleIds: [],
+    status: 'timed_out',
+    loggerContext: { reason: 'timeout' }
+  });
+}
+
+function startQuestionRolePromptTimeouts(client) {
+  if (!client.questionRolePromptTimers) {
+    client.questionRolePromptTimers = new Map();
+  }
+
+  for (const timer of client.questionRolePromptTimers.values()) {
+    clearTimeout(timer);
+  }
+  client.questionRolePromptTimers.clear();
+
+  const pendingPrompts = client.db.questionRolePrompts.listPending();
+  for (const prompt of pendingPrompts) {
+    if (!prompt.expiresAt || new Date(prompt.expiresAt).getTime() <= Date.now()) {
+      void handleQuestionRolePromptTimeout(client, prompt.threadId).catch((error) => {
+        client.logger.error('question role prompt overdue relay failed', {
+          threadId: prompt.threadId,
+          error: error.message
+        });
+      });
+      continue;
+    }
+    scheduleQuestionRolePromptTimeout(client, prompt.threadId, prompt.expiresAt);
+  }
+
+  client.logger.info('question role prompt pending timers restored', {
+    pendingCount: pendingPrompts.length,
+    scheduledCount: client.questionRolePromptTimers.size
+  });
+}
+
+async function handleQuestionRolePromptInteraction(interaction) {
+  if (!interaction.isStringSelectMenu?.() && !interaction.isButton?.()) {
+    return false;
+  }
+
+  const customId = String(interaction.customId || '');
+  const isSelect = customId.startsWith(QUESTION_ROLE_SELECT_PREFIX);
+  const isSkip = customId.startsWith(QUESTION_ROLE_SKIP_PREFIX);
+  if (!isSelect && !isSkip) {
+    return false;
+  }
+
+  const threadId = customId.slice((isSelect ? QUESTION_ROLE_SELECT_PREFIX : QUESTION_ROLE_SKIP_PREFIX).length);
+  const state = interaction.client.db.questionRolePrompts.get(threadId);
+  if (!state) {
+    await interaction.reply({
+      content: 'この質問ロール選択は見つかりませんでした。',
+      ephemeral: true
+    }).catch(() => null);
+    return true;
+  }
+
+  if (String(state.authorUserId) !== String(interaction.user.id)) {
+    interaction.client.logger.info('question role prompt wrong user', {
+      threadId,
+      promptMessageId: state.promptMessageId,
+      authorUserId: state.authorUserId,
+      actingUserId: interaction.user.id
+    });
+    await interaction.reply({
+      content: 'この選択は質問を作成した本人だけが使えます。',
+      ephemeral: true
+    }).catch(() => null);
+    return true;
+  }
+
+  if (state.status !== 'pending') {
+    await interaction.reply({
+      content: 'この質問はすでにタイムラインへ共有されています。',
+      ephemeral: true
+    }).catch(() => null);
+    return true;
+  }
+
+  const selectedRoleIds = isSelect
+    ? normalizeQuestionRoleSelection(interaction.client.appConfig, interaction.values || [])
+    : [];
+
+  interaction.client.logger.info(isSelect ? 'question role prompt selected' : 'question role prompt skipped', {
+    threadId,
+    promptMessageId: state.promptMessageId,
+    authorUserId: state.authorUserId,
+    selectedRoleIds
+  });
+
+  await interaction.deferUpdate().catch(() => null);
+  const result = await relayQuestionThreadAfterRolePrompt(interaction.client, threadId, {
+    selectedRoleIds,
+    status: isSelect ? 'selected' : 'skipped',
+    loggerContext: {
+      interactionId: interaction.id,
+      promptMessageId: state.promptMessageId
+    }
+  });
+
+  if (!result) {
+    await interaction.followUp({
+      content: '質問カードの共有に失敗しました。少し待ってからもう一度試してください。',
+      ephemeral: true
+    }).catch(() => null);
+    return true;
+  }
+
+  const content = selectedRoleIds.length
+    ? [
+        `<@${state.authorUserId}> 選択されたロールを含めて、タイムラインに質問カードを共有しました。`,
+        selectedRoleIds.map((roleId) => `<@&${roleId}>`).join(' ')
+      ].join('\n')
+    : `<@${state.authorUserId}> ロールを選択せず、タイムラインに質問カードを共有しました。`;
+  await interaction.message?.edit?.({
+    content,
+    components: [],
+    allowedMentions: { users: [state.authorUserId], roles: [], parse: [] }
+  }).catch(() => null);
+
+  return Boolean(result);
 }
 
 async function relayTweetMessage(message, { config, db, logger }) {
@@ -1537,6 +2032,15 @@ async function updateQuestionTimelineCard(thread, { config, db, logger, question
     });
     return;
   }
+  const promptState = db.questionRolePrompts.get(thread.id);
+  const selectedRoleIds = normalizeQuestionRoleSelection(config, promptState?.selectedRoleIds || []);
+  const postWithRoles = selectedRoleIds.length
+    ? applyRoleMentionSection(post, {
+        roleIds: selectedRoleIds,
+        label: 'この質問に関係ありそうな人',
+        allowMentions: false
+      })
+    : post;
 
   const timelineChannel = await thread.guild.channels.fetch(config.timelineChannelId);
   if (!timelineChannel || !timelineChannel.isTextBased()) {
@@ -1552,7 +2056,7 @@ async function updateQuestionTimelineCard(thread, { config, db, logger, question
     return;
   }
 
-  const { payload, cleanup } = await buildTimelinePayload(post, {
+  const { payload, cleanup } = await buildTimelinePayload(postWithRoles, {
     config,
     forumType: 'question',
     logger
@@ -2441,5 +2945,7 @@ module.exports = {
   updateQuestionTimelineCard,
   relayGlobalHashtagMessage,
   handleReplyBasedGlobalHashtagRoute,
-  handleRouteAddedOnMessageUpdate
+  handleRouteAddedOnMessageUpdate,
+  handleQuestionRolePromptInteraction,
+  startQuestionRolePromptTimeouts
 };

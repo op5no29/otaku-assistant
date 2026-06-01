@@ -93,6 +93,34 @@
     ],
     "moderatorRoleIds": []
   },
+  "questionRolePrompt": {
+    "enabled": false,
+    "timeoutMinutes": 10,
+    "roles": [
+      { "id": "1228130088755662868", "label": "映像制作", "description": "映像制作全般" },
+      { "id": "1228011188231733369", "label": "ゲーム制作", "description": "ゲーム制作全般" },
+      { "id": "1228685602707345498", "label": "イラスト", "description": "イラスト" },
+      { "id": "1261854695224246352", "label": "メディアアート", "description": "メディアアート" },
+      { "id": "1388927716132389045", "label": "デザイン", "description": "デザイン" },
+      { "id": "1228011239846973450", "label": "DTM", "description": "DTM" },
+      { "id": "1224783046411292724", "label": "Ae", "description": "After Effects" },
+      { "id": "1224783139591688213", "label": "DaVinci Resolve", "description": "DaVinci Resolve" },
+      { "id": "1224783081668476930", "label": "Blender", "description": "Blender" },
+      { "id": "1228010718000054424", "label": "Unity", "description": "Unity" },
+      { "id": "1224783180968628286", "label": "Maya", "description": "Maya" },
+      { "id": "1224783283250790511", "label": "Houdini", "description": "Houdini" },
+      { "id": "1224783208634388611", "label": "C4D", "description": "Cinema 4D" },
+      { "id": "1228010775076016200", "label": "Unreal Engine", "description": "Unreal Engine" },
+      { "id": "1257162951006228500", "label": "クリスタ", "description": "CLIP STUDIO PAINT" },
+      { "id": "1228010875659489432", "label": "Logic Pro", "description": "Logic Pro" },
+      { "id": "1228010985931931718", "label": "FL Studio", "description": "FL Studio" },
+      { "id": "1228011035253014550", "label": "Studio One", "description": "Studio One" },
+      { "id": "1228010923336400987", "label": "Cubase", "description": "Cubase" },
+      { "id": "1228201818916520006", "label": "Ableton", "description": "Ableton" }
+    ],
+    "knowWantRoleId": "1510927153246502972",
+    "knowWantChannelIds": []
+  },
   "introDm": {
     "enabled": false,
     "devTestMode": false,

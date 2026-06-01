@@ -49,6 +49,7 @@ function createBotClient({ appConfig, database, logger }) {
   client.activeLlmUsers = new Set();
   client.llmGlobalRequestActive = false;
   client.questionResolveLocks = new Set();
+  client.questionRolePromptTimers = new Map();
   client.introDmQueueProcessing = false;
   client.introDmQueueInterval = null;
   client.voiceProfileReconcileInterval = null;

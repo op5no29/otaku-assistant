@@ -162,6 +162,69 @@ function createDatabase(databasePath) {
           guide_sent_at = ?
       WHERE thread_id = ?
     `),
+    upsertQuestionRolePrompt: sqlite.prepare(`
+      INSERT INTO question_role_prompts (
+        thread_id,
+        guild_id,
+        author_user_id,
+        prompt_message_id,
+        selected_role_ids_json,
+        status,
+        relayed_message_id,
+        expires_at,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET
+        guild_id = excluded.guild_id,
+        author_user_id = excluded.author_user_id,
+        prompt_message_id = excluded.prompt_message_id,
+        selected_role_ids_json = excluded.selected_role_ids_json,
+        status = excluded.status,
+        relayed_message_id = excluded.relayed_message_id,
+        expires_at = excluded.expires_at,
+        updated_at = excluded.updated_at
+    `),
+    getQuestionRolePrompt: sqlite.prepare(`
+      SELECT
+        thread_id AS threadId,
+        guild_id AS guildId,
+        author_user_id AS authorUserId,
+        prompt_message_id AS promptMessageId,
+        selected_role_ids_json AS selectedRoleIdsJson,
+        status,
+        relayed_message_id AS relayedMessageId,
+        expires_at AS expiresAt,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM question_role_prompts
+      WHERE thread_id = ?
+      LIMIT 1
+    `),
+    listPendingQuestionRolePrompts: sqlite.prepare(`
+      SELECT
+        thread_id AS threadId,
+        guild_id AS guildId,
+        author_user_id AS authorUserId,
+        prompt_message_id AS promptMessageId,
+        selected_role_ids_json AS selectedRoleIdsJson,
+        status,
+        relayed_message_id AS relayedMessageId,
+        expires_at AS expiresAt,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM question_role_prompts
+      WHERE status = 'pending'
+      ORDER BY expires_at ASC
+    `),
+    markQuestionRolePromptStatus: sqlite.prepare(`
+      UPDATE question_role_prompts
+      SET selected_role_ids_json = ?,
+          status = ?,
+          relayed_message_id = ?,
+          updated_at = ?
+      WHERE thread_id = ?
+    `),
     getVcProfileMessage: sqlite.prepare(`
       SELECT
         category_id AS categoryId,
@@ -1983,6 +2046,75 @@ function createDatabase(databasePath) {
       setGuideMessage(threadId, guideMessageId) {
         statements.setQuestionGuideMessage.run(
           guideMessageId,
+          new Date().toISOString(),
+          threadId
+        );
+      }
+    },
+    questionRolePrompts: {
+      upsert({
+        threadId,
+        guildId,
+        authorUserId,
+        promptMessageId = null,
+        selectedRoleIds = [],
+        status = 'pending',
+        relayedMessageId = null,
+        expiresAt = null
+      }) {
+        const now = new Date().toISOString();
+        statements.upsertQuestionRolePrompt.run(
+          threadId,
+          guildId,
+          authorUserId,
+          promptMessageId,
+          JSON.stringify(Array.isArray(selectedRoleIds) ? selectedRoleIds : []),
+          status,
+          relayedMessageId,
+          expiresAt,
+          now,
+          now
+        );
+      },
+      get(threadId) {
+        const row = statements.getQuestionRolePrompt.get(threadId) || null;
+        if (!row) {
+          return null;
+        }
+        return {
+          ...row,
+          selectedRoleIds: (() => {
+            try {
+              const parsed = JSON.parse(row.selectedRoleIdsJson || '[]');
+              return Array.isArray(parsed) ? parsed.map(String) : [];
+            } catch {
+              return [];
+            }
+          })()
+        };
+      },
+      listPending() {
+        return statements.listPendingQuestionRolePrompts.all().map((row) => ({
+          ...row,
+          selectedRoleIds: (() => {
+            try {
+              const parsed = JSON.parse(row.selectedRoleIdsJson || '[]');
+              return Array.isArray(parsed) ? parsed.map(String) : [];
+            } catch {
+              return [];
+            }
+          })()
+        }));
+      },
+      markStatus(threadId, {
+        selectedRoleIds = [],
+        status,
+        relayedMessageId = null
+      }) {
+        statements.markQuestionRolePromptStatus.run(
+          JSON.stringify(Array.isArray(selectedRoleIds) ? selectedRoleIds.map(String) : []),
+          status,
+          relayedMessageId,
           new Date().toISOString(),
           threadId
         );

@@ -1,5 +1,6 @@
 const DELETE_EMOJI = '❌';
 const DEFAULT_TTL_MS = 1000 * 60 * 60 * 24;
+const WRONG_USER_MESSAGE = 'このリアクションは、この操作をした本人だけが使えます。';
 
 async function registerDeletableMessage(message, ownerUserId, purpose, ttlMs = DEFAULT_TTL_MS) {
   const client = message.client;
@@ -36,9 +37,58 @@ async function handleDeletableMessageReaction(reaction, user) {
   const guild = message.guild || null;
   const member = guild ? (guild.members.cache.get(user.id) || await guild.members.fetch(user.id).catch(() => null)) : null;
   const isAdminLike = Boolean(member?.permissions?.has?.('Administrator') || member?.permissions?.has?.('ManageMessages'));
-  if (String(record.ownerUserId) !== String(user.id) && !isAdminLike) {
+  const ownerMatched = String(record.ownerUserId) === String(user.id);
+  const ownerOnlyPurpose = String(record.purpose || '').startsWith('anime_');
+  const allowedByAdmin = !ownerOnlyPurpose && isAdminLike;
+
+  if (!ownerMatched && !allowedByAdmin) {
+    message.client.logger.info('deletable reaction rejected wrong user', {
+      messageId: message.id,
+      channelId: message.channelId,
+      ownerUserId: record.ownerUserId,
+      reactingUserId: user.id,
+      purpose: record.purpose || null,
+      ownerOnlyPurpose
+    });
+
+    const notice = await message.channel?.send?.({
+      content: `<@${user.id}> ${WRONG_USER_MESSAGE}`,
+      allowedMentions: { users: [user.id], parse: [] }
+    }).catch(() => null);
+    if (notice) {
+      setTimeout(() => {
+        notice.delete().catch(() => null);
+      }, 8_000).unref();
+    }
+
+    try {
+      await reaction.users.remove(user.id);
+      message.client.logger.info('deletable reaction wrong user reaction removed', {
+        messageId: message.id,
+        channelId: message.channelId,
+        reactingUserId: user.id,
+        purpose: record.purpose || null
+      });
+    } catch (error) {
+      message.client.logger.warn('deletable reaction wrong user reaction remove failed', {
+        messageId: message.id,
+        channelId: message.channelId,
+        reactingUserId: user.id,
+        purpose: record.purpose || null,
+        error: error.message
+      });
+    }
     return true;
   }
+
+  message.client.logger.info('deletable reaction owner accepted', {
+    messageId: message.id,
+    channelId: message.channelId,
+    ownerUserId: record.ownerUserId,
+    reactingUserId: user.id,
+    purpose: record.purpose || null,
+    acceptedBy: ownerMatched ? 'owner' : 'admin'
+  });
 
   try {
     await message.delete().catch(() => null);

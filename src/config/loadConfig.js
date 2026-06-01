@@ -230,6 +230,34 @@ function ensureStringMap(value, label) {
   );
 }
 
+function ensureQuestionRolePromptConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      enabled: false,
+      timeoutMinutes: 10,
+      roles: [],
+      knowWantRoleId: '',
+      knowWantChannelIds: []
+    };
+  }
+
+  const rawRoles = Array.isArray(value.roles) ? value.roles : [];
+  return {
+    enabled: value.enabled === true,
+    timeoutMinutes: Number(value.timeoutMinutes ?? 10),
+    roles: rawRoles
+      .map((entry) => ({
+        id: String(entry?.id || '').trim(),
+        label: String(entry?.label || entry?.name || '').trim(),
+        description: String(entry?.description || '').trim()
+      }))
+      .filter((entry) => entry.id && entry.label)
+      .slice(0, 25),
+    knowWantRoleId: String(value.knowWantRoleId || '').trim(),
+    knowWantChannelIds: ensureArray(value.knowWantChannelIds || [], 'questionRolePrompt.knowWantChannelIds')
+  };
+}
+
 function ensureAnimeConfig(value) {
   const defaultReviewRoles = [
     { threshold: 10, roleId: null, name: 'アニメ視聴者 Lv.1' },
@@ -399,6 +427,7 @@ function loadConfig(configPath) {
       ),
       moderatorRoleIds: ensureArray(parsed.questions?.moderatorRoleIds || [], 'questions.moderatorRoleIds')
     },
+    questionRolePrompt: ensureQuestionRolePromptConfig(parsed.questionRolePrompt),
     introDm: ensureIntroDmConfig(parsed.introDm, parsed.introChannelId),
     welcomeDm: ensureWelcomeDmConfig(parsed.welcomeDm, parsed.ops?.logChannelId || ''),
     anime: ensureAnimeConfig(parsed.anime),

@@ -144,6 +144,7 @@ Important sections:
 - `watchedForums.tweet`: Personal/tweet forum channel IDs.
 - `watchedForums.knowledge`: Knowledge forum channel IDs.
 - `questionForumTags`: Per-question-forum open/resolved tag IDs.
+- `questionRolePrompt`: Optional role-select prompt before question cards are relayed, plus optional role mentions for knowledge/"知りたいこと" cards.
 - `voiceProfileChannels`: Text channels used to display VC profile cards. The parent category of each profile channel determines which voice channels are tracked. `voiceStatusLabel` can provide a manual fallback label for that category.
 - `voiceProfile.channelAccentColors`: Optional map of voice channel ID to accent color.
 - `voiceProfile.channelStatusLabels`: Optional map of voice channel ID to a status label shown when Discord's voice channel status text is not exposed by discord.js/API.
