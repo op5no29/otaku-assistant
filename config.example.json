@@ -102,6 +102,7 @@
       { "id": "1228685602707345498", "label": "イラスト", "description": "イラスト" },
       { "id": "1261854695224246352", "label": "メディアアート", "description": "メディアアート" },
       { "id": "1388927716132389045", "label": "デザイン", "description": "デザイン" },
+      { "id": "1510978792104136744", "label": "開発", "description": "Web開発 / Pythonアプリ / Bot制作 / ツール開発" },
       { "id": "1228011239846973450", "label": "DTM", "description": "DTM" },
       { "id": "1224783046411292724", "label": "Ae", "description": "After Effects" },
       { "id": "1224783139591688213", "label": "DaVinci Resolve", "description": "DaVinci Resolve" },
@@ -116,7 +117,8 @@
       { "id": "1228010985931931718", "label": "FL Studio", "description": "FL Studio" },
       { "id": "1228011035253014550", "label": "Studio One", "description": "Studio One" },
       { "id": "1228010923336400987", "label": "Cubase", "description": "Cubase" },
-      { "id": "1228201818916520006", "label": "Ableton", "description": "Ableton" }
+      { "id": "1228201818916520006", "label": "Ableton", "description": "Ableton" },
+      { "id": "1510927153246502972", "label": "知りたがり", "description": "知りたいこと・相談・調べものを追いたい人" }
     ],
     "knowWantRoleId": "1510927153246502972",
     "knowWantChannelIds": []
