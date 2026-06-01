@@ -355,6 +355,33 @@ function createDatabase(databasePath) {
       FROM vc_channel_profile_messages
       WHERE category_id = ?
     `),
+    getVcCategoryProfileMessage: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        message_id AS messageId,
+        updated_at AS updatedAt
+      FROM vc_category_profile_messages
+      WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
+      LIMIT 1
+    `),
+    upsertVcCategoryProfileMessage: sqlite.prepare(`
+      INSERT INTO vc_category_profile_messages (
+        guild_id,
+        category_id,
+        profile_channel_id,
+        message_id,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, category_id, profile_channel_id) DO UPDATE SET
+        message_id = excluded.message_id,
+        updated_at = excluded.updated_at
+    `),
+    deleteVcCategoryProfileMessage: sqlite.prepare(`
+      DELETE FROM vc_category_profile_messages
+      WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
+    `),
     listLegacyVcProfileMessagesByCategory: sqlite.prepare(`
       SELECT
         category_id AS categoryId,
@@ -382,6 +409,10 @@ function createDatabase(databasePath) {
     deleteVcChannelProfileMessage: sqlite.prepare(`
       DELETE FROM vc_channel_profile_messages
       WHERE voice_channel_id = ?
+    `),
+    deleteVcChannelProfileMessagesByCategoryProfile: sqlite.prepare(`
+      DELETE FROM vc_channel_profile_messages
+      WHERE category_id = ? AND profile_channel_id = ?
     `),
     deleteLegacyVcProfileMessagesByCategory: sqlite.prepare(`
       DELETE FROM vc_profile_messages
@@ -2301,6 +2332,21 @@ function createDatabase(databasePath) {
       }
     },
     vcProfiles: {
+      getCategoryMessage({ guildId, categoryId, profileChannelId }) {
+        return statements.getVcCategoryProfileMessage.get(guildId, categoryId, profileChannelId) || null;
+      },
+      upsertCategoryMessage({ guildId, categoryId, profileChannelId, messageId }) {
+        statements.upsertVcCategoryProfileMessage.run(
+          guildId,
+          categoryId,
+          profileChannelId,
+          messageId,
+          new Date().toISOString()
+        );
+      },
+      deleteCategoryMessage({ guildId, categoryId, profileChannelId }) {
+        return statements.deleteVcCategoryProfileMessage.run(guildId, categoryId, profileChannelId).changes;
+      },
       getRoomMessage(voiceChannelId) {
         return statements.getVcChannelProfileMessage.get(voiceChannelId) || null;
       },
@@ -2318,6 +2364,9 @@ function createDatabase(databasePath) {
       },
       deleteRoomMessage(voiceChannelId) {
         statements.deleteVcChannelProfileMessage.run(voiceChannelId);
+      },
+      deleteRoomMessagesByCategoryProfile(categoryId, profileChannelId) {
+        return statements.deleteVcChannelProfileMessagesByCategoryProfile.run(categoryId, profileChannelId).changes;
       },
       listLegacyProfileMessagesByCategory(categoryId) {
         return statements.listLegacyVcProfileMessagesByCategory.all(categoryId);

@@ -241,24 +241,93 @@ async function resolveVoiceChannelStatusText(client, voiceChannel, mapping = nul
   return statusText;
 }
 
-async function deleteRoomProfileCard(client, voiceChannelId) {
-  const existing = client.db.vcProfiles.getRoomMessage(voiceChannelId);
-  if (!existing) {
+function getVoiceProfileUpdateQueues(client) {
+  if (!client.voiceProfileUpdateQueues) {
+    client.voiceProfileUpdateQueues = new Map();
+  }
+  return client.voiceProfileUpdateQueues;
+}
+
+function getVoiceProfileUpdateKey(guildId, categoryId, profileChannelId) {
+  return `${String(guildId || '')}:${String(categoryId || '')}:${String(profileChannelId || '')}`;
+}
+
+async function queueVoiceProfileCategoryUpdate(client, guild, categoryId, { reason = 'voice_state_update' } = {}) {
+  const mapping = client.voiceProfileCategoryMap.get(categoryId);
+  if (!guild || !mapping) {
     return;
   }
 
-  try {
-    const profileChannel = await client.channels.fetch(existing.profileChannelId).catch(() => null);
+  const key = getVoiceProfileUpdateKey(guild.id, categoryId, mapping.profileChannelId);
+  const queues = getVoiceProfileUpdateQueues(client);
+  let queue = queues.get(key);
+  if (!queue) {
+    queue = {
+      pending: false,
+      running: false,
+      promise: null
+    };
+    queues.set(key, queue);
+  }
 
-    if (profileChannel?.isTextBased?.()) {
-      const message = await profileChannel.messages.fetch(existing.messageId).catch(() => null);
-      if (message) {
-        await message.delete().catch(() => null);
+  const wasRunning = Boolean(queue.promise);
+  queue.pending = true;
+
+  client.logger.info('vc profile update queued', {
+    key,
+    guildId: guild.id,
+    categoryId,
+    profileChannelId: mapping.profileChannelId,
+    reason,
+    running: wasRunning
+  });
+
+  if (wasRunning) {
+    client.logger.info('vc profile update coalesced', {
+      key,
+      guildId: guild.id,
+      categoryId,
+      profileChannelId: mapping.profileChannelId,
+      reason
+    });
+    return queue.promise;
+  }
+
+  queue.promise = (async () => {
+    try {
+      while (queue.pending) {
+        queue.pending = false;
+        queue.running = true;
+        client.logger.info('vc profile update lock acquired', {
+          key,
+          guildId: guild.id,
+          categoryId,
+          profileChannelId: mapping.profileChannelId,
+          reason
+        });
+
+        try {
+          await syncVoiceProfileCategoryLocked(client, guild, categoryId, mapping, { reason });
+        } finally {
+          client.logger.info('vc profile update lock released', {
+            key,
+            guildId: guild.id,
+            categoryId,
+            profileChannelId: mapping.profileChannelId,
+            reason
+          });
+        }
+      }
+    } finally {
+      queue.running = false;
+      queue.promise = null;
+      if (!queue.pending) {
+        queues.delete(key);
       }
     }
-  } finally {
-    client.db.vcProfiles.deleteRoomMessage(voiceChannelId);
-  }
+  })();
+
+  return queue.promise;
 }
 
 async function buildVoiceChannelMembers(client, voiceChannel) {
@@ -293,19 +362,295 @@ async function buildVoiceChannelMembers(client, voiceChannel) {
   return members;
 }
 
-async function syncVoiceChannelProfile(client, voiceChannel) {
-  const freshVoiceChannel = await getFreshVoiceChannel(voiceChannel.guild, voiceChannel.id) || voiceChannel;
-  const categoryId = getTrackedCategoryId(client, freshVoiceChannel);
-  if (!categoryId) {
-    return;
+function getCachedVoiceChannelsForCategory(guild, categoryId) {
+  return [...(guild?.channels?.cache?.values?.() || [])]
+    .filter((channel) => channel?.isVoiceBased?.() && channel.parentId === categoryId);
+}
+
+async function getVoiceChannelsForCategory(guild, categoryId) {
+  let voiceChannels = getCachedVoiceChannelsForCategory(guild, categoryId);
+  if (voiceChannels.length) {
+    return voiceChannels;
   }
 
-  const mapping = client.voiceProfileCategoryMap.get(categoryId);
-  if (!mapping) {
-    return;
+  const fetchedChannels = await guild.channels.fetch().catch(() => null);
+  voiceChannels = [...(fetchedChannels?.values?.() || [])]
+    .filter((channel) => channel?.isVoiceBased?.() && channel.parentId === categoryId);
+  return voiceChannels;
+}
+
+function formatVoiceChannelName(activeChannels) {
+  if (activeChannels.length === 1) {
+    return activeChannels[0].name;
   }
 
-  const members = await buildVoiceChannelMembers(client, freshVoiceChannel);
+  const names = activeChannels.map((entry) => entry.name).filter(Boolean);
+  if (names.length <= 3) {
+    return names.join(' / ');
+  }
+
+  return `${names.slice(0, 3).join(' / ')} ほか${names.length - 3}件`;
+}
+
+function normalizeUniqueMembers(channelMembers) {
+  const memberMap = new Map();
+  for (const member of channelMembers.flat()) {
+    if (!memberMap.has(member.id)) {
+      memberMap.set(member.id, member);
+    }
+  }
+
+  return [...memberMap.values()]
+    .sort((left, right) => left.displayName.localeCompare(right.displayName, 'ja'));
+}
+
+async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapping) {
+  const voiceChannels = await getVoiceChannelsForCategory(guild, categoryId);
+  const activeChannels = [];
+  const allMembers = [];
+  const statusLines = [];
+
+  for (const voiceChannel of voiceChannels) {
+    const freshVoiceChannel = await getFreshVoiceChannel(guild, voiceChannel.id) || voiceChannel;
+    const members = await buildVoiceChannelMembers(client, freshVoiceChannel);
+    if (members.length === 0) {
+      continue;
+    }
+
+    activeChannels.push(freshVoiceChannel);
+    allMembers.push(members);
+  }
+
+  for (const activeChannel of activeChannels) {
+    const statusText = await resolveVoiceChannelStatusText(client, activeChannel, mapping);
+    if (!statusText) {
+      continue;
+    }
+    statusLines.push(activeChannels.length === 1 ? statusText : `${activeChannel.name}: ${statusText}`);
+  }
+
+  return {
+    activeChannels,
+    members: normalizeUniqueMembers(allMembers),
+    statusText: [...new Set(statusLines)].join('\n') || null,
+    voiceChannelName: activeChannels.length ? formatVoiceChannelName(activeChannels) : ''
+  };
+}
+
+function collectTextDisplayContent(component, collected = []) {
+  if (!component) {
+    return collected;
+  }
+
+  const raw = typeof component.toJSON === 'function' ? component.toJSON() : component;
+  if (typeof raw?.content === 'string') {
+    collected.push(raw.content);
+  }
+
+  for (const child of raw?.components || []) {
+    collectTextDisplayContent(child, collected);
+  }
+
+  if (raw?.accessory) {
+    collectTextDisplayContent(raw.accessory, collected);
+  }
+
+  return collected;
+}
+
+function isVcProfileCardMessage(client, message, mapping) {
+  if (String(message?.author?.id || '') !== String(client.user?.id || '')) {
+    return false;
+  }
+
+  const text = collectTextDisplayContent({ components: message.components || [] }).join('\n');
+  return text.includes(`## ${mapping.name} /`);
+}
+
+async function deleteMessageIfExists(message) {
+  if (!message) {
+    return false;
+  }
+
+  await message.delete();
+  return true;
+}
+
+async function cleanupDuplicateCategoryCards(client, {
+  guildId,
+  categoryId,
+  profileChannel,
+  mapping,
+  keepMessageId = null,
+  includeTracked = false,
+  reason
+}) {
+  const duplicateIds = new Set();
+  const tracked = client.db.vcProfiles.getCategoryMessage({
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id
+  });
+  const roomRecords = client.db.vcProfiles
+    .listRoomMessagesByCategory(categoryId)
+    .filter((record) => String(record.profileChannelId) === String(profileChannel.id));
+
+  for (const record of roomRecords) {
+    if (!includeTracked && String(record.messageId) === String(keepMessageId || tracked?.messageId || '')) {
+      continue;
+    }
+    duplicateIds.add(String(record.messageId));
+  }
+
+  const recentMessages = await profileChannel.messages.fetch({ limit: 50 }).catch(() => null);
+  for (const message of recentMessages?.values?.() || []) {
+    if (String(message.id) === String(keepMessageId || '')) {
+      continue;
+    }
+    if (isVcProfileCardMessage(client, message, mapping)) {
+      duplicateIds.add(String(message.id));
+    }
+  }
+
+  if (tracked?.messageId && includeTracked) {
+    duplicateIds.add(String(tracked.messageId));
+  }
+
+  for (const messageId of duplicateIds) {
+    if (String(messageId) === String(keepMessageId || '')) {
+      continue;
+    }
+
+    client.logger.info('vc profile duplicate card detected', {
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      messageId,
+      keepMessageId,
+      reason
+    });
+
+    const message = await profileChannel.messages.fetch(messageId).catch(() => null);
+    if (!message) {
+      client.logger.info('vc profile duplicate cleanup skipped', {
+        guildId,
+        categoryId,
+        profileChannelId: profileChannel.id,
+        messageId,
+        reason: 'message_missing'
+      });
+      continue;
+    }
+
+    try {
+      await deleteMessageIfExists(message);
+      client.logger.info('vc profile duplicate card deleted', {
+        guildId,
+        categoryId,
+        profileChannelId: profileChannel.id,
+        messageId,
+        reason
+      });
+    } catch (error) {
+      client.logger.warn('vc profile duplicate cleanup skipped', {
+        guildId,
+        categoryId,
+        profileChannelId: profileChannel.id,
+        messageId,
+        reason: 'delete_failed',
+        error: error.message
+      });
+    }
+  }
+
+  const deletedRows = client.db.vcProfiles.deleteRoomMessagesByCategoryProfile(categoryId, profileChannel.id);
+  if (deletedRows > 0) {
+    client.logger.info('vc profile duplicate card deleted', {
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      deletedLegacyRows: deletedRows,
+      reason: `${reason}_legacy_db_rows`
+    });
+  }
+}
+
+async function cleanupEmptyCategoryProfile(client, {
+  guildId,
+  categoryId,
+  profileChannel,
+  mapping,
+  reason
+}) {
+  client.logger.info('vc profile empty category cleanup started', {
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id,
+    reason
+  });
+
+  await cleanupDuplicateCategoryCards(client, {
+    guildId,
+    categoryId,
+    profileChannel,
+    mapping,
+    keepMessageId: null,
+    includeTracked: true,
+    reason: `${reason}_empty_category`
+  });
+
+  const deletedCategoryRows = client.db.vcProfiles.deleteCategoryMessage({
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id
+  });
+
+  client.logger.info('vc profile empty category cleanup finished', {
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id,
+    deletedCategoryRows,
+    reason
+  });
+}
+
+async function fetchTrackedCategoryMessage(client, profileChannel, existing) {
+  if (!existing?.messageId) {
+    return null;
+  }
+
+  const message = await profileChannel.messages.fetch(existing.messageId).catch(() => null);
+  if (message) {
+    client.logger.info('vc profile existing card fetched', {
+      categoryId: existing.categoryId,
+      profileChannelId: profileChannel.id,
+      messageId: existing.messageId
+    });
+  }
+  return message;
+}
+
+function resolveCategoryAccentColor(client, mapping, activeChannels) {
+  const colorSourceId = activeChannels[0]?.id || mapping.categoryId;
+  let accentColor = resolveVcProfileAccentColor({
+    voiceChannelId: colorSourceId,
+    config: client.appConfig,
+    logger: client.logger
+  });
+  if (mapping.accentColor != null) {
+    accentColor = mapping.accentColor;
+    client.logger.info('vc profile card color resolved', {
+      voiceChannelId: colorSourceId,
+      configuredAccentColor: mapping.accentColor,
+      accentColor,
+      source: 'voiceProfileChannels'
+    });
+  }
+  return accentColor;
+}
+
+async function syncVoiceProfileCategoryLocked(client, guild, categoryId, mapping, { reason = 'voice_profile_sync' } = {}) {
+  const guildId = guild.id;
   const profileChannel = await client.channels.fetch(mapping.profileChannelId).catch(() => null);
 
   if (!profileChannel?.isTextBased?.()) {
@@ -316,120 +661,115 @@ async function syncVoiceChannelProfile(client, voiceChannel) {
     return;
   }
 
-  const existing = client.db.vcProfiles.getRoomMessage(freshVoiceChannel.id);
+  const snapshot = await buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapping);
 
-  if (members.length === 0) {
-    if (existing) {
-      client.logger.info('vc profile stale card detected', {
-        categoryId,
-        voiceChannelId: freshVoiceChannel.id,
-        profileChannelId: profileChannel.id,
-        messageId: existing.messageId,
-        reason: 'empty_channel'
-      });
-      await deleteRoomProfileCard(client, freshVoiceChannel.id);
-      client.logger.info('vc profile empty channel cleanup', {
-        categoryId,
-        voiceChannelId: freshVoiceChannel.id,
-        profileChannelId: profileChannel.id
-      });
-    }
-
+  if (snapshot.members.length === 0) {
+    await cleanupEmptyCategoryProfile(client, {
+      guildId,
+      categoryId,
+      profileChannel,
+      mapping,
+      reason
+    });
     return;
   }
 
-  let accentColor = resolveVcProfileAccentColor({
-    voiceChannelId: freshVoiceChannel.id,
-    config: client.appConfig,
-    logger: client.logger
+  const existing = client.db.vcProfiles.getCategoryMessage({
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id
   });
-  if (mapping.accentColor != null) {
-    accentColor = mapping.accentColor;
-    client.logger.info('vc profile card color resolved', {
-      voiceChannelId: freshVoiceChannel.id,
-      configuredAccentColor: mapping.accentColor,
-      accentColor,
-      source: 'voiceProfileChannels'
-    });
-  }
-  const statusText = await resolveVoiceChannelStatusText(client, freshVoiceChannel, mapping);
+  const existingMessage = await fetchTrackedCategoryMessage(client, profileChannel, existing);
+  const accentColor = resolveCategoryAccentColor(client, mapping, snapshot.activeChannels);
   const payload = buildProfileMessage({
     contextName: mapping.name,
-    voiceChannelName: freshVoiceChannel.name,
-    statusText,
-    members,
+    voiceChannelName: snapshot.voiceChannelName,
+    statusText: snapshot.statusText,
+    members: snapshot.members,
     accentColor
   });
 
-  if (!existing) {
-    const sentMessage = await profileChannel.send(payload);
-    client.db.vcProfiles.upsertRoomMessage({
+  if (existingMessage) {
+    await existingMessage.edit(payload);
+    client.db.vcProfiles.upsertCategoryMessage({
+      guildId,
       categoryId,
-      voiceChannelId: freshVoiceChannel.id,
       profileChannelId: profileChannel.id,
-      messageId: sentMessage.id
+      messageId: existingMessage.id
     });
-    client.logger.info('VC room profile created', {
+    client.logger.info('vc profile existing card edited', {
+      guildId,
       categoryId,
-      voiceChannelId: freshVoiceChannel.id,
       profileChannelId: profileChannel.id,
-      messageId: sentMessage.id
+      messageId: existingMessage.id,
+      activeVoiceChannelIds: snapshot.activeChannels.map((channel) => channel.id),
+      memberCount: snapshot.members.length,
+      reason
     });
-    return;
-  }
-
-  const message = await profileChannel.messages.fetch(existing.messageId).catch(() => null);
-
-  if (!message) {
-    const sentMessage = await profileChannel.send(payload);
-    client.db.vcProfiles.upsertRoomMessage({
+    await cleanupDuplicateCategoryCards(client, {
+      guildId,
       categoryId,
-      voiceChannelId: freshVoiceChannel.id,
-      profileChannelId: profileChannel.id,
-      messageId: sentMessage.id
-    });
-    client.logger.info('VC room profile created', {
-      categoryId,
-      voiceChannelId: freshVoiceChannel.id,
-      profileChannelId: profileChannel.id,
-      messageId: sentMessage.id,
-      recovered: true
+      profileChannel,
+      mapping,
+      keepMessageId: existingMessage.id,
+      reason
     });
     return;
   }
 
-  await message.edit(payload);
-  client.db.vcProfiles.upsertRoomMessage({
+  await cleanupDuplicateCategoryCards(client, {
+    guildId,
     categoryId,
-    voiceChannelId: freshVoiceChannel.id,
-    profileChannelId: profileChannel.id,
-    messageId: message.id
+    profileChannel,
+    mapping,
+    keepMessageId: null,
+    includeTracked: true,
+    reason: `${reason}_before_create`
   });
-  client.logger.info('VC room profile updated', {
-    categoryId,
-    voiceChannelId: freshVoiceChannel.id,
-    profileChannelId: profileChannel.id,
-    messageId: message.id
-  });
-}
 
-async function syncVoiceChannelProfileById(client, guild, voiceChannelId) {
-  const voiceChannel = await getFreshVoiceChannel(guild, voiceChannelId);
-  if (!voiceChannel) {
-    const existing = client.db.vcProfiles.getRoomMessage(String(voiceChannelId || ''));
-    if (existing) {
-      client.logger.info('vc profile stale card detected', {
-        voiceChannelId: String(voiceChannelId || ''),
-        profileChannelId: existing.profileChannelId,
-        messageId: existing.messageId,
-        reason: 'voice_channel_missing'
-      });
-      await deleteRoomProfileCard(client, String(voiceChannelId || ''));
-    }
+  const latestAfterCleanup = client.db.vcProfiles.getCategoryMessage({
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id
+  });
+  const recoveredMessage = await fetchTrackedCategoryMessage(client, profileChannel, latestAfterCleanup);
+  if (recoveredMessage) {
+    await recoveredMessage.edit(payload);
+    client.db.vcProfiles.upsertCategoryMessage({
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      messageId: recoveredMessage.id
+    });
+    client.logger.info('vc profile existing card edited', {
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      messageId: recoveredMessage.id,
+      recovered: true,
+      activeVoiceChannelIds: snapshot.activeChannels.map((channel) => channel.id),
+      memberCount: snapshot.members.length,
+      reason
+    });
     return;
   }
 
-  await syncVoiceChannelProfile(client, voiceChannel);
+  const sentMessage = await profileChannel.send(payload);
+  client.db.vcProfiles.upsertCategoryMessage({
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id,
+    messageId: sentMessage.id
+  });
+  client.logger.info('vc profile new card created', {
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id,
+    messageId: sentMessage.id,
+    activeVoiceChannelIds: snapshot.activeChannels.map((channel) => channel.id),
+    memberCount: snapshot.members.length,
+    reason
+  });
 }
 
 async function cleanupLegacyUserCards(client, categoryId) {
@@ -454,9 +794,9 @@ async function cleanupLegacyUserCards(client, categoryId) {
 
 async function rebuildVoiceProfileState(client, { reason = 'startup' } = {}) {
   const guild = await client.guilds.fetch(process.env.GUILD_ID);
-  const channels = await guild.channels.fetch();
   let scannedChannelCount = 0;
   let staleCardCount = 0;
+  await guild.channels.fetch();
 
   client.logger.info('vc profile reconciliation started', {
     reason,
@@ -466,37 +806,11 @@ async function rebuildVoiceProfileState(client, { reason = 'startup' } = {}) {
   for (const [categoryId] of client.voiceProfileCategoryMap) {
     await cleanupLegacyUserCards(client, categoryId);
 
-    const storedRooms = client.db.vcProfiles.listRoomMessagesByCategory(categoryId);
-    const trackedVoiceChannels = [...channels.values()].filter(
-      (channel) => channel?.isVoiceBased?.() && channel.parentId === categoryId
-    );
-    const activeVoiceChannelIds = new Set();
-
-    for (const voiceChannel of trackedVoiceChannels) {
-      scannedChannelCount += 1;
-      activeVoiceChannelIds.add(voiceChannel.id);
-      await syncVoiceChannelProfile(client, voiceChannel);
-    }
-
-    for (const record of storedRooms) {
-      if (!activeVoiceChannelIds.has(record.voiceChannelId)) {
-        staleCardCount += 1;
-        client.logger.info('vc profile stale card detected', {
-          categoryId,
-          voiceChannelId: record.voiceChannelId,
-          profileChannelId: record.profileChannelId,
-          messageId: record.messageId,
-          reason: `${reason}_missing_voice_channel`
-        });
-        await deleteRoomProfileCard(client, record.voiceChannelId);
-        client.logger.info('VC room profile deleted', {
-          categoryId,
-          voiceChannelId: record.voiceChannelId,
-          profileChannelId: record.profileChannelId,
-          reason: `${reason}_cleanup`
-        });
-      }
-    }
+    const staleRecords = client.db.vcProfiles.listRoomMessagesByCategory(categoryId);
+    staleCardCount += staleRecords.length;
+    const trackedVoiceChannels = await getVoiceChannelsForCategory(guild, categoryId);
+    scannedChannelCount += trackedVoiceChannels.length;
+    await queueVoiceProfileCategoryUpdate(client, guild, categoryId, { reason });
   }
 
   client.logger.info('vc profile reconciliation finished', {
@@ -583,21 +897,22 @@ async function handleVoiceStateUpdate(oldState, newState) {
     return;
   }
 
-  const affectedChannelIds = new Set();
+  const affectedCategoryIds = new Set();
   if (oldState.channelId && (oldCategoryId || client.db.vcProfiles.getRoomMessage(oldState.channelId))) {
-    affectedChannelIds.add(String(oldState.channelId));
+    const oldRoomMessage = client.db.vcProfiles.getRoomMessage(oldState.channelId);
+    affectedCategoryIds.add(String(oldCategoryId || oldRoomMessage?.categoryId || ''));
   }
   if (newState.channelId && newCategoryId) {
-    affectedChannelIds.add(String(newState.channelId));
+    affectedCategoryIds.add(String(newCategoryId));
   }
 
   client.logger.info('Affected VC room profile channels', {
     userId,
-    voiceChannelIds: [...affectedChannelIds]
+    categoryIds: [...affectedCategoryIds].filter(Boolean)
   });
 
-  for (const voiceChannelId of affectedChannelIds) {
-    await syncVoiceChannelProfileById(client, guild, voiceChannelId);
+  for (const categoryId of [...affectedCategoryIds].filter(Boolean)) {
+    await queueVoiceProfileCategoryUpdate(client, guild, categoryId, { reason: 'voice_state_update' });
   }
 }
 

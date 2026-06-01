@@ -78,6 +78,18 @@ function runMigrations(database) {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS vc_category_profile_messages (
+      guild_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      profile_channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, category_id, profile_channel_id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vc_category_profile_messages_message
+      ON vc_category_profile_messages (message_id);
+
     CREATE TABLE IF NOT EXISTS relayed_message_targets (
       source_message_id TEXT NOT NULL,
       destination_channel_id TEXT NOT NULL,

@@ -53,6 +53,7 @@ function createBotClient({ appConfig, database, logger }) {
   client.introDmQueueProcessing = false;
   client.introDmQueueInterval = null;
   client.voiceProfileReconcileInterval = null;
+  client.voiceProfileUpdateQueues = new Map();
 
   client.once('clientReady', (...args) => readyEvent.execute(...args));
   client.on('threadCreate', (...args) => threadCreateEvent.execute(...args));
