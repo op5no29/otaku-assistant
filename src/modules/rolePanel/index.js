@@ -9,6 +9,7 @@ const {
 const ANNOUNCEMENT_CHANNEL_ID = '1224747669604536382';
 const TEMP_ROLE_PANEL_KIND = 'temp_role_panel';
 const TEMP_ROLE_PANEL_OVERFLOW_KIND = 'temp_role_panel_overflow';
+const DEV_ROLE_PANEL_KIND = 'dev_role_panel';
 const ROLE_PANEL_ACCENT_COLOR = 0xef4444;
 
 const ROLE_MAPPINGS = [
@@ -35,6 +36,9 @@ const ROLE_MAPPINGS = [
   { emoji: '🇨', label: 'Cubase', roleId: '1228010923336400987' },
   { emoji: '🧠', label: '知りたがり', roleId: '1510927153246502972' }
 ];
+const DEV_ROLE_MAPPINGS = [
+  { emoji: '💻', label: '開発', roleId: '1510978792104136744' }
+];
 
 function normalizeEmojiKey(value) {
   return String(value || '').normalize('NFC').replace(/\uFE0F/gu, '');
@@ -44,7 +48,8 @@ const MAIN_ROLE_MAPPINGS = ROLE_MAPPINGS.slice(0, 15);
 const OVERFLOW_ROLE_MAPPINGS = ROLE_MAPPINGS.slice(15);
 const TRACKED_ROLE_PANEL_KINDS = new Set([
   TEMP_ROLE_PANEL_KIND,
-  TEMP_ROLE_PANEL_OVERFLOW_KIND
+  TEMP_ROLE_PANEL_OVERFLOW_KIND,
+  DEV_ROLE_PANEL_KIND
 ]);
 
 const ROLE_BY_EMOJI_BY_PANEL_KIND = new Map([
@@ -55,6 +60,10 @@ const ROLE_BY_EMOJI_BY_PANEL_KIND = new Map([
   [
     TEMP_ROLE_PANEL_OVERFLOW_KIND,
     new Map(OVERFLOW_ROLE_MAPPINGS.map((entry) => [normalizeEmojiKey(entry.emoji), entry]))
+  ],
+  [
+    DEV_ROLE_PANEL_KIND,
+    new Map(DEV_ROLE_MAPPINGS.map((entry) => [normalizeEmojiKey(entry.emoji), entry]))
   ]
 ]);
 
@@ -157,23 +166,73 @@ function buildRolePanelOverflowPayload() {
   };
 }
 
+function buildDevRolePanelPayload() {
+  const container = new ContainerBuilder().setAccentColor(ROLE_PANEL_ACCENT_COLOR);
+  const textBlocks = [
+    '@everyone',
+    [
+      'リクエストがあったので、開発ロールを作成しました！',
+      '',
+      'Web開発、Pythonアプリ、Bot制作、ツール開発、プログラミング全般などをやっている人向けのロールです。',
+      '',
+      '下のリアクションを押すとロールが付き、リアクションを外すとロールも外れます。'
+    ].join('\n'),
+    '💻 開発'
+  ];
+
+  textBlocks.forEach((block, index) => {
+    if (index > 1) {
+      container.addSeparatorComponents(
+        new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+      );
+    }
+    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(block));
+  });
+
+  return {
+    flags: MessageFlags.IsComponentsV2,
+    components: [container],
+    allowedMentions: { parse: ['everyone'] }
+  };
+}
+
+function getPanelKindLabel(panelKind) {
+  if (panelKind === DEV_ROLE_PANEL_KIND) {
+    return 'dev';
+  }
+  if (panelKind === TEMP_ROLE_PANEL_OVERFLOW_KIND) {
+    return 'overflow';
+  }
+  return 'main';
+}
+
 async function addRolePanelReactions(message, logger, roleMappings, panelKind) {
-  const isOverflow = panelKind === TEMP_ROLE_PANEL_OVERFLOW_KIND;
+  const panelKindLabel = getPanelKindLabel(panelKind);
 
   for (const entry of roleMappings) {
     try {
       await message.react(entry.emoji);
-      logger.info(isOverflow ? 'role panel overflow reaction added' : 'role panel reaction added', {
+      logger.info(panelKind === DEV_ROLE_PANEL_KIND
+        ? 'dev role panel reaction added'
+        : panelKind === TEMP_ROLE_PANEL_OVERFLOW_KIND
+          ? 'role panel overflow reaction added'
+          : 'role panel reaction added', {
         messageId: message.id,
         panelKind,
+        panelKindLabel,
         emoji: entry.emoji,
         roleId: entry.roleId,
         label: entry.label
       });
     } catch (error) {
-      logger.warn(isOverflow ? 'role panel overflow reaction add failed' : 'role panel reaction add failed', {
+      logger.warn(panelKind === DEV_ROLE_PANEL_KIND
+        ? 'dev role panel reaction failed'
+        : panelKind === TEMP_ROLE_PANEL_OVERFLOW_KIND
+          ? 'role panel overflow reaction add failed'
+          : 'role panel reaction add failed', {
         messageId: message.id,
         panelKind,
+        panelKindLabel,
         emoji: entry.emoji,
         roleId: entry.roleId,
         label: entry.label,
@@ -200,7 +259,9 @@ async function upsertRolePanelMessage({
   if (existingMessage) {
     try {
       await existingMessage.delete();
-      logger.info('role panel existing message deleted for repost', {
+      logger.info(panelKind === DEV_ROLE_PANEL_KIND
+        ? 'dev role panel message updated/reposted'
+        : 'role panel existing message deleted for repost', {
         guildId,
         channelId: channel.id,
         messageId: existingMessage.id,
@@ -219,9 +280,11 @@ async function upsertRolePanelMessage({
   }
 
   const message = await channel.send(payload);
-  logger.info(panelKind === TEMP_ROLE_PANEL_OVERFLOW_KIND
-    ? 'role panel overflow message posted'
-    : 'role panel message posted', {
+  logger.info(panelKind === DEV_ROLE_PANEL_KIND
+    ? 'dev role panel message posted'
+    : panelKind === TEMP_ROLE_PANEL_OVERFLOW_KIND
+      ? 'role panel overflow message posted'
+      : 'role panel message posted', {
     guildId,
     channelId: channel.id,
     messageId: message.id,
@@ -269,6 +332,23 @@ async function postTempRolePanel(client, guildId) {
     mainMessage,
     overflowMessage
   };
+}
+
+async function postDevRolePanel(client, guildId) {
+  const guild = client.guilds.cache.get(guildId) || await client.guilds.fetch(guildId);
+  const channel = await guild.channels.fetch(ANNOUNCEMENT_CHANNEL_ID).catch(() => null);
+  if (!channel?.isTextBased?.()) {
+    throw new Error(`Role panel announcement channel is unavailable: ${ANNOUNCEMENT_CHANNEL_ID}`);
+  }
+
+  return upsertRolePanelMessage({
+    client,
+    guildId,
+    channel,
+    panelKind: DEV_ROLE_PANEL_KIND,
+    payload: buildDevRolePanelPayload(),
+    roleMappings: DEV_ROLE_MAPPINGS
+  });
 }
 
 function getRoleMappingForPanelKind(panelKind, emojiName) {
@@ -422,13 +502,26 @@ async function handleRolePanelReactionAdd(reaction, user) {
   }
 
   const logger = message.client.logger;
+  const isDevPanel = context.panel?.panelKind === DEV_ROLE_PANEL_KIND;
   const { member, role } = await fetchRolePanelMemberAndRole(message, user.id, roleMapping, 'add');
   if (!member || !role) {
+    if (isDevPanel) {
+      logger.warn('dev role panel reaction failed', {
+        guildId: message.guildId,
+        userId: user.id,
+        roleId: roleMapping.roleId,
+        label: roleMapping.label,
+        emoji: roleMapping.emoji,
+        messageId: message.id,
+        action: 'add',
+        reason: !member ? 'member_unavailable' : 'role_unavailable'
+      });
+    }
     return true;
   }
 
   if (member.roles.cache.has(role.id)) {
-    logger.info('role panel role add skipped existing role', {
+    logger.info(isDevPanel ? 'dev role panel role add skipped existing role' : 'role panel role add skipped existing role', {
       guildId: message.guildId,
       userId: user.id,
       roleId: role.id,
@@ -440,7 +533,7 @@ async function handleRolePanelReactionAdd(reaction, user) {
 
   try {
     await member.roles.add(role, 'Otaku Assistant temporary role panel reaction');
-    logger.info('role panel role granted', {
+    logger.info(isDevPanel ? 'dev role panel role granted' : 'role panel role granted', {
       guildId: message.guildId,
       userId: user.id,
       roleId: role.id,
@@ -449,7 +542,7 @@ async function handleRolePanelReactionAdd(reaction, user) {
       messageId: message.id
     });
   } catch (error) {
-    logger.warn('role panel role grant failed', {
+    logger.warn(isDevPanel ? 'dev role panel reaction failed' : 'role panel role grant failed', {
       guildId: message.guildId,
       userId: user.id,
       roleId: role.id,
@@ -475,13 +568,36 @@ async function handleRolePanelReactionRemove(reaction, user) {
   }
 
   const logger = message.client.logger;
+  const isDevPanel = context.panel?.panelKind === DEV_ROLE_PANEL_KIND;
+  if (isDevPanel) {
+    logger.info('dev role panel reaction removed', {
+      guildId: message.guildId,
+      userId: user.id,
+      roleId: roleMapping.roleId,
+      label: roleMapping.label,
+      emoji: roleMapping.emoji,
+      messageId: message.id
+    });
+  }
   const { member, role } = await fetchRolePanelMemberAndRole(message, user.id, roleMapping, 'remove');
   if (!member || !role) {
+    if (isDevPanel) {
+      logger.warn('dev role panel reaction failed', {
+        guildId: message.guildId,
+        userId: user.id,
+        roleId: roleMapping.roleId,
+        label: roleMapping.label,
+        emoji: roleMapping.emoji,
+        messageId: message.id,
+        action: 'remove',
+        reason: !member ? 'member_unavailable' : 'role_unavailable'
+      });
+    }
     return true;
   }
 
   if (!member.roles.cache.has(role.id)) {
-    logger.info('role panel role remove skipped missing role', {
+    logger.info(isDevPanel ? 'dev role panel role remove skipped missing role' : 'role panel role remove skipped missing role', {
       guildId: message.guildId,
       userId: user.id,
       roleId: role.id,
@@ -493,7 +609,7 @@ async function handleRolePanelReactionRemove(reaction, user) {
 
   try {
     await member.roles.remove(role, 'Otaku Assistant temporary role panel reaction removed');
-    logger.info('role panel role removed', {
+    logger.info(isDevPanel ? 'dev role panel role removed' : 'role panel role removed', {
       guildId: message.guildId,
       userId: user.id,
       roleId: role.id,
@@ -502,7 +618,7 @@ async function handleRolePanelReactionRemove(reaction, user) {
       messageId: message.id
     });
   } catch (error) {
-    logger.warn('role panel role remove failed', {
+    logger.warn(isDevPanel ? 'dev role panel reaction failed' : 'role panel role remove failed', {
       guildId: message.guildId,
       userId: user.id,
       roleId: role.id,
@@ -520,12 +636,16 @@ module.exports = {
   ANNOUNCEMENT_CHANNEL_ID,
   TEMP_ROLE_PANEL_KIND,
   TEMP_ROLE_PANEL_OVERFLOW_KIND,
+  DEV_ROLE_PANEL_KIND,
   ROLE_MAPPINGS,
   MAIN_ROLE_MAPPINGS,
   OVERFLOW_ROLE_MAPPINGS,
+  DEV_ROLE_MAPPINGS,
   buildRolePanelPayload,
   buildRolePanelOverflowPayload,
+  buildDevRolePanelPayload,
   postTempRolePanel,
+  postDevRolePanel,
   handleRolePanelReactionAdd,
   handleRolePanelReactionRemove,
   normalizeEmojiKey

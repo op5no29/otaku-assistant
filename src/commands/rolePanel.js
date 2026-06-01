@@ -1,5 +1,5 @@
 const { PermissionFlagsBits, SlashCommandBuilder } = require('discord.js');
-const { postTempRolePanel } = require('../modules/rolePanel');
+const { postDevRolePanel, postTempRolePanel } = require('../modules/rolePanel');
 
 function canManageRolePanel(member) {
   return Boolean(
@@ -17,6 +17,11 @@ module.exports = {
       subcommand
         .setName('post-temp')
         .setDescription('告知チャンネルに一時ロール付与パネルを投稿または更新します。')
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('post-dev')
+        .setDescription('告知チャンネルに開発ロール付与パネルを投稿または更新します。')
     ),
 
   async execute(interaction) {
@@ -29,13 +34,25 @@ module.exports = {
     }
 
     const subcommand = interaction.options.getSubcommand(true);
-    if (subcommand !== 'post-temp') {
+    if (!['post-temp', 'post-dev'].includes(subcommand)) {
       return;
     }
 
     await interaction.deferReply({ ephemeral: true });
 
     try {
+      if (subcommand === 'post-dev') {
+        const message = await postDevRolePanel(interaction.client, interaction.guildId);
+        await interaction.editReply({
+          content: [
+            '開発ロールパネルを投稿しました。',
+            `メッセージ: ${message.url}`
+          ].join('\n'),
+          allowedMentions: { parse: [] }
+        });
+        return;
+      }
+
       const { mainMessage, overflowMessage } = await postTempRolePanel(interaction.client, interaction.guildId);
       await interaction.editReply({
         content: [
