@@ -120,9 +120,9 @@ function addQuestionHeader(container, { title, subtitle }) {
   }
 }
 
-function buildTweetHeaderSection({ title, avatarUrl }) {
+function buildTweetContextSection({ title, avatarUrl }) {
   const section = new SectionBuilder().addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`### ${title}`)
+    new TextDisplayBuilder().setContent(`**${title}**`)
   );
 
   if (avatarUrl) {
@@ -669,12 +669,15 @@ function buildTweetTimelineMessage({ post, config, logger = null }) {
   ].filter(Boolean))];
 
   container.addSectionComponents(
-    buildTweetHeaderSection({
+    buildTweetContextSection({
       title: buildPosthocHashtagHeadline(post) || post.timelineHeadline || `${post.displayName} さんが投稿しました`,
       avatarUrl: post.avatarUrl
     })
   );
   addReplyContextIfPresent(container, post);
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
   if (body) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent(body));
   } else if (
