@@ -14,7 +14,11 @@ const QUESTION_FORUM_LABELS = {
   '1230488742737875005': 'DTM',
   '1230488769145081916': 'メディアアート',
   '1230488840444186714': 'CG',
-  '1230488869519229009': 'ゲーム'
+  '1230488869519229009': '個人開発'
+};
+
+const QUESTION_CATEGORY_LABELS = {
+  '1230488177232445550': '個人開発'
 };
 
 const KNOWLEDGE_FORUM_TAG_LABELS = {
@@ -40,10 +44,15 @@ function normalizeQuestionTitle(rawTitle, resolvedPrefix) {
 }
 
 function getForumLabel(thread) {
+  const categoryId = String(thread.parent?.parentId || thread.parent?.parent?.id || '');
+  if (QUESTION_CATEGORY_LABELS[categoryId]) {
+    return QUESTION_CATEGORY_LABELS[categoryId];
+  }
+
   const categoryName = thread.parent?.parent?.name?.trim();
 
   if (categoryName && !categoryName.includes('質問場所')) {
-    return categoryName;
+    return categoryName.replace(/ゲーム開発/gu, '個人開発');
   }
 
   return QUESTION_FORUM_LABELS[String(thread.parentId)] || '質問フォーラム';
@@ -495,7 +504,30 @@ function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null, logger = null,
   let primaryPreview = null;
   const gifProvider = getGifProviderName(sourceUrl);
   const candidates = collectPreviewMediaCandidates(embeds, sourceUrl);
+  for (const candidate of candidates) {
+    logger?.info?.('relay link preview image candidate found', {
+      sourceMessageId: messageId,
+      sourceUrl,
+      imageUrl: candidate.url,
+      source: candidate.source,
+      kind: candidate.kind
+    });
+  }
   const selectedCandidates = selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger, messageId);
+  if (selectedCandidates.length) {
+    logger?.info?.('relay link preview image selected', {
+      sourceMessageId: messageId,
+      sourceUrl,
+      imageUrls: selectedCandidates.map((candidate) => candidate.url)
+    });
+    if (/^https?:\/\/(?:on\.)?soundcloud\.com\//i.test(String(sourceUrl || '')) || /\/\/[^/]*soundcloud\.com\//i.test(String(sourceUrl || ''))) {
+      logger?.info?.('soundcloud preview image selected', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        imageUrl: selectedCandidates[0]?.url || null
+      });
+    }
+  }
 
   for (const embed of embeds || []) {
     const imageUrl = pickPreviewImage(embed);

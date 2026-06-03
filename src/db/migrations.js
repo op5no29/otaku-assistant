@@ -103,6 +103,27 @@ function runMigrations(database) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vc_category_profile_message_pages_message
       ON vc_category_profile_message_pages (message_id);
 
+    CREATE TABLE IF NOT EXISTS vc_profile_member_sessions (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      profile_channel_id TEXT NOT NULL,
+      voice_channel_id TEXT NOT NULL,
+      joined_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id, category_id, profile_channel_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS vc_profile_color_sessions (
+      guild_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      profile_channel_id TEXT NOT NULL,
+      color INTEGER NOT NULL,
+      active_since TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, category_id, profile_channel_id)
+    );
+
     CREATE TABLE IF NOT EXISTS relayed_message_targets (
       source_message_id TEXT NOT NULL,
       destination_channel_id TEXT NOT NULL,

@@ -18,6 +18,7 @@ function emphasizeSocialLinks(content) {
 
 function buildMemberSection(member, { compact = false } = {}) {
   const displayName = member.displayName || '不明なメンバー';
+  const headingName = member.mention || (member.id ? `<@${member.id}>` : displayName);
   const introSummary = member.introSummary?.trim()
     ? emphasizeSocialLinks(truncateText(member.introSummary.trim(), 260))
     : '自己紹介がまだありません';
@@ -25,19 +26,19 @@ function buildMemberSection(member, { compact = false } = {}) {
 
   if (compact) {
     return [
-      new TextDisplayBuilder().setContent(`### ${displayName}\n${introSummary}`)
+      new TextDisplayBuilder().setContent(`### ${headingName}\n${introSummary}`)
     ];
   }
 
   if (!avatarUrl) {
     return [
-      new TextDisplayBuilder().setContent(`### ${displayName}`),
+      new TextDisplayBuilder().setContent(`### ${headingName}`),
       new TextDisplayBuilder().setContent(introSummary)
     ];
   }
 
   const section = new SectionBuilder().addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`### ${displayName}`),
+    new TextDisplayBuilder().setContent(`### ${headingName}`),
     new TextDisplayBuilder().setContent(introSummary)
   );
 
@@ -51,7 +52,6 @@ function buildMemberSection(member, { compact = false } = {}) {
 }
 
 function buildProfileMessage({
-  contextName,
   voiceChannelName,
   statusText = null,
   members,
@@ -72,8 +72,8 @@ function buildProfileMessage({
     : '';
 
   container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`## ${contextName} / VCにいる人のプロフィール ${pageLabel}`),
-    new TextDisplayBuilder().setContent(`${voiceChannelLine}${statusLine}**現在いる人**\n${countLabel}`)
+    new TextDisplayBuilder().setContent(`## VCにいる人のプロフィール ${pageLabel}`),
+    new TextDisplayBuilder().setContent(`${voiceChannelLine}${statusLine}**現在の人数**\n${countLabel}`)
   );
 
   for (const member of members) {
@@ -92,7 +92,7 @@ function buildProfileMessage({
   return {
     flags: MessageFlags.IsComponentsV2,
     components: [container],
-    allowedMentions: { parse: [] }
+    allowedMentions: { parse: [], users: [] }
   };
 }
 

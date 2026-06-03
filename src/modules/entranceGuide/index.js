@@ -109,7 +109,7 @@ function getGuideCardLinks(cardKey, config) {
       },
       {
         channelId: questionForumIds[4],
-        description: 'ゲーム制作の質問場所です。'
+        description: '個人開発の質問場所です。'
       }
     ],
     'map-voice': [
@@ -173,7 +173,13 @@ function getGuideCardLinks(cardKey, config) {
       },
       {
         channelId: questionForumIds[4],
-        description: 'ゲーム制作の質問場所です。'
+        description: '個人開発の質問場所です。'
+      }
+    ],
+    'features-anime': [
+      {
+        channelId: config.anime?.channelId,
+        description: 'アニメ作品カードや感想スレッドがまとまるチャンネルです。'
       }
     ],
     'vc-profile': [

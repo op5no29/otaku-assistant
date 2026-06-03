@@ -32,6 +32,24 @@ function normalizeMediaUrl(url) {
   }
 }
 
+function isValidHttpUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function isSoundCloudUrl(url) {
+  try {
+    const host = new URL(String(url || '')).hostname.toLowerCase();
+    return host === 'on.soundcloud.com' || host.endsWith('soundcloud.com');
+  } catch {
+    return false;
+  }
+}
+
 function createBaseContainer(accentColor) {
   return new ContainerBuilder().setAccentColor(accentColor);
 }
@@ -87,12 +105,12 @@ function normalizePosthocTagLabel(label) {
     return null;
   }
   if (value.startsWith('##')) {
-    return value;
+    return `#${value.replace(/^#+/u, '')}`;
   }
   if (value.startsWith('#')) {
-    return `#${value}`;
+    return `#${value.replace(/^#+/u, '')}`;
   }
-  return `##${value}`;
+  return `#${value}`;
 }
 
 function buildPosthocHashtagHeadline(post) {
@@ -107,7 +125,7 @@ function buildPosthocHashtagHeadline(post) {
     .filter(Boolean))];
   const tagText = tagLabels.length ? tagLabels.join(' / ') : 'タグ';
 
-  return `${originalAuthorName} さんの投稿を ${taggerName} さんが ${tagText} にタグ付けしました`;
+  return `${originalAuthorName} さんの投稿を ${taggerName} さんが${tagText}にタグ付けしました`;
 }
 
 function buildAuthorSection({ displayName, avatarUrl }) {
@@ -201,13 +219,38 @@ function addMediaIfPresent(container, post, logger = null) {
     ? post.customEmojiMediaItems.filter((item) => item?.url)
     : [];
   const imageUrls = Array.isArray(post.imageUrls) ? post.imageUrls : [];
+  const socialPreviewMediaUrls = post.musicLink
+    ? Array.isArray(post.socialPreview?.mediaUrls) && post.socialPreview.mediaUrls.length
+      ? post.socialPreview.mediaUrls
+      : Array.isArray(post.socialPreview?.imageUrls) && post.socialPreview.imageUrls.length
+        ? post.socialPreview.imageUrls
+        : [post.socialPreview?.imageUrl].filter(Boolean)
+    : [];
   const primaryImageUrls = imageUrls.length
     ? imageUrls
     : [post.firstImageUrl].filter(Boolean);
+  const musicArtworkUrls = socialPreviewMediaUrls.length
+    ? []
+    : [post.musicLink?.artworkUrl].filter(Boolean);
+  if (socialPreviewMediaUrls.length) {
+    logger?.info?.('relay link preview image selected', {
+      sourceMessageId: post.messageId || null,
+      sourceUrl: post.socialPreview?.sourceUrl || null,
+      imageUrls: socialPreviewMediaUrls
+    });
+    if (isSoundCloudUrl(post.socialPreview?.sourceUrl) || isSoundCloudUrl(post.musicLink?.sourceUrl)) {
+      logger?.info?.('soundcloud preview image selected', {
+        sourceMessageId: post.messageId || null,
+        sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
+        imageUrl: socialPreviewMediaUrls[0] || null
+      });
+    }
+  }
   const mediaUrls = [...new Set([
     ...primaryImageUrls,
     post.generatedVideoThumbnailUrl,
-    post.musicLink?.artworkUrl
+    ...socialPreviewMediaUrls,
+    ...musicArtworkUrls
   ].filter(Boolean))];
   const galleryItems = [
     ...explicitMediaGalleryItems,
@@ -218,11 +261,27 @@ function addMediaIfPresent(container, post, logger = null) {
       return false;
     }
 
+    if (!isValidHttpUrl(item.url)) {
+      logger?.info?.('relay link preview image validation failed', {
+        sourceMessageId: post.messageId || null,
+        imageUrl: item.url,
+        reason: 'invalid_url'
+      });
+      return false;
+    }
+
     const normalized = normalizeMediaUrl(item.url);
     return array.findIndex((other) => normalizeMediaUrl(other.url) === normalized) === index;
   });
 
   if (!galleryItems.length) {
+    if (socialPreviewMediaUrls.length || post.musicLink?.artworkUrl) {
+      logger?.info?.('relay link preview image omitted', {
+        sourceMessageId: post.messageId || null,
+        sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
+        reason: 'no_valid_gallery_items'
+      });
+    }
     return;
   }
 

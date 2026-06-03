@@ -1,10 +1,20 @@
+const crypto = require('node:crypto');
 const { Routes } = require('discord-api-types/v10');
 const { buildProfileMessage } = require('./buildProfileMessage');
 const { findLatestIntroMessage } = require('./findLatestIntroMessage');
-const { resolveVcProfileAccentColor } = require('../../utils/accentColors');
+const { parseAccentColor } = require('../../utils/accentColors');
 
 const DISCORD_COMPONENT_LIMIT = 40;
 const DEFAULT_MEMBERS_PER_PAGE = 6;
+const SESSION_ACCENT_COLOR_PALETTE = [
+  0x14b8a6,
+  0x0ea5e9,
+  0x8b5cf6,
+  0xec4899,
+  0xf43f5e,
+  0xf59e0b,
+  0x22c55e
+];
 
 async function initializeVoiceProfileMappings(client) {
   client.voiceProfileCategoryMap.clear();
@@ -70,6 +80,84 @@ async function getFreshVoiceChannel(guild, voiceChannelId) {
 
   const fetched = await guild.channels.fetch(String(voiceChannelId)).catch(() => null);
   return fetched?.isVoiceBased?.() ? fetched : null;
+}
+
+function getStableMemberName(member) {
+  return member?.displayName || member?.user?.globalName || member?.user?.username || String(member?.id || '');
+}
+
+function selectRandomSessionAccentColor() {
+  const index = crypto.randomInt(0, SESSION_ACCENT_COLOR_PALETTE.length);
+  return SESSION_ACCENT_COLOR_PALETTE[index];
+}
+
+function getCategoryMapping(client, categoryId) {
+  return client.voiceProfileCategoryMap?.get?.(String(categoryId || '')) || null;
+}
+
+function upsertVoiceMemberSession(client, {
+  guildId,
+  userId,
+  categoryId,
+  profileChannelId,
+  voiceChannelId,
+  joinedAt = null,
+  reason = 'voice_profile_sync'
+}) {
+  const existing = client.db.vcProfiles.getMemberSession({
+    guildId,
+    userId,
+    categoryId,
+    profileChannelId
+  });
+  client.db.vcProfiles.upsertMemberSession({
+    guildId,
+    userId,
+    categoryId,
+    profileChannelId,
+    voiceChannelId,
+    joinedAt: existing?.joinedAt || joinedAt || new Date().toISOString()
+  });
+  client.logger.info(existing ? 'vc profile join session reused' : 'vc profile join session recorded', {
+    guildId,
+    userId,
+    categoryId,
+    profileChannelId,
+    voiceChannelId,
+    joinedAt: existing?.joinedAt || joinedAt || null,
+    reason
+  });
+  return existing || client.db.vcProfiles.getMemberSession({
+    guildId,
+    userId,
+    categoryId,
+    profileChannelId
+  });
+}
+
+function removeVoiceMemberSession(client, {
+  guildId,
+  userId,
+  categoryId,
+  profileChannelId,
+  reason = 'voice_state_update'
+}) {
+  const deletedRows = client.db.vcProfiles.deleteMemberSession({
+    guildId,
+    userId,
+    categoryId,
+    profileChannelId
+  });
+  if (deletedRows > 0) {
+    client.logger.info('vc profile join session removed', {
+      guildId,
+      userId,
+      categoryId,
+      profileChannelId,
+      reason
+    });
+  }
+  return deletedRows;
 }
 
 function normalizeStatusCandidate(value) {
@@ -333,11 +421,12 @@ async function queueVoiceProfileCategoryUpdate(client, guild, categoryId, { reas
   return queue.promise;
 }
 
-async function buildVoiceMemberProfiles(client, humanMembers, { guildId, categoryId }) {
+async function buildVoiceMemberProfiles(client, humanEntries, { guildId, categoryId }) {
   const introChannel = await client.channels.fetch(client.appConfig.introChannelId).catch(() => null);
 
   const enrichedMembers = await Promise.all(
-    humanMembers.map(async (member) => {
+    humanEntries.map(async (entry) => {
+      const member = entry.member;
       let introMessage = null;
       if (introChannel) {
         try {
@@ -377,13 +466,15 @@ async function buildVoiceMemberProfiles(client, humanMembers, { guildId, categor
       return {
         id: member.id,
         displayName: member.displayName || member.user?.globalName || member.user?.username || '不明なメンバー',
+        mention: `<@${member.id}>`,
         avatarUrl,
-        introSummary: introMessage?.content?.trim() || null
+        introSummary: introMessage?.content?.trim() || null,
+        voiceChannelId: entry.channelId || null,
+        joinedAt: entry.joinedAt || null
       };
     })
   );
 
-  enrichedMembers.sort((left, right) => left.displayName.localeCompare(right.displayName, 'ja'));
   return enrichedMembers;
 }
 
@@ -578,6 +669,115 @@ async function collectCategoryVoiceMembers(client, guild, categoryId, voiceChann
   };
 }
 
+function sortVoiceEntriesForSessionFallback(entries) {
+  return [...entries].sort((left, right) => {
+    const leftName = getStableMemberName(left.member);
+    const rightName = getStableMemberName(right.member);
+    const nameComparison = leftName.localeCompare(rightName, 'ja');
+    if (nameComparison !== 0) {
+      return nameComparison;
+    }
+    return String(left.member?.id || '').localeCompare(String(right.member?.id || ''));
+  });
+}
+
+function ensureCategoryMemberSessions(client, {
+  guildId,
+  categoryId,
+  mapping,
+  entries,
+  reason = 'voice_profile_sync'
+}) {
+  const profileChannelId = mapping.profileChannelId;
+  const existingSessions = client.db.vcProfiles.listMemberSessions({
+    guildId,
+    categoryId,
+    profileChannelId
+  });
+  const activeUserIds = new Set(entries.map((entry) => String(entry.member?.id || '')).filter(Boolean));
+  const sessionByUserId = new Map(existingSessions.map((session) => [String(session.userId), session]));
+  const fallbackOrder = sortVoiceEntriesForSessionFallback(entries);
+  const fallbackJoinedAtByUserId = new Map();
+  const fallbackBaseMs = Date.now();
+
+  fallbackOrder.forEach((entry, index) => {
+    fallbackJoinedAtByUserId.set(
+      String(entry.member.id),
+      new Date(fallbackBaseMs + index).toISOString()
+    );
+  });
+
+  for (const session of existingSessions) {
+    if (activeUserIds.has(String(session.userId))) {
+      continue;
+    }
+    removeVoiceMemberSession(client, {
+      guildId,
+      userId: session.userId,
+      categoryId,
+      profileChannelId,
+      reason: `${reason}_stale_session`
+    });
+  }
+
+  const entriesWithSessions = entries.map((entry) => {
+    const userId = String(entry.member.id);
+    let session = sessionByUserId.get(userId);
+    if (!session) {
+      session = upsertVoiceMemberSession(client, {
+        guildId,
+        userId,
+        categoryId,
+        profileChannelId,
+        voiceChannelId: entry.channelId,
+        joinedAt: fallbackJoinedAtByUserId.get(userId),
+        reason: `${reason}_reconcile_missing`
+      });
+    } else if (String(session.voiceChannelId || '') !== String(entry.channelId || '')) {
+      session = upsertVoiceMemberSession(client, {
+        guildId,
+        userId,
+        categoryId,
+        profileChannelId,
+        voiceChannelId: entry.channelId,
+        joinedAt: session.joinedAt,
+        reason: `${reason}_channel_update`
+      });
+    }
+
+    return {
+      ...entry,
+      joinedAt: session?.joinedAt || fallbackJoinedAtByUserId.get(userId) || null
+    };
+  });
+
+  entriesWithSessions.sort((left, right) => {
+    const leftTime = new Date(left.joinedAt || 0).getTime();
+    const rightTime = new Date(right.joinedAt || 0).getTime();
+    if (leftTime !== rightTime) {
+      return leftTime - rightTime;
+    }
+    const nameComparison = getStableMemberName(left.member).localeCompare(getStableMemberName(right.member), 'ja');
+    if (nameComparison !== 0) {
+      return nameComparison;
+    }
+    return String(left.member?.id || '').localeCompare(String(right.member?.id || ''));
+  });
+
+  client.logger.info('vc profile members sorted by join order', {
+    guildId,
+    categoryId,
+    profileChannelId,
+    memberOrder: entriesWithSessions.map((entry) => ({
+      userId: entry.member.id,
+      voiceChannelId: entry.channelId,
+      joinedAt: entry.joinedAt
+    }))
+  });
+
+  return entriesWithSessions;
+}
+
 async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapping) {
   const voiceChannels = await getVoiceChannelsForCategory(guild, categoryId);
   const channelById = new Map(voiceChannels.map((channel) => [String(channel.id), channel]));
@@ -585,7 +785,14 @@ async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapp
   const activeChannelIds = new Set(memberScan.entries.map((entry) => String(entry.channelId)));
   const activeChannels = [...activeChannelIds]
     .map((channelId) => channelById.get(channelId))
-    .filter(Boolean);
+    .filter(Boolean)
+    .sort((left, right) => {
+      const positionDelta = Number(left.rawPosition ?? left.position ?? 0) - Number(right.rawPosition ?? right.position ?? 0);
+      if (positionDelta !== 0) {
+        return positionDelta;
+      }
+      return String(left.name || '').localeCompare(String(right.name || ''), 'ja');
+    });
   const statusLines = [];
 
   for (const activeChannel of activeChannels) {
@@ -596,11 +803,14 @@ async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapp
     statusLines.push(activeChannels.length === 1 ? statusText : `${activeChannel.name}: ${statusText}`);
   }
 
-  const members = await buildVoiceMemberProfiles(
-    client,
-    memberScan.entries.map((entry) => entry.member),
-    { guildId: guild.id, categoryId }
-  );
+  const sortedMemberEntries = ensureCategoryMemberSessions(client, {
+    guildId: guild.id,
+    categoryId,
+    mapping,
+    entries: memberScan.entries,
+    reason: 'category_snapshot'
+  });
+  const members = await buildVoiceMemberProfiles(client, sortedMemberEntries, { guildId: guild.id, categoryId });
 
   client.logger.info('vc profile final rendered member count', {
     guildId: guild.id,
@@ -745,6 +955,36 @@ function buildPaginatedProfilePayloads({
           componentCount: normal.componentCount,
           compactFallbackComponentCount: compactFallback.componentCount
         });
+        client.logger.info('vc profile title rendered without category label', {
+          guildId,
+          categoryId,
+          profileChannelId: mapping.profileChannelId,
+          pageIndex,
+          pageTitle: `VCにいる人のプロフィール ${pageIndex + 1}/${totalPages}`
+        });
+        client.logger.info('vc profile user mention rendering enabled', {
+          guildId,
+          categoryId,
+          profileChannelId: mapping.profileChannelId,
+          pageIndex,
+          userIds: members.map((member) => member.id)
+        });
+        if (members.some((member) => !member.mention)) {
+          client.logger.info('vc profile user mention fallback plain text', {
+            guildId,
+            categoryId,
+            profileChannelId: mapping.profileChannelId,
+            pageIndex,
+            userIds: members.filter((member) => !member.mention).map((member) => member.id || null)
+          });
+        }
+        client.logger.info('vc profile user mention notification suppressed', {
+          guildId,
+          categoryId,
+          profileChannelId: mapping.profileChannelId,
+          pageIndex,
+          allowedMentions: normal.payload.allowedMentions
+        });
 
         return {
           pageIndex,
@@ -849,7 +1089,13 @@ function isVcProfileCardMessage(client, message, mapping) {
   }
 
   const text = collectTextDisplayContent({ components: message.components || [] }).join('\n');
-  return text.includes(`## ${mapping.name} /`);
+  return (
+    text.includes(`## ${mapping.name} /`) ||
+    (
+      text.includes('## VCにいる人のプロフィール') &&
+      text.includes('**通話チャンネル**')
+    )
+  );
 }
 
 async function deleteMessageIfExists(message) {
@@ -1016,6 +1262,24 @@ async function cleanupEmptyCategoryProfile(client, {
     categoryId,
     profileChannelId: profileChannel.id
   });
+  const deletedSessionRows = client.db.vcProfiles.deleteMemberSessionsForCategory({
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id
+  });
+  const deletedColorRows = client.db.vcProfiles.deleteColorSession({
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id
+  });
+  if (deletedColorRows > 0) {
+    client.logger.info('vc profile color session cleared', {
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      reason
+    });
+  }
 
   client.logger.info('vc profile empty category cleanup finished', {
     guildId,
@@ -1023,6 +1287,8 @@ async function cleanupEmptyCategoryProfile(client, {
     profileChannelId: profileChannel.id,
     deletedCategoryRows,
     deletedPageRows,
+    deletedSessionRows,
+    deletedColorRows,
     reason
   });
   client.logger.info('vc profile all pages cleanup finished', {
@@ -1031,6 +1297,8 @@ async function cleanupEmptyCategoryProfile(client, {
     profileChannelId: profileChannel.id,
     deletedCategoryRows,
     deletedPageRows,
+    deletedSessionRows,
+    deletedColorRows,
     reason
   });
 }
@@ -1185,22 +1453,99 @@ async function sendOrEditProfilePage(client, {
   }
 }
 
-function resolveCategoryAccentColor(client, mapping, activeChannels) {
+function resolveCategoryAccentColor(client, {
+  guildId,
+  categoryId,
+  mapping,
+  activeChannels
+}) {
   const colorSourceId = activeChannels[0]?.id || mapping.categoryId;
-  let accentColor = resolveVcProfileAccentColor({
-    voiceChannelId: colorSourceId,
-    config: client.appConfig,
-    logger: client.logger
-  });
   if (mapping.accentColor != null) {
-    accentColor = mapping.accentColor;
     client.logger.info('vc profile card color resolved', {
       voiceChannelId: colorSourceId,
       configuredAccentColor: mapping.accentColor,
-      accentColor,
+      accentColor: mapping.accentColor,
       source: 'voiceProfileChannels'
     });
+    client.logger.info('vc profile configured accent color override used', {
+      guildId,
+      categoryId,
+      profileChannelId: mapping.profileChannelId,
+      accentColor: mapping.accentColor
+    });
+    return mapping.accentColor;
   }
+
+  const configuredChannelColor = parseAccentColor(
+    client.appConfig.voiceProfile?.channelAccentColors?.[String(colorSourceId || '')],
+    null
+  );
+  if (configuredChannelColor != null) {
+    client.logger.info('vc profile configured accent color override used', {
+      guildId,
+      categoryId,
+      profileChannelId: mapping.profileChannelId,
+      voiceChannelId: colorSourceId,
+      accentColor: configuredChannelColor,
+      source: 'voiceProfile.channelAccentColors'
+    });
+    client.logger.info('vc profile card color resolved', {
+      voiceChannelId: colorSourceId,
+      configuredAccentColor: configuredChannelColor,
+      accentColor: configuredChannelColor,
+      source: 'voiceProfile.channelAccentColors'
+    });
+    return configuredChannelColor;
+  }
+
+  const existing = client.db.vcProfiles.getColorSession({
+    guildId,
+    categoryId,
+    profileChannelId: mapping.profileChannelId
+  });
+  if (existing?.color != null) {
+    client.logger.info('vc profile color session reused', {
+      guildId,
+      categoryId,
+      profileChannelId: mapping.profileChannelId,
+      accentColor: Number(existing.color),
+      activeSince: existing.activeSince || null
+    });
+    client.logger.info('vc profile card color resolved', {
+      voiceChannelId: colorSourceId,
+      accentColor: Number(existing.color),
+      source: 'color_session'
+    });
+    return Number(existing.color);
+  }
+
+  const accentColor = selectRandomSessionAccentColor();
+  const activeSince = new Date().toISOString();
+  client.db.vcProfiles.upsertColorSession({
+    guildId,
+    categoryId,
+    profileChannelId: mapping.profileChannelId,
+    color: accentColor,
+    activeSince
+  });
+  client.logger.info('vc profile random accent color selected', {
+    guildId,
+    categoryId,
+    profileChannelId: mapping.profileChannelId,
+    accentColor
+  });
+  client.logger.info('vc profile color session created', {
+    guildId,
+    categoryId,
+    profileChannelId: mapping.profileChannelId,
+    accentColor,
+    activeSince
+  });
+  client.logger.info('vc profile card color resolved', {
+    voiceChannelId: colorSourceId,
+    accentColor,
+    source: 'new_color_session'
+  });
   return accentColor;
 }
 
@@ -1229,7 +1574,19 @@ async function syncVoiceProfileCategoryLocked(client, guild, categoryId, mapping
     return;
   }
 
-  const accentColor = resolveCategoryAccentColor(client, mapping, snapshot.activeChannels);
+  const accentColor = resolveCategoryAccentColor(client, {
+    guildId,
+    categoryId,
+    mapping,
+    activeChannels: snapshot.activeChannels
+  });
+  client.logger.info('vc profile page color applied', {
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id,
+    accentColor,
+    pageCountPreview: snapshot.members.length
+  });
   const pages = buildPaginatedProfilePayloads({
     client,
     guildId,
@@ -1395,6 +1752,58 @@ async function rebuildVoiceProfileState(client, { reason = 'startup' } = {}) {
   });
 }
 
+function updateVoiceProfileMemberSessionsForStateChange(client, {
+  guild,
+  member,
+  oldCategoryId,
+  newCategoryId,
+  newChannelId,
+  reason = 'voice_state_update'
+}) {
+  if (!guild?.id || !member?.id) {
+    return;
+  }
+
+  if (oldCategoryId && oldCategoryId !== newCategoryId) {
+    const oldMapping = getCategoryMapping(client, oldCategoryId);
+    if (oldMapping) {
+      removeVoiceMemberSession(client, {
+        guildId: guild.id,
+        userId: member.id,
+        categoryId: oldCategoryId,
+        profileChannelId: oldMapping.profileChannelId,
+        reason
+      });
+    }
+  }
+
+  if (!newCategoryId || !newChannelId) {
+    return;
+  }
+
+  const newMapping = getCategoryMapping(client, newCategoryId);
+  if (!newMapping) {
+    return;
+  }
+
+  const existing = client.db.vcProfiles.getMemberSession({
+    guildId: guild.id,
+    userId: member.id,
+    categoryId: newCategoryId,
+    profileChannelId: newMapping.profileChannelId
+  });
+
+  upsertVoiceMemberSession(client, {
+    guildId: guild.id,
+    userId: member.id,
+    categoryId: newCategoryId,
+    profileChannelId: newMapping.profileChannelId,
+    voiceChannelId: newChannelId,
+    joinedAt: existing?.joinedAt || new Date().toISOString(),
+    reason: existing ? `${reason}_existing_category` : `${reason}_entered_category`
+  });
+}
+
 function startVoiceProfileReconciliation(client) {
   const intervalMinutes = Number(client.appConfig.voiceProfile?.reconcileIntervalMinutes ?? 3);
 
@@ -1470,6 +1879,15 @@ async function handleVoiceStateUpdate(oldState, newState) {
     });
     return;
   }
+
+  updateVoiceProfileMemberSessionsForStateChange(client, {
+    guild,
+    member,
+    oldCategoryId,
+    newCategoryId,
+    newChannelId: newState.channelId,
+    reason: 'voice_state_update'
+  });
 
   const affectedCategoryIds = new Set();
   if (oldState.channelId && (oldCategoryId || client.db.vcProfiles.getRoomMessage(oldState.channelId))) {

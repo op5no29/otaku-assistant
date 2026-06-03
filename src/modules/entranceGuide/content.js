@@ -144,6 +144,13 @@ const GUIDE_CARD_DEFINITIONS = [
     subsectionAliases: ['質問フォーラム']
   },
   {
+    key: 'features-anime',
+    title: 'サーバー独自機能：アニメ',
+    color: GUIDE_COLORS.normal,
+    sourceKey: 'features',
+    subsectionAliases: ['アニメ機能']
+  },
+  {
     key: 'vc-profile',
     title: 'VCプロフィール機能と自己紹介のお願い',
     color: GUIDE_COLORS.normal,

@@ -23,6 +23,8 @@ const { cleanupRelayedBotMessageState } = require('./relayDeletionCleanup');
 
 const QUESTION_ROLE_SELECT_PREFIX = 'question-role-select:';
 const QUESTION_ROLE_SKIP_PREFIX = 'question-role-skip:';
+const MAX_RELAY_LINK_BUTTONS = 3;
+const URL_TOKEN_PATTERN = /https?:\/\/[^\s<>()\]）】>]+/giu;
 
 function buildQuestionGuideMessage(timelineMessageUrl = null) {
   return [
@@ -128,6 +130,142 @@ function logSilentRelaySkip(logger, logBaseName, message, extra = {}, options = 
   return true;
 }
 
+function cleanExtractedUrlToken(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[.,、。!?！？;；:：]+$/u, '');
+}
+
+function normalizeRelayButtonUrl(value) {
+  try {
+    const parsed = new URL(cleanExtractedUrlToken(value));
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+function isUsefulExternalRelayUrl(value) {
+  const normalized = normalizeRelayButtonUrl(value);
+  if (!normalized) {
+    return false;
+  }
+
+  const parsed = new URL(normalized);
+  const host = parsed.hostname.toLowerCase();
+  if (
+    host === 'discord.com' ||
+    host === 'www.discord.com' ||
+    host === 'cdn.discordapp.com' ||
+    host === 'media.discordapp.net' ||
+    host.endsWith('.discordapp.com') ||
+    host.endsWith('.discordapp.net')
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+function labelRelayLinkButton(url, index, usedLabels) {
+  let label = index === 0 ? 'リンク先へ飛ぶ' : `リンク先へ飛ぶ ${index + 1}`;
+  try {
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'on.soundcloud.com' || host.endsWith('soundcloud.com')) {
+      label = 'SoundCloudへ飛ぶ';
+    } else if (host === 'youtu.be' || host.endsWith('youtube.com')) {
+      label = 'YouTubeへ飛ぶ';
+    } else if (host === 'x.com' || host.endsWith('twitter.com')) {
+      label = 'Xへ飛ぶ';
+    } else if (host.endsWith('github.com')) {
+      label = 'GitHubへ飛ぶ';
+    }
+  } catch {}
+
+  if (usedLabels.has(label)) {
+    return index === 0 ? 'リンク先へ飛ぶ' : `リンク先へ飛ぶ ${index + 1}`;
+  }
+  return label;
+}
+
+function extractRelayLinkButtons(post, logger = null) {
+  const rawTextValues = [
+    post.rawContent,
+    post.content,
+    post.body
+  ].filter(Boolean);
+  const candidates = [];
+
+  for (const rawText of rawTextValues) {
+    for (const match of String(rawText).matchAll(URL_TOKEN_PATTERN)) {
+      candidates.push(match[0]);
+    }
+  }
+
+  for (const url of [
+    post.socialPreview?.sourceUrl,
+    post.musicLink?.sourceUrl
+  ]) {
+    if (url) {
+      candidates.push(url);
+    }
+  }
+
+  const deduped = [];
+  const seenUrls = new Set();
+  for (const candidate of candidates) {
+    const normalized = normalizeRelayButtonUrl(candidate);
+    if (!normalized) {
+      logger?.info?.('relay link button skipped invalid url', {
+        sourceMessageId: post.messageId || null,
+        url: candidate
+      });
+      continue;
+    }
+    if (!isUsefulExternalRelayUrl(normalized)) {
+      logger?.info?.('relay link button skipped invalid url', {
+        sourceMessageId: post.messageId || null,
+        url: candidate,
+        reason: 'internal_or_media_url'
+      });
+      continue;
+    }
+    if (seenUrls.has(normalized)) {
+      continue;
+    }
+    seenUrls.add(normalized);
+    deduped.push(normalized);
+  }
+
+  logger?.info?.('relay link buttons extracted', {
+    sourceMessageId: post.messageId || null,
+    candidateCount: candidates.length,
+    externalUrlCount: deduped.length,
+    urls: deduped.slice(0, MAX_RELAY_LINK_BUTTONS)
+  });
+
+  if (deduped.length > MAX_RELAY_LINK_BUTTONS) {
+    logger?.info?.('relay link buttons truncated', {
+      sourceMessageId: post.messageId || null,
+      originalCount: deduped.length,
+      limit: MAX_RELAY_LINK_BUTTONS
+    });
+  }
+
+  const usedLabels = new Set();
+  return deduped.slice(0, MAX_RELAY_LINK_BUTTONS).map((url, index) => {
+    const label = labelRelayLinkButton(url, index, usedLabels);
+    usedLabels.add(label);
+    logger?.info?.('relay link button added', {
+      sourceMessageId: post.messageId || null,
+      label,
+      url
+    });
+    return { label, url };
+  });
+}
+
 function normalizeRoleIds(roleIds = []) {
   return [...new Set((Array.isArray(roleIds) ? roleIds : [])
     .map((roleId) => String(roleId || '').trim())
@@ -176,18 +314,31 @@ function normalizePosthocDisplayTag(tag) {
     return null;
   }
   if (value.startsWith('##')) {
-    return value;
+    return `#${value.replace(/^#+/u, '')}`;
   }
   if (value.startsWith('#')) {
-    return `#${value}`;
+    return `#${value.replace(/^#+/u, '')}`;
   }
-  return `##${value}`;
+  return `#${value}`;
 }
 
 function buildPosthocDisplayTags(routing) {
   return [...new Set((Array.isArray(routing?.displayTags) ? routing.displayTags : [])
     .map(normalizePosthocDisplayTag)
     .filter(Boolean))];
+}
+
+function getGlobalRoutePosthocDisplayTag(config, routeKey) {
+  const route = config.globalHashtagRoutes?.[routeKey];
+  const label = route?.displayMode === 'matchedTag'
+    ? route?.displayTag || route?.tags?.[0] || routeKey
+    : route?.displayTag || route?.display || route?.tags?.[0] || routeKey;
+  return normalizePosthocDisplayTag(label);
+}
+
+function getBotRoutePosthocDisplayTag(config, routeKey) {
+  const route = config.botHashtagRoutes?.[routeKey];
+  return normalizePosthocDisplayTag(route?.display || route?.aliases?.[0] || routeKey);
 }
 
 async function isPosthocRelayAdminOverride(message, config, logger) {
@@ -396,6 +547,21 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
   const matchedBotRoutes = Array.isArray(attachmentPrepared.post?.matchedBotHashtagRoutes)
     ? attachmentPrepared.post.matchedBotHashtagRoutes
     : [];
+  const isRouteRelayCard = forumType !== 'question' && forumType !== 'knowledge' && (
+    matchedGlobalRoutes.length > 0 ||
+    matchedBotRoutes.length > 0 ||
+    attachmentPrepared.post?.relayOrigin === 'posthoc_hashtag'
+  );
+  if (isRouteRelayCard) {
+    const existingExtraButtons = Array.isArray(attachmentPrepared.post.extraLinkButtons)
+      ? attachmentPrepared.post.extraLinkButtons
+      : [];
+    const relayLinkButtons = extractRelayLinkButtons(attachmentPrepared.post, logger);
+    attachmentPrepared.post.extraLinkButtons = [
+      ...existingExtraButtons,
+      ...relayLinkButtons
+    ];
+  }
   if (forumType !== 'question' && (matchedGlobalRoutes.length || matchedBotRoutes.length)) {
     attachmentPrepared.post.accentColor = resolveRouteAccentColor({
       globalRouteKeys: matchedGlobalRoutes,
@@ -2736,34 +2902,46 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
   const sourceChannelId = String(targetMessage.channelId || '');
   const destinationTargets = [];
   const seenDestinationIds = new Set();
-  const addDestination = (destinationChannelId, relayKind) => {
+  const addDestination = (destinationChannelId, relayKind, displayTag = null) => {
     const destId = String(destinationChannelId || '');
     if (!destId || destId === sourceChannelId || seenDestinationIds.has(destId)) {
       return false;
     }
     seenDestinationIds.add(destId);
-    destinationTargets.push({ destinationChannelId: destId, relayKind });
+    const normalizedDisplayTag = normalizePosthocDisplayTag(displayTag);
+    if (normalizedDisplayTag) {
+      logger.info('posthoc display tag normalized', {
+        sourceMessageId: message.id,
+        replyTargetMessageId: targetMessage.id,
+        relayKind,
+        displayTag,
+        normalizedDisplayTag
+      });
+    }
+    destinationTargets.push({ destinationChannelId: destId, relayKind, displayTag: normalizedDisplayTag });
     return true;
   };
 
   for (const routeKey of replyRouting.globalMatchedRoutes) {
     const route = config.globalHashtagRoutes?.[routeKey];
     const isAnimeDestinationRoute = String(route?.channelId || '') === String(config.anime?.channelId || '');
+    const displayTag = getGlobalRoutePosthocDisplayTag(config, routeKey);
     if (route?.channelId && route.relayUserPostToDestination !== false && !isAnimeDestinationRoute) {
-      addDestination(route.channelId, `reply_global_hashtag:${routeKey}`);
+      addDestination(route.channelId, `reply_global_hashtag:${routeKey}`, displayTag);
     }
     if (route?.alsoTimeline && config.timelineChannelId) {
-      addDestination(config.timelineChannelId, `reply_global_hashtag:${routeKey}:timeline`);
+      addDestination(config.timelineChannelId, `reply_global_hashtag:${routeKey}:timeline`, displayTag);
     }
   }
 
   for (const routeKey of replyRouting.botMatchedRoutes) {
     const route = config.botHashtagRoutes?.[routeKey];
+    const displayTag = getBotRoutePosthocDisplayTag(config, routeKey);
     if (route?.channelId) {
-      addDestination(route.channelId, `reply_hashtag:${routeKey}`);
+      addDestination(route.channelId, `reply_hashtag:${routeKey}`, displayTag);
     }
     if (config.timelineChannelId) {
-      addDestination(config.timelineChannelId, `reply_hashtag:${routeKey}:timeline`);
+      addDestination(config.timelineChannelId, `reply_hashtag:${routeKey}:timeline`, displayTag);
     }
   }
 
@@ -2788,128 +2966,137 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
     return true;
   }
 
-  const { payload, cleanup } = await buildTimelinePayload(post, {
-    config,
-    forumType: 'tweet',
-    logger
-  });
-
   const relayedRouteMessageIds = {};
   let relayedTimelineMessageId = null;
   let sentCount = 0;
   let skippedCount = 0;
 
-  try {
-    for (const target of destinationTargets) {
-      const existingRelay = db.relays.getMessageRelayTarget(targetMessage.id, target.destinationChannelId);
-      if (existingRelay?.relayedMessageId) {
-        const existingDestinationChannel = await getTextChannel(message.guild, target.destinationChannelId);
-        const existingRelayedMessage = existingDestinationChannel
-          ? await existingDestinationChannel.messages.fetch(existingRelay.relayedMessageId).catch(() => null)
-          : null;
-        if (existingRelayedMessage) {
-          relayedRouteMessageIds[target.destinationChannelId] = existingRelay.relayedMessageId;
-          if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
-            relayedTimelineMessageId = existingRelay.relayedMessageId;
-          }
-          skippedCount += 1;
-          logger.info('posthoc hashtag duplicate skipped', {
-            replyTargetMessageId: targetMessage.id,
-            destinationChannelId: target.destinationChannelId,
-            existingRelayedMessageId: existingRelay.relayedMessageId
-          });
-          continue;
+  for (const target of destinationTargets) {
+    const existingRelay = db.relays.getMessageRelayTarget(targetMessage.id, target.destinationChannelId);
+    if (existingRelay?.relayedMessageId) {
+      const existingDestinationChannel = await getTextChannel(message.guild, target.destinationChannelId);
+      const existingRelayedMessage = existingDestinationChannel
+        ? await existingDestinationChannel.messages.fetch(existingRelay.relayedMessageId).catch(() => null)
+        : null;
+      if (existingRelayedMessage) {
+        relayedRouteMessageIds[target.destinationChannelId] = existingRelay.relayedMessageId;
+        if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
+          relayedTimelineMessageId = existingRelay.relayedMessageId;
         }
-
-        await cleanupRelayedBotMessageState(message.client, {
-          messageId: existingRelay.relayedMessageId,
-          guildId: targetMessage.guildId,
-          channelId: target.destinationChannelId,
-          reason: 'stale_duplicate_check',
-          logNoState: false
-        });
-        logger.info('posthoc hashtag stale duplicate state cleaned', {
-          replyTargetMessageId: targetMessage.id,
-          destinationChannelId: target.destinationChannelId,
-          staleRelayedMessageId: existingRelay.relayedMessageId
-        });
-      }
-
-      const relayInFlightKey = buildRelayInFlightKey(targetMessage.id, target.destinationChannelId, target.relayKind);
-      if (message.client.timelineRelayMessageInFlight.has(relayInFlightKey)) {
         skippedCount += 1;
         logger.info('posthoc hashtag duplicate skipped', {
           replyTargetMessageId: targetMessage.id,
           destinationChannelId: target.destinationChannelId,
-          relayKind: target.relayKind,
-          reason: 'in_flight'
+          existingRelayedMessageId: existingRelay.relayedMessageId
         });
-        continue;
-      }
-      const destinationChannel = await getTextChannel(message.guild, target.destinationChannelId);
-      if (!destinationChannel) {
-        skippedCount += 1;
         continue;
       }
 
-      message.client.timelineRelayMessageInFlight.add(relayInFlightKey);
-      try {
-        const sentMessage = await sendRelayMessage(destinationChannel, payload, logger, {
-          sourceMessageId: targetMessage.id,
-          destinationChannelId: target.destinationChannelId,
-          relayKind: target.relayKind,
-          sendPurpose: 'reply_global_hashtag:relay-send',
-          callsiteLabel: 'reply-global-hashtag:message-create'
-        });
-        sentCount += 1;
-        relayedRouteMessageIds[target.destinationChannelId] = sentMessage.id;
-        if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
-          relayedTimelineMessageId = sentMessage.id;
-        }
-        db.relays.upsertMessageRelayTarget({
-          sourceMessageId: targetMessage.id,
-          destinationChannelId: target.destinationChannelId,
-          threadId: sourceChannelId,
-          parentChannelId: '',
-          forumType: 'reply_global_hashtag',
-          relayKind: target.relayKind,
-          relayedMessageId: sentMessage.id,
-          authorId: targetMessage.author?.id || null
-        });
-        await registerPosthocDeletableCard(sentMessage, {
-          ownerUserId: targetMessage.author?.id || '',
-          sourceMessageId: targetMessage.id,
-          sourceChannelId,
-          destinationChannelId: target.destinationChannelId,
-          taggerUserId: message.author.id,
-          relayKind: target.relayKind,
-          displayTags: posthocDisplayTags
-        });
-        updateTimelineDestinationState(db, {
-          guildId: message.guildId,
-          destinationChannelId: target.destinationChannelId,
-          relayedMessageId: sentMessage.id,
-          sourceMessageId: targetMessage.id,
-          sourceThreadId: sourceChannelId,
-          authorId: targetMessage.author?.id || null
-        });
-        logger.info('posthoc hashtag relay sent', {
-          replyTargetMessageId: targetMessage.id,
-          destinationChannelId: target.destinationChannelId,
-          relayedMessageId: sentMessage.id
-        });
-        logger.info('posthoc hashtag missing destination sent', {
-          replyTargetMessageId: targetMessage.id,
-          destinationChannelId: target.destinationChannelId,
-          relayKind: target.relayKind,
-          relayedMessageId: sentMessage.id
-        });
-      } finally {
-        message.client.timelineRelayMessageInFlight.delete(relayInFlightKey);
-      }
+      await cleanupRelayedBotMessageState(message.client, {
+        messageId: existingRelay.relayedMessageId,
+        guildId: targetMessage.guildId,
+        channelId: target.destinationChannelId,
+        reason: 'stale_duplicate_check',
+        logNoState: false
+      });
+      logger.info('posthoc hashtag stale duplicate state cleaned', {
+        replyTargetMessageId: targetMessage.id,
+        destinationChannelId: target.destinationChannelId,
+        staleRelayedMessageId: existingRelay.relayedMessageId
+      });
     }
-  } finally {
-    await cleanup();
+
+    const relayInFlightKey = buildRelayInFlightKey(targetMessage.id, target.destinationChannelId, target.relayKind);
+    if (message.client.timelineRelayMessageInFlight.has(relayInFlightKey)) {
+      skippedCount += 1;
+      logger.info('posthoc hashtag duplicate skipped', {
+        replyTargetMessageId: targetMessage.id,
+        destinationChannelId: target.destinationChannelId,
+        relayKind: target.relayKind,
+        reason: 'in_flight'
+      });
+      continue;
+    }
+    const destinationChannel = await getTextChannel(message.guild, target.destinationChannelId);
+    if (!destinationChannel) {
+      skippedCount += 1;
+      continue;
+    }
+
+    const targetDisplayTags = target.displayTag ? [target.displayTag] : posthocDisplayTags;
+    logger.info('posthoc heading route-specific tag selected', {
+      sourceMessageId: message.id,
+      replyTargetMessageId: targetMessage.id,
+      destinationChannelId: target.destinationChannelId,
+      relayKind: target.relayKind,
+      displayTags: targetDisplayTags
+    });
+    const targetPost = {
+      ...post,
+      posthocDisplayTags: targetDisplayTags
+    };
+    const { payload, cleanup } = await buildTimelinePayload(targetPost, {
+      config,
+      forumType: 'tweet',
+      logger
+    });
+
+    message.client.timelineRelayMessageInFlight.add(relayInFlightKey);
+    try {
+      const sentMessage = await sendRelayMessage(destinationChannel, payload, logger, {
+        sourceMessageId: targetMessage.id,
+        destinationChannelId: target.destinationChannelId,
+        relayKind: target.relayKind,
+        sendPurpose: 'reply_global_hashtag:relay-send',
+        callsiteLabel: 'reply-global-hashtag:message-create'
+      });
+      sentCount += 1;
+      relayedRouteMessageIds[target.destinationChannelId] = sentMessage.id;
+      if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
+        relayedTimelineMessageId = sentMessage.id;
+      }
+      db.relays.upsertMessageRelayTarget({
+        sourceMessageId: targetMessage.id,
+        destinationChannelId: target.destinationChannelId,
+        threadId: sourceChannelId,
+        parentChannelId: '',
+        forumType: 'reply_global_hashtag',
+        relayKind: target.relayKind,
+        relayedMessageId: sentMessage.id,
+        authorId: targetMessage.author?.id || null
+      });
+      await registerPosthocDeletableCard(sentMessage, {
+        ownerUserId: targetMessage.author?.id || '',
+        sourceMessageId: targetMessage.id,
+        sourceChannelId,
+        destinationChannelId: target.destinationChannelId,
+        taggerUserId: message.author.id,
+        relayKind: target.relayKind,
+        displayTags: targetDisplayTags
+      });
+      updateTimelineDestinationState(db, {
+        guildId: message.guildId,
+        destinationChannelId: target.destinationChannelId,
+        relayedMessageId: sentMessage.id,
+        sourceMessageId: targetMessage.id,
+        sourceThreadId: sourceChannelId,
+        authorId: targetMessage.author?.id || null
+      });
+      logger.info('posthoc hashtag relay sent', {
+        replyTargetMessageId: targetMessage.id,
+        destinationChannelId: target.destinationChannelId,
+        relayedMessageId: sentMessage.id
+      });
+      logger.info('posthoc hashtag missing destination sent', {
+        replyTargetMessageId: targetMessage.id,
+        destinationChannelId: target.destinationChannelId,
+        relayKind: target.relayKind,
+        relayedMessageId: sentMessage.id
+      });
+    } finally {
+      message.client.timelineRelayMessageInFlight.delete(relayInFlightKey);
+      await cleanup();
+    }
   }
 
   const animeChannelId = String(config.anime?.channelId || '');

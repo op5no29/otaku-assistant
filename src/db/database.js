@@ -419,6 +419,83 @@ function createDatabase(databasePath) {
       DELETE FROM vc_category_profile_message_pages
       WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ? AND page_index >= ?
     `),
+    getVcProfileMemberSession: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        voice_channel_id AS voiceChannelId,
+        joined_at AS joinedAt,
+        updated_at AS updatedAt
+      FROM vc_profile_member_sessions
+      WHERE guild_id = ? AND user_id = ? AND category_id = ? AND profile_channel_id = ?
+      LIMIT 1
+    `),
+    listVcProfileMemberSessions: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        voice_channel_id AS voiceChannelId,
+        joined_at AS joinedAt,
+        updated_at AS updatedAt
+      FROM vc_profile_member_sessions
+      WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
+      ORDER BY joined_at ASC, user_id ASC
+    `),
+    upsertVcProfileMemberSession: sqlite.prepare(`
+      INSERT INTO vc_profile_member_sessions (
+        guild_id,
+        user_id,
+        category_id,
+        profile_channel_id,
+        voice_channel_id,
+        joined_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, user_id, category_id, profile_channel_id) DO UPDATE SET
+        voice_channel_id = excluded.voice_channel_id,
+        updated_at = excluded.updated_at
+    `),
+    deleteVcProfileMemberSession: sqlite.prepare(`
+      DELETE FROM vc_profile_member_sessions
+      WHERE guild_id = ? AND user_id = ? AND category_id = ? AND profile_channel_id = ?
+    `),
+    deleteVcProfileMemberSessionsForCategory: sqlite.prepare(`
+      DELETE FROM vc_profile_member_sessions
+      WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
+    `),
+    getVcProfileColorSession: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        color,
+        active_since AS activeSince,
+        updated_at AS updatedAt
+      FROM vc_profile_color_sessions
+      WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
+      LIMIT 1
+    `),
+    upsertVcProfileColorSession: sqlite.prepare(`
+      INSERT INTO vc_profile_color_sessions (
+        guild_id,
+        category_id,
+        profile_channel_id,
+        color,
+        active_since,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, category_id, profile_channel_id) DO UPDATE SET
+        color = excluded.color,
+        updated_at = excluded.updated_at
+    `),
+    deleteVcProfileColorSession: sqlite.prepare(`
+      DELETE FROM vc_profile_color_sessions
+      WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
+    `),
     listLegacyVcProfileMessagesByCategory: sqlite.prepare(`
       SELECT
         category_id AS categoryId,
@@ -2410,6 +2487,61 @@ function createDatabase(databasePath) {
           profileChannelId,
           pageIndex
         ).changes;
+      },
+      getMemberSession({ guildId, userId, categoryId, profileChannelId }) {
+        return statements.getVcProfileMemberSession.get(
+          guildId,
+          userId,
+          categoryId,
+          profileChannelId
+        ) || null;
+      },
+      listMemberSessions({ guildId, categoryId, profileChannelId }) {
+        return statements.listVcProfileMemberSessions.all(guildId, categoryId, profileChannelId);
+      },
+      upsertMemberSession({ guildId, userId, categoryId, profileChannelId, voiceChannelId, joinedAt }) {
+        const now = new Date().toISOString();
+        statements.upsertVcProfileMemberSession.run(
+          guildId,
+          userId,
+          categoryId,
+          profileChannelId,
+          voiceChannelId,
+          joinedAt || now,
+          now
+        );
+      },
+      deleteMemberSession({ guildId, userId, categoryId, profileChannelId }) {
+        return statements.deleteVcProfileMemberSession.run(
+          guildId,
+          userId,
+          categoryId,
+          profileChannelId
+        ).changes;
+      },
+      deleteMemberSessionsForCategory({ guildId, categoryId, profileChannelId }) {
+        return statements.deleteVcProfileMemberSessionsForCategory.run(
+          guildId,
+          categoryId,
+          profileChannelId
+        ).changes;
+      },
+      getColorSession({ guildId, categoryId, profileChannelId }) {
+        return statements.getVcProfileColorSession.get(guildId, categoryId, profileChannelId) || null;
+      },
+      upsertColorSession({ guildId, categoryId, profileChannelId, color, activeSince }) {
+        const now = new Date().toISOString();
+        statements.upsertVcProfileColorSession.run(
+          guildId,
+          categoryId,
+          profileChannelId,
+          Number(color),
+          activeSince || now,
+          now
+        );
+      },
+      deleteColorSession({ guildId, categoryId, profileChannelId }) {
+        return statements.deleteVcProfileColorSession.run(guildId, categoryId, profileChannelId).changes;
       },
       getRoomMessage(voiceChannelId) {
         return statements.getVcChannelProfileMessage.get(voiceChannelId) || null;
