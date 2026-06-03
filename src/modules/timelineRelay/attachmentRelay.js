@@ -564,6 +564,9 @@ async function prepareAttachmentRelay(post, config, logger) {
       .map((attachment) => attachment.url)
       .filter(Boolean)
   );
+  const hasPlayableVideo = normalizedAttachments.some(
+    (attachment) => attachment.isVideo && attachment.playableMediaSucceeded
+  );
 
   return {
     post: {
@@ -586,7 +589,7 @@ async function prepareAttachmentRelay(post, config, logger) {
       fileComponentUrls,
       downloadableAttachments,
       hasMoreDownloadableAttachments: downloadableAttachments.length > MAX_DOWNLOAD_BUTTONS,
-      generatedVideoThumbnailUrl: hasReuploadedVideo ? null : post.generatedVideoThumbnailUrl,
+      generatedVideoThumbnailUrl: hasReuploadedVideo || hasPlayableVideo ? null : post.generatedVideoThumbnailUrl,
       mediaGalleryItems
     },
     cleanup: async () => {

@@ -87,6 +87,51 @@ function isImageOrVideoMediaUrl(url) {
   );
 }
 
+function hasUploadedMediaAttachments(post) {
+  const attachments = Array.isArray(post.attachments) ? post.attachments : [];
+  return attachments.some((attachment) =>
+    attachment?.isImage === true ||
+    attachment?.isGif === true ||
+    attachment?.isVideo === true ||
+    String(attachment?.contentType || '').startsWith('image/') ||
+    String(attachment?.contentType || '').startsWith('video/')
+  );
+}
+
+function isYouTubePreviewMediaUrl(url) {
+  return /(?:youtube\.com|youtu\.be|ytimg\.com|googlevideo\.com)/i.test(String(url || ''));
+}
+
+function getAttachmentSourceForUrl(post, url) {
+  const value = String(url || '');
+  const attachments = Array.isArray(post.attachments) ? post.attachments : [];
+  const matchedAttachment = attachments.find((attachment) => {
+    const candidates = [
+      attachment?.url,
+      attachment?.attachmentUrl,
+      attachment?.proxyUrl,
+      attachment?.uploadFileName ? `attachment://${attachment.uploadFileName}` : null,
+      attachment?.name ? `attachment://${attachment.name}` : null,
+      attachment?.displayName ? `attachment://${attachment.displayName}` : null
+    ].filter(Boolean);
+    return candidates.some((candidate) => normalizeMediaUrl(candidate) === normalizeMediaUrl(value));
+  });
+
+  if (matchedAttachment?.isVideo) {
+    return 'uploaded_video';
+  }
+  if (matchedAttachment?.isImage || matchedAttachment?.isGif) {
+    return 'uploaded_image';
+  }
+  if (/\.(mp4|webm|mov|m4v)(?:[?#].*)?$/i.test(value)) {
+    return 'uploaded_video';
+  }
+  if (/\.(png|jpe?g|webp|gif)(?:[?#].*)?$/i.test(value)) {
+    return 'uploaded_image';
+  }
+  return 'uploaded_media';
+}
+
 function createBaseContainer(accentColor) {
   return new ContainerBuilder().setAccentColor(accentColor);
 }
@@ -249,11 +294,23 @@ function buildMediaGalleryItem(item, logger = null, context = {}) {
 }
 
 function addMediaIfPresent(container, post, logger = null) {
+  const sourceMessageId = post.messageId || null;
+  const uploadedMediaPresent = hasUploadedMediaAttachments(post);
   const explicitMediaGalleryItems = Array.isArray(post.mediaGalleryItems)
-    ? post.mediaGalleryItems.filter((item) => item?.url)
+    ? post.mediaGalleryItems
+      .filter((item) => item?.url)
+      .map((item) => ({
+        ...item,
+        source: item.source || getAttachmentSourceForUrl(post, item.url)
+      }))
     : [];
   const customEmojiMediaItems = Array.isArray(post.customEmojiMediaItems)
-    ? post.customEmojiMediaItems.filter((item) => item?.url)
+    ? post.customEmojiMediaItems
+      .filter((item) => item?.url)
+      .map((item) => ({
+        ...item,
+        source: item.source || 'custom_emoji'
+      }))
     : [];
   const imageUrls = Array.isArray(post.imageUrls) ? post.imageUrls : [];
   const socialPreviewMediaUrls = post.musicLink
@@ -269,17 +326,49 @@ function addMediaIfPresent(container, post, logger = null) {
   const musicArtworkUrls = socialPreviewMediaUrls.length
     ? []
     : [post.musicLink?.artworkUrl].filter(Boolean);
-  const hasPreviewMediaCandidate = Boolean(socialPreviewMediaUrls.length || musicArtworkUrls.length);
-  const mediaUrls = [...new Set([
-    ...primaryImageUrls,
-    post.generatedVideoThumbnailUrl,
-    ...socialPreviewMediaUrls,
-    ...musicArtworkUrls
-  ].filter(Boolean))];
+  const uploadedImageItems = primaryImageUrls.map((url) => ({
+    url,
+    source: getAttachmentSourceForUrl(post, url) || 'uploaded_image'
+  }));
+  const generatedVideoThumbnailItems = [post.generatedVideoThumbnailUrl]
+    .filter(Boolean)
+    .map((url) => ({
+      url,
+      source: 'uploaded_video_thumbnail'
+    }));
+  const linkPreviewItems = [...socialPreviewMediaUrls, ...musicArtworkUrls]
+    .filter(Boolean)
+    .map((url) => ({
+      url,
+      source: 'link_preview'
+    }));
+  const hasPreviewMediaCandidate = Boolean(linkPreviewItems.length);
+  const activeLinkPreviewItems = uploadedMediaPresent ? [] : linkPreviewItems;
+  if (uploadedMediaPresent && linkPreviewItems.length) {
+    logger?.info?.('relay uploaded media present; suppressing link preview media', {
+      sourceMessageId,
+      suppressedCount: linkPreviewItems.length,
+      suppressedUrls: linkPreviewItems.map((item) => item.url)
+    });
+    if (linkPreviewItems.some((item) => isYouTubePreviewMediaUrl(item.url))) {
+      logger?.info?.('youtube thumbnail suppressed due to uploaded media', {
+        sourceMessageId,
+        suppressedUrls: linkPreviewItems
+          .filter((item) => isYouTubePreviewMediaUrl(item.url))
+          .map((item) => item.url)
+      });
+    }
+    logger?.info?.('link preview media suppressed due to attachment priority', {
+      sourceMessageId,
+      suppressedUrls: linkPreviewItems.map((item) => item.url)
+    });
+  }
   const galleryItems = [
     ...explicitMediaGalleryItems,
     ...customEmojiMediaItems,
-    ...mediaUrls.map((url) => ({ url }))
+    ...uploadedImageItems,
+    ...generatedVideoThumbnailItems,
+    ...activeLinkPreviewItems
   ].filter((item, index, array) => {
     if (!item.url) {
       return false;
@@ -287,7 +376,7 @@ function addMediaIfPresent(container, post, logger = null) {
 
     if (isSoundCloudPlayerUrl(item.url)) {
       logger?.info?.('relay link preview image candidate rejected soundcloud_player', {
-        sourceMessageId: post.messageId || null,
+        sourceMessageId,
         imageUrl: item.url
       });
       return false;
@@ -295,12 +384,12 @@ function addMediaIfPresent(container, post, logger = null) {
 
     if (!isImageOrVideoMediaUrl(item.url)) {
       logger?.info?.('relay link preview image validation failed', {
-        sourceMessageId: post.messageId || null,
+        sourceMessageId,
         imageUrl: item.url,
         reason: isValidHttpUrl(item.url) ? 'non_image_url' : 'invalid_url'
       });
       logger?.info?.('relay link preview image candidate rejected non_image_url', {
-        sourceMessageId: post.messageId || null,
+        sourceMessageId,
         imageUrl: item.url
       });
       return false;
@@ -313,39 +402,55 @@ function addMediaIfPresent(container, post, logger = null) {
   if (!galleryItems.length) {
     if (hasPreviewMediaCandidate) {
       logger?.info?.('relay link preview image omitted', {
-        sourceMessageId: post.messageId || null,
+        sourceMessageId,
         sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
         reason: 'no_valid_gallery_items'
       });
       logger?.info?.('relay link preview image omitted no_valid_image', {
-        sourceMessageId: post.messageId || null,
+        sourceMessageId,
         sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null
       });
     }
     return;
   }
 
-  if (hasPreviewMediaCandidate) {
+  const selectedLinkPreviewItems = galleryItems.filter((item) => item.source === 'link_preview');
+  if (selectedLinkPreviewItems.length) {
     logger?.info?.('relay link preview image selected', {
-      sourceMessageId: post.messageId || null,
+      sourceMessageId,
       sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
-      imageUrls: galleryItems.map((item) => item.url)
+      imageUrls: selectedLinkPreviewItems.map((item) => item.url)
     });
     if (isSoundCloudUrl(post.socialPreview?.sourceUrl) || isSoundCloudUrl(post.musicLink?.sourceUrl)) {
       logger?.info?.('soundcloud preview image selected', {
-        sourceMessageId: post.messageId || null,
+        sourceMessageId,
         sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
-        imageUrl: galleryItems[0]?.url || null
+        imageUrl: selectedLinkPreviewItems[0]?.url || null
       });
     }
   }
 
+  logger?.info?.('media gallery final item order', {
+    sourceMessageId,
+    items: galleryItems.map((item, index) => ({
+      index,
+      url: item.url,
+      source: item.source || 'unknown'
+    }))
+  });
+
   const gallery = new MediaGalleryBuilder();
   const limitedItems = galleryItems.slice(0, MAX_MEDIA_ITEMS);
 
-  for (const item of limitedItems) {
+  for (const [index, item] of limitedItems.entries()) {
+    logger?.info?.('media gallery item source', {
+      sourceMessageId,
+      index,
+      mediaUrl: item.url,
+      source: item.source || 'unknown'
+    });
     gallery.addItems(buildMediaGalleryItem(item, logger, {
-      sourceMessageId: post.messageId || null
+      sourceMessageId
     }));
   }
 
@@ -454,10 +559,13 @@ function buildBottomActionRows(post, options = {}) {
   return rows;
 }
 
-function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls = []) {
+function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls = [], options = {}) {
   if (!socialPreview) {
     return;
   }
+  const logger = options.logger || null;
+  const sourceMessageId = options.sourceMessageId || null;
+  const suppressMedia = options.suppressMedia === true;
 
   const previewMediaUrls = Array.isArray(socialPreview.mediaUrls) && socialPreview.mediaUrls.length
     ? socialPreview.mediaUrls
@@ -478,6 +586,27 @@ function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls =
   });
 
   if (socialPreview.isGifShare) {
+    if (suppressMedia && dedupedPreviewImages.length) {
+      logger?.info?.('relay uploaded media present; suppressing link preview media', {
+        sourceMessageId,
+        sourceUrl: socialPreview.sourceUrl || null,
+        suppressedCount: dedupedPreviewImages.length,
+        suppressedUrls: dedupedPreviewImages
+      });
+      if (dedupedPreviewImages.some(isYouTubePreviewMediaUrl)) {
+        logger?.info?.('youtube thumbnail suppressed due to uploaded media', {
+          sourceMessageId,
+          sourceUrl: socialPreview.sourceUrl || null,
+          suppressedUrls: dedupedPreviewImages.filter(isYouTubePreviewMediaUrl)
+        });
+      }
+      logger?.info?.('link preview media suppressed due to attachment priority', {
+        sourceMessageId,
+        sourceUrl: socialPreview.sourceUrl || null,
+        suppressedUrls: dedupedPreviewImages
+      });
+      return;
+    }
     if (dedupedPreviewImages.length) {
       const gallery = new MediaGalleryBuilder();
 
@@ -509,6 +638,28 @@ function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls =
     new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
   );
   container.addTextDisplayComponents(new TextDisplayBuilder().setContent(lines.join('\n')));
+
+  if (suppressMedia && dedupedPreviewImages.length) {
+    logger?.info?.('relay uploaded media present; suppressing link preview media', {
+      sourceMessageId,
+      sourceUrl: socialPreview.sourceUrl || null,
+      suppressedCount: dedupedPreviewImages.length,
+      suppressedUrls: dedupedPreviewImages
+    });
+    if (dedupedPreviewImages.some(isYouTubePreviewMediaUrl)) {
+      logger?.info?.('youtube thumbnail suppressed due to uploaded media', {
+        sourceMessageId,
+        sourceUrl: socialPreview.sourceUrl || null,
+        suppressedUrls: dedupedPreviewImages.filter(isYouTubePreviewMediaUrl)
+      });
+    }
+    logger?.info?.('link preview media suppressed due to attachment priority', {
+      sourceMessageId,
+      sourceUrl: socialPreview.sourceUrl || null,
+      suppressedUrls: dedupedPreviewImages
+    });
+    return;
+  }
 
   if (dedupedPreviewImages.length) {
     const gallery = new MediaGalleryBuilder();
@@ -661,6 +812,7 @@ function buildTweetTimelineMessage({ post, config, logger = null }) {
   const container = createBaseContainer(post.accentColor || ACCENT_COLORS.timeline);
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
   const body = formatPrimaryTweetBody(trimmedContent);
+  const uploadedMediaPresent = hasUploadedMediaAttachments(post);
   const primaryMediaUrls = [...new Set([
     ...(Array.isArray(post.imageUrls) ? post.imageUrls : []),
     post.firstImageUrl,
@@ -696,7 +848,12 @@ function buildTweetTimelineMessage({ post, config, logger = null }) {
     addSocialPreviewIfPresent(
       container,
       post.socialPreview,
-      primaryMediaUrls
+      primaryMediaUrls,
+      {
+        logger,
+        sourceMessageId: post.messageId || null,
+        suppressMedia: uploadedMediaPresent
+      }
     );
   }
   addFileComponentsIfPresent(container, post, logger);
@@ -722,6 +879,7 @@ function buildQuestionTimelineMessage({ post, config, logger = null }) {
   const container = createBaseContainer(accentColor);
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
   const body = trimmedContent || null;
+  const uploadedMediaPresent = hasUploadedMediaAttachments(post);
   const questionTitle = post.title?.trim() || 'タイトルなし';
   const statusLabel = post.isResolved ? '解決済み' : '受付中';
   const attachmentNamesBlock = buildAttachmentFileNameBlock(post);
@@ -775,7 +933,12 @@ function buildQuestionTimelineMessage({ post, config, logger = null }) {
   addSocialPreviewIfPresent(
     container,
     post.socialPreview,
-    primaryMediaUrls
+    primaryMediaUrls,
+    {
+      logger,
+      sourceMessageId: post.messageId || null,
+      suppressMedia: uploadedMediaPresent
+    }
   );
   addFileComponentsIfPresent(container, post, logger);
   if (post.hasMoreDownloadableAttachments) {
@@ -799,6 +962,7 @@ function buildKnowledgeTimelineMessage({ post, config, logger = null }) {
   const container = createBaseContainer(ACCENT_COLORS.knowledge);
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
   const body = trimmedContent || null;
+  const uploadedMediaPresent = hasUploadedMediaAttachments(post);
   const title = post.title?.trim() || 'タイトルなし';
   const tagLine = Array.isArray(post.knowledgeTagLabels) && post.knowledgeTagLabels.length
     ? post.knowledgeTagLabels.join(' / ')
@@ -842,7 +1006,11 @@ function buildKnowledgeTimelineMessage({ post, config, logger = null }) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent('（本文はまだありません）'));
   }
   addMediaIfPresent(container, post, logger);
-  addSocialPreviewIfPresent(container, post.socialPreview, primaryMediaUrls);
+  addSocialPreviewIfPresent(container, post.socialPreview, primaryMediaUrls, {
+    logger,
+    sourceMessageId: post.messageId || null,
+    suppressMedia: uploadedMediaPresent
+  });
   addFileComponentsIfPresent(container, post, logger);
   if (post.hasMoreDownloadableAttachments) {
     container.addTextDisplayComponents(
