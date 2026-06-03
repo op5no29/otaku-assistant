@@ -7,12 +7,135 @@ function parseJsonArray(value) {
   }
 }
 
+function normalizeProfileUrl(value) {
+  const raw = String(value || '')
+    .trim()
+    .replace(/[.,、。!?！？;；]+$/u, '');
+  try {
+    const parsed = new URL(raw);
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
 function getIntroChannelId(client) {
   return String(client.appConfig.introDm?.introChannelId || client.appConfig.introChannelId || '');
 }
 
 function extractUrls(text) {
-  return Array.from(String(text || '').matchAll(/https?:\/\/[^\s>]+/giu)).map((match) => match[0]);
+  return Array.from(String(text || '').matchAll(/https?:\/\/[^\s>]+/giu))
+    .map((match) => normalizeProfileUrl(match[0]))
+    .filter(Boolean);
+}
+
+function isUsefulIntroProfileUrl(value) {
+  const normalized = normalizeProfileUrl(value);
+  if (!normalized) {
+    return false;
+  }
+
+  try {
+    const host = new URL(normalized).hostname.toLowerCase();
+    if (
+      host === 'discord.com' ||
+      host === 'www.discord.com' ||
+      host === 'cdn.discordapp.com' ||
+      host === 'media.discordapp.net' ||
+      host.endsWith('.discordapp.com') ||
+      host.endsWith('.discordapp.net')
+    ) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  return true;
+}
+
+function countLinkFocusedNonUrlChars(content) {
+  return Array.from(
+    String(content || '')
+      .replace(/https?:\/\/[^\s>]+/giu, '')
+      .replace(/[：:：→\-–—|｜/／\\()\[\]（）【】<>〈〉「」『』\s]/gu, '')
+  ).length;
+}
+
+function isLinkFocusedIntroAddendum(content, urls) {
+  const text = String(content || '').trim();
+  if (!urls.length || !text) {
+    return false;
+  }
+
+  const nonUrlCharCount = countLinkFocusedNonUrlChars(text);
+  const totalCharCount = Array.from(text).length;
+  return nonUrlCharCount <= 80 && totalCharCount <= 400;
+}
+
+function buildAddendumLines(content, newUrls) {
+  const newUrlSet = new Set(newUrls);
+  const lines = String(content || '')
+    .split(/\r?\n/gu)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => extractUrls(line).some((url) => newUrlSet.has(url)));
+
+  if (lines.length) {
+    return lines;
+  }
+
+  return newUrls;
+}
+
+function appendIntroAddendumText(existingIntroText, addendumLines) {
+  const baseText = String(existingIntroText || '').trim();
+  const addendumText = addendumLines.join('\n').trim();
+  if (!addendumText) {
+    return baseText;
+  }
+
+  if (!baseText) {
+    return `SNS / Links:\n${addendumText}`;
+  }
+
+  if (/SNS\s*\/\s*Links\s*:/iu.test(baseText)) {
+    return `${baseText}\n${addendumText}`;
+  }
+
+  return `${baseText}\n\nSNS / Links:\n${addendumText}`;
+}
+
+function buildSearchAliasesFromIdentity(identity, links) {
+  const aliases = new Set();
+  const candidates = [
+    identity.displayName,
+    identity.username,
+    identity.globalName,
+    identity.nickname
+  ];
+
+  for (const value of candidates) {
+    const raw = String(value || '').trim();
+    if (!raw) {
+      continue;
+    }
+    aliases.add(raw);
+    aliases.add(raw.toLowerCase());
+  }
+
+  for (const link of links) {
+    const xHandleMatch = String(link).match(/(?:x|twitter)\.com\/([A-Za-z0-9_]+)/iu);
+    const youtubeMatch = String(link).match(/youtube\.com\/@([A-Za-z0-9_.-]+)/iu);
+    const handle = xHandleMatch?.[1] || youtubeMatch?.[1] || null;
+    if (handle) {
+      aliases.add(handle);
+      aliases.add(handle.toLowerCase());
+    }
+  }
+
+  return Array.from(aliases);
 }
 
 function getIntroProfileSkipReason(client, message) {
@@ -40,34 +163,12 @@ function getIntroProfileSkipReason(client, message) {
 }
 
 function buildSearchAliases(message, links) {
-  const aliases = new Set();
-  const candidates = [
-    message.member?.displayName,
-    message.author?.username,
-    message.author?.globalName,
-    message.member?.nickname
-  ];
-
-  for (const value of candidates) {
-    const raw = String(value || '').trim();
-    if (!raw) {
-      continue;
-    }
-    aliases.add(raw);
-    aliases.add(raw.toLowerCase());
-  }
-
-  for (const link of links) {
-    const xHandleMatch = String(link).match(/(?:x|twitter)\.com\/([A-Za-z0-9_]+)/iu);
-    const youtubeMatch = String(link).match(/youtube\.com\/@([A-Za-z0-9_.-]+)/iu);
-    const handle = xHandleMatch?.[1] || youtubeMatch?.[1] || null;
-    if (handle) {
-      aliases.add(handle);
-      aliases.add(handle.toLowerCase());
-    }
-  }
-
-  return Array.from(aliases);
+  return buildSearchAliasesFromIdentity({
+    displayName: message.member?.displayName,
+    username: message.author?.username,
+    globalName: message.author?.globalName,
+    nickname: message.member?.nickname
+  }, links);
 }
 
 function buildIntroProfileRecord(client, message) {
@@ -107,6 +208,183 @@ function buildIntroProfileRecord(client, message) {
   };
 }
 
+async function refreshVcProfilesForIntroUser(client, message, reason) {
+  const guild = message.guild || (message.guildId ? await client.guilds.fetch(message.guildId).catch(() => null) : null);
+  if (!guild) {
+    return 0;
+  }
+
+  try {
+    const { queueVoiceProfileRefreshForUser } = require('../vcProfile');
+    const queuedCount = await queueVoiceProfileRefreshForUser(client, guild, message.author.id, { reason });
+    if (queuedCount > 0) {
+      if (reason === 'intro_profile_edit') {
+        client.logger.info('intro profile edit refresh queued', {
+          guildId: message.guildId || guild.id,
+          userId: message.author.id,
+          introMessageId: message.id,
+          queuedCount
+        });
+      }
+      client.logger.info(
+        reason === 'intro_addendum_absorbed'
+          ? 'vc profile refresh queued due intro addendum'
+          : reason === 'intro_profile_edit'
+            ? 'vc profile refresh queued due intro edit'
+            : 'vc profile refresh queued due intro profile update',
+        {
+          guildId: message.guildId || guild.id,
+          userId: message.author.id,
+          introMessageId: message.id,
+          queuedCount
+        }
+      );
+    }
+    return queuedCount;
+  } catch (error) {
+    client.logger.warn('vc profile refresh queue failed after intro profile update', {
+      guildId: message.guildId || guild.id,
+      userId: message.author.id,
+      introMessageId: message.id,
+      reason,
+      error: error.message
+    });
+    return 0;
+  }
+}
+
+async function reactToAbsorbedAddendum(client, message) {
+  try {
+    await message.react('🔗');
+    client.logger.info('intro addendum reaction added', {
+      guildId: message.guildId,
+      userId: message.author.id,
+      introMessageId: message.id,
+      reaction: '🔗'
+    });
+  } catch (error) {
+    client.logger.warn('intro addendum reaction failed', {
+      guildId: message.guildId,
+      userId: message.author.id,
+      introMessageId: message.id,
+      reaction: '🔗',
+      error: error.message
+    });
+  }
+}
+
+async function maybeAbsorbIntroAddendum(client, message, existingProfile) {
+  const rawUrls = extractUrls(message.content || '').filter(isUsefulIntroProfileUrl);
+  client.logger.info('intro addendum candidate detected', {
+    guildId: message.guildId,
+    userId: message.author.id,
+    introMessageId: message.id,
+    currentIntroMessageId: existingProfile?.introMessageId || null,
+    urlCount: rawUrls.length,
+    nonUrlCharCount: countLinkFocusedNonUrlChars(message.content || '')
+  });
+
+  if (!existingProfile) {
+    client.logger.info('intro addendum skipped no existing profile', {
+      guildId: message.guildId,
+      userId: message.author.id,
+      introMessageId: message.id
+    });
+    return {
+      absorbed: false,
+      skippedReason: 'no_existing_profile'
+    };
+  }
+
+  if (!isLinkFocusedIntroAddendum(message.content || '', rawUrls)) {
+    client.logger.info('intro addendum skipped not link focused', {
+      guildId: message.guildId,
+      userId: message.author.id,
+      introMessageId: message.id,
+      urlCount: rawUrls.length,
+      totalCharCount: Array.from(String(message.content || '').trim()).length,
+      nonUrlCharCount: countLinkFocusedNonUrlChars(message.content || '')
+    });
+    return {
+      absorbed: false,
+      skippedReason: 'not_link_focused'
+    };
+  }
+
+  const existingLinks = parseJsonArray(existingProfile.linksJson).map(normalizeProfileUrl).filter(Boolean);
+  const existingUrlSet = new Set([
+    ...existingLinks,
+    ...extractUrls(existingProfile.introText || '')
+  ]);
+  const newUrls = [...new Set(rawUrls)].filter((url) => !existingUrlSet.has(url));
+  if (!newUrls.length) {
+    client.logger.info('intro addendum skipped duplicate url', {
+      guildId: message.guildId,
+      userId: message.author.id,
+      introMessageId: message.id,
+      urls: rawUrls
+    });
+    return {
+      absorbed: false,
+      skippedReason: 'duplicate_url'
+    };
+  }
+
+  const mergedLinks = [...new Set([...existingLinks, ...newUrls])];
+  const displayName = message.member?.displayName || existingProfile.displayName || message.author?.globalName || message.author?.username || null;
+  const username = message.author?.username || existingProfile.username || null;
+  const globalName = message.author?.globalName || existingProfile.globalName || null;
+  const nickname = message.member?.nickname || existingProfile.nickname || null;
+  const addendumLines = buildAddendumLines(message.content || '', newUrls);
+  const updatedRecord = {
+    guildId: existingProfile.guildId,
+    userId: existingProfile.userId,
+    introChannelId: existingProfile.introChannelId,
+    introMessageId: existingProfile.introMessageId,
+    displayName,
+    username,
+    globalName,
+    nickname,
+    sourceType: existingProfile.sourceType || 'first_top_level_message',
+    introText: appendIntroAddendumText(existingProfile.introText, addendumLines),
+    linksJson: JSON.stringify(mergedLinks),
+    embedsJson: existingProfile.embedsJson || '[]',
+    attachmentsJson: existingProfile.attachmentsJson || '[]',
+    searchAliasesJson: JSON.stringify([
+      ...new Set([
+        ...parseJsonArray(existingProfile.searchAliasesJson),
+        ...buildSearchAliasesFromIdentity({ displayName, username, globalName, nickname }, mergedLinks)
+      ])
+    ]),
+    postedAt: existingProfile.postedAt || new Date().toISOString(),
+    updatedAt: message.createdAt ? message.createdAt.toISOString() : new Date().toISOString()
+  };
+
+  client.db.introProfiles.upsert(updatedRecord);
+  client.logger.info('intro addendum absorbed', {
+    guildId: message.guildId,
+    userId: message.author.id,
+    introMessageId: message.id,
+    targetIntroMessageId: existingProfile.introMessageId,
+    addedUrls: newUrls
+  });
+  client.logger.info('intro profile updated from addendum', {
+    guildId: updatedRecord.guildId,
+    userId: updatedRecord.userId,
+    introMessageId: updatedRecord.introMessageId,
+    addendumMessageId: message.id
+  });
+  await reactToAbsorbedAddendum(client, message);
+  await refreshVcProfilesForIntroUser(client, message, 'intro_addendum_absorbed');
+
+  return {
+    absorbed: true,
+    skippedReason: null,
+    introMessageId: existingProfile.introMessageId,
+    addedUrls: newUrls
+  };
+}
+
 function isIntroProfileMessage(client, message) {
   return getIntroProfileSkipReason(client, message) === null;
 }
@@ -143,10 +421,32 @@ async function saveIntroProfileFromMessage(client, message) {
       introMessageId: message.id,
       currentIntroMessageId: existingProfile.introMessageId
     });
+    const addendumResult = await maybeAbsorbIntroAddendum(client, message, existingProfile);
+    if (addendumResult.absorbed) {
+      return {
+        saved: true,
+        skippedReason: null,
+        updatedExisting: true,
+        absorbedAddendum: true,
+        introMessageId: addendumResult.introMessageId,
+        addedUrls: addendumResult.addedUrls
+      };
+    }
     return {
       saved: false,
-      skippedReason: 'duplicate_user_intro'
+      skippedReason: addendumResult.skippedReason || 'duplicate_user_intro'
     };
+  }
+
+  const firstProfileUrls = extractUrls(message.content || '').filter(isUsefulIntroProfileUrl);
+  if (!existingProfile && isLinkFocusedIntroAddendum(message.content || '', firstProfileUrls)) {
+    client.logger.info('intro addendum skipped no existing profile', {
+      guildId: message.guildId,
+      userId: message.author.id,
+      introMessageId: message.id,
+      urlCount: firstProfileUrls.length,
+      continuedAsPrimaryIntro: true
+    });
   }
 
   const record = buildIntroProfileRecord(client, message);
@@ -169,6 +469,11 @@ async function saveIntroProfileFromMessage(client, message) {
       });
     }
   }
+  await refreshVcProfilesForIntroUser(
+    client,
+    message,
+    existingProfile ? 'intro_profile_edit' : 'intro_profile_saved'
+  );
   return {
     saved: true,
     skippedReason: null,

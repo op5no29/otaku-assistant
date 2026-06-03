@@ -422,15 +422,25 @@ async function queueVoiceProfileCategoryUpdate(client, guild, categoryId, { reas
 }
 
 async function buildVoiceMemberProfiles(client, humanEntries, { guildId, categoryId }) {
-  const introChannel = await client.channels.fetch(client.appConfig.introChannelId).catch(() => null);
+  const introChannelId = String(client.appConfig.introDm?.introChannelId || client.appConfig.introChannelId || '');
+  const introChannel = await client.channels.fetch(introChannelId).catch(() => null);
 
   const enrichedMembers = await Promise.all(
     humanEntries.map(async (entry) => {
       const member = entry.member;
       let introMessage = null;
+      let introSummary = null;
+      const introProfile = client.db.introProfiles.getLatestByUser(
+        guildId,
+        member.id,
+        introChannelId
+      );
+      if (introProfile?.introText?.trim()) {
+        introSummary = introProfile.introText.trim();
+      }
       if (introChannel) {
         try {
-          introMessage = await findLatestIntroMessage(introChannel, member.id);
+          introMessage = introSummary ? null : await findLatestIntroMessage(introChannel, member.id);
         } catch (error) {
           client.logger.warn('vc profile member missing intro fallback used', {
             guildId,
@@ -440,6 +450,9 @@ async function buildVoiceMemberProfiles(client, humanEntries, { guildId, categor
             error: error.message
           });
         }
+      }
+      if (!introSummary) {
+        introSummary = introMessage?.content?.trim() || null;
       }
 
       let avatarUrl = null;
@@ -455,7 +468,7 @@ async function buildVoiceMemberProfiles(client, humanEntries, { guildId, categor
         });
       }
 
-      if (!introMessage?.content?.trim()) {
+      if (!introSummary) {
         client.logger.info('vc profile member missing intro fallback used', {
           guildId,
           categoryId,
@@ -468,7 +481,7 @@ async function buildVoiceMemberProfiles(client, humanEntries, { guildId, categor
         displayName: member.displayName || member.user?.globalName || member.user?.username || '不明なメンバー',
         mention: `<@${member.id}>`,
         avatarUrl,
-        introSummary: introMessage?.content?.trim() || null,
+        introSummary,
         voiceChannelId: entry.channelId || null,
         joinedAt: entry.joinedAt || null
       };
@@ -1908,9 +1921,30 @@ async function handleVoiceStateUpdate(oldState, newState) {
   }
 }
 
+async function queueVoiceProfileRefreshForUser(client, guild, userId, { reason = 'intro_profile_change' } = {}) {
+  if (!client?.voiceProfileCategoryMap?.size || !guild?.voiceStates?.cache || !userId) {
+    return 0;
+  }
+
+  const voiceState = guild.voiceStates.cache.get(String(userId));
+  if (!voiceState?.channelId) {
+    return 0;
+  }
+
+  const voiceChannel = await getFreshVoiceChannel(guild, voiceState.channelId) || voiceState.channel;
+  const categoryId = getTrackedCategoryId(client, voiceChannel);
+  if (!categoryId) {
+    return 0;
+  }
+
+  await queueVoiceProfileCategoryUpdate(client, guild, categoryId, { reason });
+  return 1;
+}
+
 module.exports = {
   initializeVoiceProfileMappings,
   rebuildVoiceProfileState,
   startVoiceProfileReconciliation,
-  handleVoiceStateUpdate
+  handleVoiceStateUpdate,
+  queueVoiceProfileRefreshForUser
 };
