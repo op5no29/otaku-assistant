@@ -541,17 +541,41 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
   const twitterResolved = await resolveTwitterMedia(post, config, logger);
   const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, logger);
   const attachmentPrepared = await prepareAttachmentRelay(videoPrepared.post, config, logger);
+  if (attachmentPrepared.post?.relayOrigin === 'posthoc_hashtag') {
+    const posthocAttachments = Array.isArray(attachmentPrepared.post.attachments)
+      ? attachmentPrepared.post.attachments
+      : [];
+    logger.info('posthoc source attachment count', {
+      sourceMessageId: attachmentPrepared.post.messageId || null,
+      attachmentCount: posthocAttachments.length,
+      componentFileCount: Array.isArray(attachmentPrepared.post.componentFiles) ? attachmentPrepared.post.componentFiles.length : 0,
+      mediaGalleryItemCount: Array.isArray(attachmentPrepared.post.mediaGalleryItems) ? attachmentPrepared.post.mediaGalleryItems.length : 0,
+      downloadableAttachmentCount: Array.isArray(attachmentPrepared.post.downloadableAttachments) ? attachmentPrepared.post.downloadableAttachments.length : 0,
+      relayStage: 'payload_prepared'
+    });
+    for (const attachment of posthocAttachments) {
+      if (attachment.isImage && !attachment.isSpoiler) {
+        logger.info('posthoc source media attachment relayed', {
+          sourceMessageId: attachmentPrepared.post.messageId || null,
+          attachmentId: attachment.id || null,
+          name: attachment.name || attachment.originalFileName || null,
+          mediaKind: attachment.isGif ? 'gif' : 'image',
+          relayMode: 'image_url'
+        });
+      }
+    }
+  }
   const matchedGlobalRoutes = Array.isArray(attachmentPrepared.post?.matchedGlobalHashtagRoutes)
     ? attachmentPrepared.post.matchedGlobalHashtagRoutes
     : [];
   const matchedBotRoutes = Array.isArray(attachmentPrepared.post?.matchedBotHashtagRoutes)
     ? attachmentPrepared.post.matchedBotHashtagRoutes
     : [];
-  const isRouteRelayCard = forumType !== 'question' && forumType !== 'knowledge' && (
+  const isRouteRelayCard = forumType === 'knowledge' || (forumType !== 'question' && (
     matchedGlobalRoutes.length > 0 ||
     matchedBotRoutes.length > 0 ||
     attachmentPrepared.post?.relayOrigin === 'posthoc_hashtag'
-  );
+  ));
   if (isRouteRelayCard) {
     const existingExtraButtons = Array.isArray(attachmentPrepared.post.extraLinkButtons)
       ? attachmentPrepared.post.extraLinkButtons
@@ -2886,6 +2910,37 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
   }
 
   const post = await extractPlainMessagePost(targetMessage, config, logger);
+  const posthocSourceAttachments = Array.isArray(post.attachments) ? post.attachments : [];
+  logger.info('posthoc source attachment count', {
+    sourceMessageId: message.id,
+    replyTargetMessageId: targetMessage.id,
+    attachmentCount: posthocSourceAttachments.length,
+    videoAttachmentCount: posthocSourceAttachments.filter((attachment) => attachment.isVideo).length,
+    imageAttachmentCount: posthocSourceAttachments.filter((attachment) => attachment.isImage).length,
+    spoilerAttachmentCount: posthocSourceAttachments.filter((attachment) => attachment.isSpoiler).length
+  });
+  for (const attachment of posthocSourceAttachments) {
+    logger.info('posthoc source attachment detected', {
+      sourceMessageId: message.id,
+      replyTargetMessageId: targetMessage.id,
+      attachmentId: attachment.id || null,
+      name: attachment.name || attachment.originalFileName || null,
+      contentType: attachment.contentType || null,
+      size: attachment.size || null,
+      isImage: attachment.isImage === true,
+      isVideo: attachment.isVideo === true,
+      isSpoiler: attachment.isSpoiler === true
+    });
+    if (attachment.isSpoiler) {
+      logger.info('posthoc source spoiler attachment preserved', {
+        sourceMessageId: message.id,
+        replyTargetMessageId: targetMessage.id,
+        attachmentId: attachment.id || null,
+        name: attachment.name || attachment.originalFileName || null,
+        preservationStage: 'source_detected'
+      });
+    }
+  }
   const posthocDisplayTags = buildPosthocDisplayTags(replyRouting);
   post.displayBotHashtags = replyRouting.displayTags;
   post.matchedGlobalHashtagRoutes = replyRouting.globalMatchedRoutes;

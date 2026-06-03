@@ -280,6 +280,14 @@ async function prepareAttachmentRelay(post, config, logger) {
           uploadFileName: uploadName,
           attachmentUrl
         });
+        if (post.relayOrigin === 'posthoc_hashtag') {
+          logger.info('posthoc source video attachment relayed', {
+            ...context,
+            uploadFileName: uploadName,
+            attachmentUrl,
+            spoilerPreserved: attachment.isSpoiler === true
+          });
+        }
         logger.info('FileBuilder skipped for video attachment', {
           ...context,
           displayFileName: attachment.displayName
@@ -308,6 +316,15 @@ async function prepareAttachmentRelay(post, config, logger) {
           uploadFileName: attachment.uploadFileName,
           attachmentUrl
         });
+        if (post.relayOrigin === 'posthoc_hashtag') {
+          logger.info('posthoc source media attachment relayed', {
+            ...context,
+            uploadFileName: attachment.uploadFileName,
+            attachmentUrl,
+            mediaKind: attachment.isGif ? 'gif' : 'image',
+            spoilerPreserved: attachment.isSpoiler === true
+          });
+        }
       } else {
         componentFiles.push({
           attachment: filePath,
@@ -336,6 +353,13 @@ async function prepareAttachmentRelay(post, config, logger) {
           uploadFileName: attachment.uploadFileName,
           spoilerPrefixPreserved: /^SPOILER_/iu.test(String(attachment.uploadFileName || ''))
         });
+        if (post.relayOrigin === 'posthoc_hashtag') {
+          logger.info('posthoc source spoiler attachment preserved', {
+            ...context,
+            uploadFileName: attachment.uploadFileName,
+            relayStage: 'reupload_succeeded'
+          });
+        }
       }
     } catch (error) {
       logger.warn('Attachment re-upload failed; using fallback', {
@@ -353,6 +377,13 @@ async function prepareAttachmentRelay(post, config, logger) {
           error: error.message,
           fallbackReason: 'download_or_upload_failed',
           spoilerPreservedByRawPreviewSuppression: true
+        });
+      }
+      if (post.relayOrigin === 'posthoc_hashtag') {
+        logger.warn('posthoc source attachment relay failed', {
+          ...context,
+          error: error.message,
+          fallbackReason: 'download_or_upload_failed'
         });
       }
       attachment.reuploadSkippedReason = 'upload_failed';

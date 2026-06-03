@@ -134,6 +134,62 @@ function isYoutubeLikeUrl(url) {
   return /(?:youtube\.com|youtu\.be|ytimg\.com|googlevideo\.com)/i.test(String(url || ''));
 }
 
+function isSoundCloudSourceUrl(url) {
+  try {
+    const host = new URL(String(url || '')).hostname.toLowerCase();
+    return host === 'on.soundcloud.com' || host.endsWith('soundcloud.com');
+  } catch {
+    return false;
+  }
+}
+
+function isSoundCloudPlayerUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    const host = parsed.hostname.toLowerCase();
+    return (
+      host === 'w.soundcloud.com' ||
+      (host.endsWith('soundcloud.com') && /\/player\b/i.test(parsed.pathname)) ||
+      (host.endsWith('soundcloud.com') && /\/player[/?#]/i.test(String(url || '')))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isPreviewMediaUrl(url) {
+  return looksLikePreviewImageUrl(url) || looksLikeAnimatedMediaUrl(url);
+}
+
+function isHttpUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function isLikelyDiscordEmbedImageCandidate(candidate) {
+  if (!candidate?.url || !isHttpUrl(candidate.url)) {
+    return false;
+  }
+  if (isSoundCloudPlayerUrl(candidate.url)) {
+    return false;
+  }
+  return /embed\.(?:image|thumbnail)$/i.test(String(candidate.source || ''));
+}
+
+function isPreviewCandidateUsableAsMedia(candidate) {
+  if (!candidate?.url || isSoundCloudPlayerUrl(candidate.url)) {
+    return false;
+  }
+  if (isPreviewMediaUrl(candidate.url)) {
+    return true;
+  }
+  return isLikelyDiscordEmbedImageCandidate(candidate);
+}
+
 function extractTwitterStatusId(url) {
   const match = String(url || '').match(/(?:x\.com|twitter\.com)\/[^/]+\/status\/(\d+)/i);
   return match?.[1] || null;
@@ -252,6 +308,30 @@ function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger = null,
       continue;
     }
 
+    if (isSoundCloudPlayerUrl(candidate.url)) {
+      rejected.push({ ...candidate, reason: 'soundcloud_player' });
+      logger?.info?.('relay link preview image candidate rejected soundcloud_player', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        imageUrl: candidate.url,
+        source: candidate.source,
+        kind: candidate.kind
+      });
+      continue;
+    }
+
+    if (!isPreviewCandidateUsableAsMedia(candidate)) {
+      rejected.push({ ...candidate, reason: 'non_image_url' });
+      logger?.info?.('relay link preview image candidate rejected non_image_url', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        imageUrl: candidate.url,
+        source: candidate.source,
+        kind: candidate.kind
+      });
+      continue;
+    }
+
     if (seenNormalized.has(candidate.normalizedUrl)) {
       rejected.push({ ...candidate, reason: 'duplicate_normalized_url' });
       continue;
@@ -327,6 +407,20 @@ function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger = null,
     const bestGifCandidate = [...nonLogo].sort((left, right) => right.priority - left.priority)[0];
     if (bestGifCandidate) {
       selected.push(bestGifCandidate);
+    }
+  } else if (isSoundCloudSourceUrl(sourceUrl)) {
+    const soundCloudArtwork = [...nonLogo]
+      .filter((candidate) => !isSoundCloudPlayerUrl(candidate.url) && isPreviewMediaUrl(candidate.url))
+      .sort((left, right) => right.priority - left.priority)[0];
+    if (soundCloudArtwork) {
+      selected.push(soundCloudArtwork);
+      logger?.info?.('soundcloud artwork thumbnail selected', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        selectedUrl: soundCloudArtwork.url,
+        selectedSource: soundCloudArtwork.source,
+        selectedKind: soundCloudArtwork.kind
+      });
     }
   } else if (isYoutubeSource) {
     const youtubeCandidates = [...nonLogo].filter((candidate) => isYoutubeLikeUrl(candidate.url) || isYoutubeLikeUrl(candidate.sourceUrl));

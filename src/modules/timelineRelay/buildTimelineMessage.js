@@ -41,6 +41,10 @@ function isValidHttpUrl(url) {
   }
 }
 
+function isAttachmentUrl(url) {
+  return /^attachment:\/\//i.test(String(url || ''));
+}
+
 function isSoundCloudUrl(url) {
   try {
     const host = new URL(String(url || '')).hostname.toLowerCase();
@@ -48,6 +52,39 @@ function isSoundCloudUrl(url) {
   } catch {
     return false;
   }
+}
+
+function isSoundCloudPlayerUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    const host = parsed.hostname.toLowerCase();
+    return (
+      host === 'w.soundcloud.com' ||
+      (host.endsWith('soundcloud.com') && /\/player\b/i.test(parsed.pathname)) ||
+      (host.endsWith('soundcloud.com') && /\/player[/?#]/i.test(String(url || '')))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isImageOrVideoMediaUrl(url) {
+  const value = String(url || '');
+  if (isAttachmentUrl(value)) {
+    return true;
+  }
+  if (!isValidHttpUrl(value)) {
+    return false;
+  }
+  if (isSoundCloudPlayerUrl(value)) {
+    return false;
+  }
+  return (
+    /\.(png|jpe?g|webp|gif|mp4|webm|mov|m4v)(?:[?#].*)?$/i.test(value) ||
+    /[?&]format=(png|jpe?g|webp|gif)\b/i.test(value) ||
+    /images-ext-\d+\.discordapp\.net\/external\/.+\/https\/.+\.(png|jpe?g|webp|gif)(?:[?#/]|$)/i.test(value) ||
+    /i\d*\.sndcdn\.com\/artworks-/i.test(value)
+  );
 }
 
 function createBaseContainer(accentColor) {
@@ -261,11 +298,23 @@ function addMediaIfPresent(container, post, logger = null) {
       return false;
     }
 
-    if (!isValidHttpUrl(item.url)) {
+    if (isSoundCloudPlayerUrl(item.url)) {
+      logger?.info?.('relay link preview image candidate rejected soundcloud_player', {
+        sourceMessageId: post.messageId || null,
+        imageUrl: item.url
+      });
+      return false;
+    }
+
+    if (!isImageOrVideoMediaUrl(item.url)) {
       logger?.info?.('relay link preview image validation failed', {
         sourceMessageId: post.messageId || null,
         imageUrl: item.url,
-        reason: 'invalid_url'
+        reason: isValidHttpUrl(item.url) ? 'non_image_url' : 'invalid_url'
+      });
+      logger?.info?.('relay link preview image candidate rejected non_image_url', {
+        sourceMessageId: post.messageId || null,
+        imageUrl: item.url
       });
       return false;
     }
@@ -280,6 +329,10 @@ function addMediaIfPresent(container, post, logger = null) {
         sourceMessageId: post.messageId || null,
         sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
         reason: 'no_valid_gallery_items'
+      });
+      logger?.info?.('relay link preview image omitted no_valid_image', {
+        sourceMessageId: post.messageId || null,
+        sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null
       });
     }
     return;
@@ -327,20 +380,25 @@ function addFileComponentsIfPresent(container, post, logger = null) {
 }
 
 function buildBottomActionRows(post, options = {}) {
-  const buttons = [];
+  const rows = [];
+  const supplementalButtons = [];
+  const externalButtons = [];
   const jumpLabel = options.jumpLabel || 'メッセージに飛ぶ';
+  const logger = options.logger || null;
 
   if (post.jumpUrl) {
-    buttons.push(
-      new ButtonBuilder()
-        .setLabel(jumpLabel)
-        .setStyle(ButtonStyle.Link)
-        .setURL(post.jumpUrl)
+    rows.push(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setLabel(jumpLabel)
+          .setStyle(ButtonStyle.Link)
+          .setURL(post.jumpUrl)
+      )
     );
   }
 
   if (post.musicLink?.universalUrl || post.musicLink?.sourceUrl) {
-    buttons.push(
+    supplementalButtons.push(
       new ButtonBuilder()
         .setLabel('音楽リンクを開く')
         .setStyle(ButtonStyle.Link)
@@ -348,12 +406,14 @@ function buildBottomActionRows(post, options = {}) {
     );
   }
 
-  const downloadableAttachments = Array.isArray(post.downloadableAttachments)
-    ? post.downloadableAttachments.slice(0, MAX_DOWNLOAD_BUTTONS)
-    : [];
+  const downloadableAttachments = options.includeDownloadButtons === false
+    ? []
+    : Array.isArray(post.downloadableAttachments)
+      ? post.downloadableAttachments.slice(0, MAX_DOWNLOAD_BUTTONS)
+      : [];
 
   for (const attachment of downloadableAttachments) {
-    buttons.push(
+    supplementalButtons.push(
       new ButtonBuilder()
         .setLabel(attachment.label)
         .setStyle(ButtonStyle.Link)
@@ -366,7 +426,7 @@ function buildBottomActionRows(post, options = {}) {
     if (!button?.label || !button?.url) {
       continue;
     }
-    buttons.push(
+    externalButtons.push(
       new ButtonBuilder()
         .setLabel(button.label)
         .setStyle(ButtonStyle.Link)
@@ -374,13 +434,19 @@ function buildBottomActionRows(post, options = {}) {
     );
   }
 
-  if (!buttons.length) {
-    return [];
+  for (let index = 0; index < supplementalButtons.length; index += 5) {
+    rows.push(new ActionRowBuilder().addComponents(...supplementalButtons.slice(index, index + 5)));
   }
 
-  const rows = [];
-  for (let index = 0; index < buttons.length; index += 5) {
-    rows.push(new ActionRowBuilder().addComponents(...buttons.slice(index, index + 5)));
+  if (externalButtons.length) {
+    for (let index = 0; index < externalButtons.length; index += 5) {
+      rows.push(new ActionRowBuilder().addComponents(...externalButtons.slice(index, index + 5)));
+    }
+    logger?.info?.('relay link buttons placed separate row', {
+      sourceMessageId: post.messageId || null,
+      externalButtonCount: externalButtons.length,
+      hasJumpButton: Boolean(post.jumpUrl)
+    });
   }
 
   return rows;
@@ -634,7 +700,7 @@ function buildTweetTimelineMessage({ post, config, logger = null }) {
       new TextDisplayBuilder().setContent('他にも添付ファイルがあります')
     );
   }
-  for (const row of buildBottomActionRows(post)) {
+  for (const row of buildBottomActionRows(post, { logger })) {
     container.addActionRowComponents(row);
   }
 
@@ -712,7 +778,7 @@ function buildQuestionTimelineMessage({ post, config, logger = null }) {
       new TextDisplayBuilder().setContent('他にも添付ファイルがあります')
     );
   }
-  for (const row of buildBottomActionRows(post, { jumpLabel: '質問フォーラムへ飛ぶ' })) {
+  for (const row of buildBottomActionRows(post, { jumpLabel: '質問フォーラムへ飛ぶ', logger })) {
     container.addActionRowComponents(row);
   }
 
@@ -738,21 +804,17 @@ function buildKnowledgeTimelineMessage({ post, config, logger = null }) {
     post.generatedVideoThumbnailUrl
   ].filter(Boolean))];
 
-  addQuestionHeader(container, {
-    title: '知りたいことに新しいスレッドが作成されました',
-    subtitle: null
-  });
-  container.addSectionComponents(
-    buildAuthorSection({
-      displayName: post.displayName,
-      avatarUrl: post.avatarUrl
-    })
-  );
-  container.addSeparatorComponents(
-    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
-  );
   container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('### 知りたいことに新しいスレッドが作成されました'),
     new TextDisplayBuilder().setContent(`## ${title}`)
+  );
+  container.addSectionComponents(
+    buildMetadataSection({
+      lines: [`**作成者**: ${post.displayName || '不明'}`],
+      avatarUrl: post.avatarUrl
+        || null,
+      avatarDescription: `${post.displayName || '作成者'} のアイコン`
+    })
   );
   if (tagLine) {
     container.addTextDisplayComponents(
@@ -766,13 +828,13 @@ function buildKnowledgeTimelineMessage({ post, config, logger = null }) {
   if (roleMentions) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent(roleMentions));
   }
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
   if (body) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent(body));
-  } else if (!addAttachmentNamesSection(container, post, { showOnlyAsFallback: true })) {
+  } else {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent('（本文はまだありません）'));
-  }
-  if (body && buildAttachmentFileNameBlock(post)) {
-    addAttachmentNamesSection(container, post);
   }
   addMediaIfPresent(container, post, logger);
   addSocialPreviewIfPresent(container, post.socialPreview, primaryMediaUrls);
@@ -782,7 +844,7 @@ function buildKnowledgeTimelineMessage({ post, config, logger = null }) {
       new TextDisplayBuilder().setContent('他にも添付ファイルがあります')
     );
   }
-  for (const row of buildBottomActionRows(post)) {
+  for (const row of buildBottomActionRows(post, { logger, includeDownloadButtons: false })) {
     container.addActionRowComponents(row);
   }
 
