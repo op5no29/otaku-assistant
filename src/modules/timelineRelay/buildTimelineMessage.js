@@ -269,20 +269,7 @@ function addMediaIfPresent(container, post, logger = null) {
   const musicArtworkUrls = socialPreviewMediaUrls.length
     ? []
     : [post.musicLink?.artworkUrl].filter(Boolean);
-  if (socialPreviewMediaUrls.length) {
-    logger?.info?.('relay link preview image selected', {
-      sourceMessageId: post.messageId || null,
-      sourceUrl: post.socialPreview?.sourceUrl || null,
-      imageUrls: socialPreviewMediaUrls
-    });
-    if (isSoundCloudUrl(post.socialPreview?.sourceUrl) || isSoundCloudUrl(post.musicLink?.sourceUrl)) {
-      logger?.info?.('soundcloud preview image selected', {
-        sourceMessageId: post.messageId || null,
-        sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
-        imageUrl: socialPreviewMediaUrls[0] || null
-      });
-    }
-  }
+  const hasPreviewMediaCandidate = Boolean(socialPreviewMediaUrls.length || musicArtworkUrls.length);
   const mediaUrls = [...new Set([
     ...primaryImageUrls,
     post.generatedVideoThumbnailUrl,
@@ -324,7 +311,7 @@ function addMediaIfPresent(container, post, logger = null) {
   });
 
   if (!galleryItems.length) {
-    if (socialPreviewMediaUrls.length || post.musicLink?.artworkUrl) {
+    if (hasPreviewMediaCandidate) {
       logger?.info?.('relay link preview image omitted', {
         sourceMessageId: post.messageId || null,
         sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
@@ -336,6 +323,21 @@ function addMediaIfPresent(container, post, logger = null) {
       });
     }
     return;
+  }
+
+  if (hasPreviewMediaCandidate) {
+    logger?.info?.('relay link preview image selected', {
+      sourceMessageId: post.messageId || null,
+      sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
+      imageUrls: galleryItems.map((item) => item.url)
+    });
+    if (isSoundCloudUrl(post.socialPreview?.sourceUrl) || isSoundCloudUrl(post.musicLink?.sourceUrl)) {
+      logger?.info?.('soundcloud preview image selected', {
+        sourceMessageId: post.messageId || null,
+        sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
+        imageUrl: galleryItems[0]?.url || null
+      });
+    }
   }
 
   const gallery = new MediaGalleryBuilder();

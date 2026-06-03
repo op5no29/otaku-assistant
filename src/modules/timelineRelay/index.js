@@ -168,6 +168,15 @@ function isUsefulExternalRelayUrl(value) {
   return true;
 }
 
+function isYouTubeRelayUrl(value) {
+  try {
+    const host = new URL(String(value || '')).hostname.toLowerCase().replace(/^www\./, '');
+    return host === 'youtu.be' || host.endsWith('youtube.com');
+  } catch {
+    return false;
+  }
+}
+
 function labelRelayLinkButton(url, index, usedLabels) {
   let label = index === 0 ? 'リンク先へ飛ぶ' : `リンク先へ飛ぶ ${index + 1}`;
   try {
@@ -262,8 +271,35 @@ function extractRelayLinkButtons(post, logger = null) {
       label,
       url
     });
+    if (isYouTubeRelayUrl(url)) {
+      logger?.info?.('youtube fallback link button used', {
+        sourceMessageId: post.messageId || null,
+        label,
+        url
+      });
+    }
     return { label, url };
   });
+}
+
+function postHasYouTubeRelayUrl(post) {
+  const textValues = [
+    post?.rawContent,
+    post?.content,
+    post?.body
+  ].filter(Boolean);
+  for (const rawText of textValues) {
+    for (const match of String(rawText).matchAll(URL_TOKEN_PATTERN)) {
+      if (isYouTubeRelayUrl(normalizeRelayButtonUrl(match[0]))) {
+        return true;
+      }
+    }
+  }
+
+  return [
+    post?.socialPreview?.sourceUrl,
+    post?.musicLink?.sourceUrl
+  ].filter(Boolean).some((url) => isYouTubeRelayUrl(url));
 }
 
 function normalizeRoleIds(roleIds = []) {
@@ -541,6 +577,16 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
   const twitterResolved = await resolveTwitterMedia(post, config, logger);
   const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, logger);
   const attachmentPrepared = await prepareAttachmentRelay(videoPrepared.post, config, logger);
+  if (postHasYouTubeRelayUrl(attachmentPrepared.post)) {
+    logger.info('youtube preview strategy selected', {
+      sourceMessageId: attachmentPrepared.post?.messageId || null,
+      strategy: 'components_v2_thumbnail_and_link_button'
+    });
+    logger.info('youtube native embed unavailable with components v2', {
+      sourceMessageId: attachmentPrepared.post?.messageId || null,
+      reason: 'components_v2_messages_cannot_use_content_or_embeds'
+    });
+  }
   if (attachmentPrepared.post?.relayOrigin === 'posthoc_hashtag') {
     const posthocAttachments = Array.isArray(attachmentPrepared.post.attachments)
       ? attachmentPrepared.post.attachments

@@ -78,7 +78,7 @@ async function downloadAttachment(url, outputPath) {
 
 function formatDownloadLabel(attachment, index, total) {
   if (total === 1 && attachment.isVideo) {
-    return '添付動画をダウンロード';
+    return '添付動画を開く';
   }
 
   if (total === 1) {
@@ -104,6 +104,70 @@ function buildAttachmentDisplayLine(attachment) {
 function buildVideoUploadName(index, attachment) {
   const baseName = attachment.uploadFileName || attachment.displayName || attachment.name || `video-${index + 1}.mp4`;
   return attachment.isSpoiler ? ensureSpoilerFileName(baseName) : baseName;
+}
+
+function addVideoMediaGalleryItem({
+  mediaGalleryItems,
+  attachment,
+  url,
+  logger,
+  context,
+  mode
+}) {
+  if (!url) {
+    return false;
+  }
+
+  mediaGalleryItems.push({
+    url,
+    description: attachment.displayName,
+    spoiler: attachment.isSpoiler === true
+  });
+  attachment.playableMediaSucceeded = true;
+  logger.info('relay video playable media selected', {
+    ...context,
+    mode,
+    mediaUrl: url,
+    spoilerPreserved: attachment.isSpoiler === true
+  });
+  logger.info('relay video media gallery item added', {
+    ...context,
+    mode,
+    mediaUrl: url,
+    spoilerPreserved: attachment.isSpoiler === true
+  });
+  if (attachment.isSpoiler) {
+    logger.info('relay video spoiler preserved', {
+      ...context,
+      mode,
+      mediaUrl: url
+    });
+  }
+  return true;
+}
+
+function addDownloadFallback({
+  downloadableAttachments,
+  attachment,
+  index,
+  total,
+  logger,
+  context,
+  reason
+}) {
+  downloadableAttachments.push({
+    name: attachment.displayName,
+    url: attachment.url,
+    label: formatDownloadLabel(attachment, index, total),
+    isVideo: attachment.isVideo
+  });
+  if (attachment.isVideo) {
+    logger.warn('relay video download fallback used', {
+      ...context,
+      fallbackReason: reason,
+      fallbackUrl: attachment.url || null
+    });
+  }
 }
 
 async function prepareAttachmentRelay(post, config, logger) {
@@ -186,10 +250,34 @@ async function prepareAttachmentRelay(post, config, logger) {
       ...context,
       previewableUpload: attachment.isPreviewableUpload
     });
+    if (attachment.isVideo) {
+      logger.info('relay video attachment detected', {
+        ...context,
+        attachmentUrl: attachment.url || null,
+        isSpoiler: attachment.isSpoiler === true
+      });
+    }
 
     if (attachment.size > maxReuploadBytes) {
       attachment.reuploadSkippedReason = 'file_too_large';
       attachment.displayLine = buildAttachmentDisplayLine(attachment);
+      if (attachment.isVideo) {
+        logger.warn('relay video skipped too large', {
+          ...context,
+          maxBytes: maxReuploadBytes,
+          fallbackStrategy: attachment.url ? 'original_url_media_gallery' : 'download_button'
+        });
+        if (addVideoMediaGalleryItem({
+          mediaGalleryItems,
+          attachment,
+          url: attachment.url,
+          logger,
+          context,
+          mode: 'original-url-too-large'
+        })) {
+          continue;
+        }
+      }
       logger.warn('Attachment re-upload skipped; file exceeds size limit', {
         ...context,
         maxBytes: maxReuploadBytes,
@@ -202,17 +290,30 @@ async function prepareAttachmentRelay(post, config, logger) {
           spoilerPreservedByRawPreviewSuppression: true
         });
       }
-      downloadableAttachments.push({
-        name: attachment.displayName,
-        url: attachment.url,
-        label: formatDownloadLabel(attachment, index, nonImageAttachments.length),
-        isVideo: attachment.isVideo
+      addDownloadFallback({
+        downloadableAttachments,
+        attachment,
+        index,
+        total: nonImageAttachments.length,
+        logger,
+        context,
+        reason: 'file_too_large'
       });
       continue;
     }
 
     if (reuploadedCount >= MAX_REUPLOAD_ATTACHMENTS) {
       attachment.reuploadSkippedReason = 'preview_upload_limit_reached';
+      if (attachment.isVideo && addVideoMediaGalleryItem({
+        mediaGalleryItems,
+        attachment,
+        url: attachment.url,
+        logger,
+        context,
+        mode: 'original-url-upload-limit'
+      })) {
+        continue;
+      }
       logger.info('Attachment re-upload skipped; max preview upload count reached', {
         ...context,
         maxCount: MAX_REUPLOAD_ATTACHMENTS,
@@ -225,11 +326,14 @@ async function prepareAttachmentRelay(post, config, logger) {
           spoilerPreservedByRawPreviewSuppression: true
         });
       }
-      downloadableAttachments.push({
-        name: attachment.displayName,
-        url: attachment.url,
-        label: formatDownloadLabel(attachment, index, nonImageAttachments.length),
-        isVideo: attachment.isVideo
+      addDownloadFallback({
+        downloadableAttachments,
+        attachment,
+        index,
+        total: nonImageAttachments.length,
+        logger,
+        context,
+        reason: 'preview_upload_limit_reached'
       });
       continue;
     }
@@ -240,6 +344,9 @@ async function prepareAttachmentRelay(post, config, logger) {
     context.safeTempFileName = tempName;
 
     try {
+      if (attachment.isVideo) {
+        logger.info('relay video attachment reupload started', context);
+      }
       logger.info('Attachment download started', context);
       await downloadAttachment(attachment.url, filePath);
       logger.info('Attachment download finished', context);
@@ -262,10 +369,16 @@ async function prepareAttachmentRelay(post, config, logger) {
           attachment: filePath,
           name: uploadName
         });
-        mediaGalleryItems.push({
+        addVideoMediaGalleryItem({
+          mediaGalleryItems,
+          attachment,
           url: attachmentUrl,
-          description: attachment.displayName,
-          spoiler: attachment.isSpoiler === true
+          logger,
+          context: {
+            ...context,
+            uploadFileName: uploadName
+          },
+          mode: 'attachment-upload'
         });
         logger.info('media gallery spoiler item', {
           ...context,
@@ -277,6 +390,11 @@ async function prepareAttachmentRelay(post, config, logger) {
           ...context,
           mode: 'media-gallery',
           displayFileName: attachment.displayName,
+          uploadFileName: uploadName,
+          attachmentUrl
+        });
+        logger.info('relay video attachment reuploaded', {
+          ...context,
           uploadFileName: uploadName,
           attachmentUrl
         });
@@ -367,6 +485,24 @@ async function prepareAttachmentRelay(post, config, logger) {
         error: error.message,
         fallbackReason: 'download_or_upload_failed'
       });
+      if (attachment.isVideo) {
+        logger.warn('relay video relay failed', {
+          ...context,
+          error: error.message,
+          fallbackStrategy: attachment.url ? 'original_url_media_gallery' : 'download_button'
+        });
+        if (addVideoMediaGalleryItem({
+          mediaGalleryItems,
+          attachment,
+          url: attachment.url,
+          logger,
+          context,
+          mode: 'original-url-reupload-failed'
+        })) {
+          await removeFile(filePath, logger, context);
+          continue;
+        }
+      }
       if (attachment.isSpoiler) {
         logger.warn('spoiler attachment relay failed', {
           ...context,
@@ -389,17 +525,20 @@ async function prepareAttachmentRelay(post, config, logger) {
       attachment.reuploadSkippedReason = 'upload_failed';
       attachment.displayLine = buildAttachmentDisplayLine(attachment);
       await removeFile(filePath, logger, context);
-      downloadableAttachments.push({
-        name: attachment.displayName,
-        url: attachment.url,
-        label: formatDownloadLabel(attachment, index, nonImageAttachments.length),
-        isVideo: attachment.isVideo
+      addDownloadFallback({
+        downloadableAttachments,
+        attachment,
+        index,
+        total: nonImageAttachments.length,
+        logger,
+        context,
+        reason: 'download_or_upload_failed'
       });
     }
   }
 
   for (const [index, attachment] of nonImageAttachments.entries()) {
-    if (attachment.reuploadSucceeded && attachment.isVideo) {
+    if ((attachment.reuploadSucceeded || attachment.playableMediaSucceeded) && attachment.isVideo) {
       continue;
     }
 
