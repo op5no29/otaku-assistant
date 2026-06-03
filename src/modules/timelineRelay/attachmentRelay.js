@@ -567,6 +567,14 @@ async function prepareAttachmentRelay(post, config, logger) {
   const hasPlayableVideo = normalizedAttachments.some(
     (attachment) => attachment.isVideo && attachment.playableMediaSucceeded
   );
+  const shouldSuppressGeneratedVideoThumbnail = Boolean((hasReuploadedVideo || hasPlayableVideo) && post.generatedVideoThumbnailUrl);
+  if (shouldSuppressGeneratedVideoThumbnail) {
+    logger.info('uploaded video static thumbnail suppressed', {
+      sourceMessageId: post.messageId || null,
+      thumbnailUrl: post.generatedVideoThumbnailUrl,
+      source_type: 'uploaded_video_thumbnail_static'
+    });
+  }
 
   return {
     post: {
@@ -589,7 +597,7 @@ async function prepareAttachmentRelay(post, config, logger) {
       fileComponentUrls,
       downloadableAttachments,
       hasMoreDownloadableAttachments: downloadableAttachments.length > MAX_DOWNLOAD_BUTTONS,
-      generatedVideoThumbnailUrl: hasReuploadedVideo || hasPlayableVideo ? null : post.generatedVideoThumbnailUrl,
+      generatedVideoThumbnailUrl: shouldSuppressGeneratedVideoThumbnail ? null : post.generatedVideoThumbnailUrl,
       mediaGalleryItems
     },
     cleanup: async () => {

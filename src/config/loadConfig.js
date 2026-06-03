@@ -180,6 +180,24 @@ function ensureIntroDmConfig(value, introChannelId = '') {
   };
 }
 
+function ensureIntroAddendumsConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      enabled: true,
+      maxMessages: 500,
+      lookbackDays: 90,
+      addReaction: true
+    };
+  }
+
+  return {
+    enabled: value.enabled !== false,
+    maxMessages: Math.max(1, Math.min(Number(value.maxMessages ?? 500), 2000)),
+    lookbackDays: Math.max(1, Number(value.lookbackDays ?? 90)),
+    addReaction: value.addReaction !== false
+  };
+}
+
 function ensureWelcomeDmConfig(value, fallbackLogChannelId = '') {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
@@ -443,6 +461,7 @@ function loadConfig(configPath) {
     },
     questionRolePrompt: ensureQuestionRolePromptConfig(parsed.questionRolePrompt),
     posthocRelay: ensurePosthocRelayConfig(parsed.posthocRelay),
+    introAddendums: ensureIntroAddendumsConfig(parsed.introAddendums),
     introDm: ensureIntroDmConfig(parsed.introDm, parsed.introChannelId),
     welcomeDm: ensureWelcomeDmConfig(parsed.welcomeDm, parsed.ops?.logChannelId || ''),
     anime: ensureAnimeConfig(parsed.anime),

@@ -98,8 +98,25 @@ function hasUploadedMediaAttachments(post) {
   );
 }
 
+function hasUploadedVideoAttachments(post) {
+  const attachments = Array.isArray(post.attachments) ? post.attachments : [];
+  return attachments.some((attachment) =>
+    attachment?.isVideo === true ||
+    String(attachment?.contentType || '').startsWith('video/')
+  );
+}
+
 function isYouTubePreviewMediaUrl(url) {
   return /(?:youtube\.com|youtu\.be|ytimg\.com|googlevideo\.com)/i.test(String(url || ''));
+}
+
+function isYouTubeSourceUrl(url) {
+  try {
+    const host = new URL(String(url || '')).hostname.toLowerCase().replace(/^www\./, '');
+    return host === 'youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com');
+  } catch {
+    return false;
+  }
 }
 
 function getAttachmentSourceForUrl(post, url) {
@@ -118,13 +135,13 @@ function getAttachmentSourceForUrl(post, url) {
   });
 
   if (matchedAttachment?.isVideo) {
-    return 'uploaded_video';
+    return 'uploaded_video_playable';
   }
   if (matchedAttachment?.isImage || matchedAttachment?.isGif) {
     return 'uploaded_image';
   }
   if (/\.(mp4|webm|mov|m4v)(?:[?#].*)?$/i.test(value)) {
-    return 'uploaded_video';
+    return 'uploaded_video_playable';
   }
   if (/\.(png|jpe?g|webp|gif)(?:[?#].*)?$/i.test(value)) {
     return 'uploaded_image';
@@ -296,6 +313,7 @@ function buildMediaGalleryItem(item, logger = null, context = {}) {
 function addMediaIfPresent(container, post, logger = null) {
   const sourceMessageId = post.messageId || null;
   const uploadedMediaPresent = hasUploadedMediaAttachments(post);
+  const uploadedVideoPresent = hasUploadedVideoAttachments(post);
   const explicitMediaGalleryItems = Array.isArray(post.mediaGalleryItems)
     ? post.mediaGalleryItems
       .filter((item) => item?.url)
@@ -334,42 +352,83 @@ function addMediaIfPresent(container, post, logger = null) {
     .filter(Boolean)
     .map((url) => ({
       url,
-      source: 'uploaded_video_thumbnail'
+      source: 'uploaded_video_thumbnail_static'
     }));
   const linkPreviewItems = [...socialPreviewMediaUrls, ...musicArtworkUrls]
     .filter(Boolean)
     .map((url) => ({
       url,
-      source: 'link_preview'
+      source: isYouTubePreviewMediaUrl(url) ? 'youtube_thumbnail' : 'link_preview'
     }));
+  if (
+    post.musicLink &&
+    post.socialPreview?.description &&
+    isYouTubeSourceUrl(post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl)
+  ) {
+    logger?.info?.('youtube description suppressed', {
+      sourceMessageId,
+      sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null
+    });
+  }
   const hasPreviewMediaCandidate = Boolean(linkPreviewItems.length);
-  const activeLinkPreviewItems = uploadedMediaPresent ? [] : linkPreviewItems;
-  if (uploadedMediaPresent && linkPreviewItems.length) {
+  const activeGeneratedVideoThumbnailItems = uploadedVideoPresent ? [] : generatedVideoThumbnailItems;
+  if (uploadedVideoPresent && generatedVideoThumbnailItems.length) {
+    logger?.info?.('uploaded video static thumbnail suppressed', {
+      sourceMessageId,
+      suppressedUrls: generatedVideoThumbnailItems.map((item) => item.url),
+      source_type: 'uploaded_video_thumbnail_static'
+    });
+  }
+  const activeLinkPreviewItems = uploadedMediaPresent
+    ? linkPreviewItems.filter((item) => uploadedVideoPresent && item.source === 'youtube_thumbnail')
+    : linkPreviewItems;
+  const suppressedLinkPreviewItems = linkPreviewItems.filter(
+    (item) => !activeLinkPreviewItems.includes(item)
+  );
+  if (uploadedVideoPresent && activeLinkPreviewItems.some((item) => item.source === 'youtube_thumbnail')) {
+    logger?.info?.('youtube thumbnail retained with uploaded video', {
+      sourceMessageId,
+      retainedUrls: activeLinkPreviewItems
+        .filter((item) => item.source === 'youtube_thumbnail')
+        .map((item) => item.url),
+      source_type: 'youtube_thumbnail'
+    });
+  }
+  if (uploadedMediaPresent && suppressedLinkPreviewItems.length) {
     logger?.info?.('relay uploaded media present; suppressing link preview media', {
       sourceMessageId,
-      suppressedCount: linkPreviewItems.length,
-      suppressedUrls: linkPreviewItems.map((item) => item.url)
+      suppressedCount: suppressedLinkPreviewItems.length,
+      suppressedUrls: suppressedLinkPreviewItems.map((item) => item.url)
     });
-    if (linkPreviewItems.some((item) => isYouTubePreviewMediaUrl(item.url))) {
+    if (suppressedLinkPreviewItems.some((item) => item.source === 'youtube_thumbnail')) {
       logger?.info?.('youtube thumbnail suppressed due to uploaded media', {
         sourceMessageId,
-        suppressedUrls: linkPreviewItems
-          .filter((item) => isYouTubePreviewMediaUrl(item.url))
+        suppressedUrls: suppressedLinkPreviewItems
+          .filter((item) => item.source === 'youtube_thumbnail')
           .map((item) => item.url)
       });
     }
     logger?.info?.('link preview media suppressed due to attachment priority', {
       sourceMessageId,
-      suppressedUrls: linkPreviewItems.map((item) => item.url)
+      suppressedUrls: suppressedLinkPreviewItems.map((item) => item.url)
     });
   }
-  const galleryItems = [
-    ...explicitMediaGalleryItems,
-    ...customEmojiMediaItems,
-    ...uploadedImageItems,
-    ...generatedVideoThumbnailItems,
-    ...activeLinkPreviewItems
-  ].filter((item, index, array) => {
+  const galleryItemCandidates = uploadedVideoPresent
+    ? [
+      ...activeLinkPreviewItems,
+      ...explicitMediaGalleryItems,
+      ...customEmojiMediaItems,
+      ...uploadedImageItems,
+      ...activeGeneratedVideoThumbnailItems
+    ]
+    : [
+      ...explicitMediaGalleryItems,
+      ...customEmojiMediaItems,
+      ...uploadedImageItems,
+      ...activeGeneratedVideoThumbnailItems,
+      ...activeLinkPreviewItems
+    ];
+  const galleryItems = galleryItemCandidates.filter((item, index, array) => {
     if (!item.url) {
       return false;
     }
@@ -414,13 +473,24 @@ function addMediaIfPresent(container, post, logger = null) {
     return;
   }
 
-  const selectedLinkPreviewItems = galleryItems.filter((item) => item.source === 'link_preview');
+  const selectedLinkPreviewItems = galleryItems.filter(
+    (item) => item.source === 'link_preview' || item.source === 'youtube_thumbnail'
+  );
   if (selectedLinkPreviewItems.length) {
     logger?.info?.('relay link preview image selected', {
       sourceMessageId,
       sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
-      imageUrls: selectedLinkPreviewItems.map((item) => item.url)
+      imageUrls: selectedLinkPreviewItems.map((item) => item.url),
+      sourceTypes: selectedLinkPreviewItems.map((item) => item.source || 'unknown')
     });
+    if (selectedLinkPreviewItems.some((item) => item.source === 'youtube_thumbnail')) {
+      logger?.info?.('youtube thumbnail selected', {
+        sourceMessageId,
+        sourceUrl: post.socialPreview?.sourceUrl || post.musicLink?.sourceUrl || null,
+        imageUrl: selectedLinkPreviewItems.find((item) => item.source === 'youtube_thumbnail')?.url || null,
+        source_type: 'youtube_thumbnail'
+      });
+    }
     if (isSoundCloudUrl(post.socialPreview?.sourceUrl) || isSoundCloudUrl(post.musicLink?.sourceUrl)) {
       logger?.info?.('soundcloud preview image selected', {
         sourceMessageId,
@@ -435,7 +505,8 @@ function addMediaIfPresent(container, post, logger = null) {
     items: galleryItems.map((item, index) => ({
       index,
       url: item.url,
-      source: item.source || 'unknown'
+      source: item.source || 'unknown',
+      source_type: item.source || 'unknown'
     }))
   });
 
@@ -447,8 +518,17 @@ function addMediaIfPresent(container, post, logger = null) {
       sourceMessageId,
       index,
       mediaUrl: item.url,
-      source: item.source || 'unknown'
+      source: item.source || 'unknown',
+      source_type: item.source || 'unknown'
     });
+    if (item.source === 'uploaded_video_playable') {
+      logger?.info?.('uploaded video playable item retained', {
+        sourceMessageId,
+        index,
+        mediaUrl: item.url,
+        source_type: 'uploaded_video_playable'
+      });
+    }
     gallery.addItems(buildMediaGalleryItem(item, logger, {
       sourceMessageId
     }));
@@ -566,6 +646,7 @@ function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls =
   const logger = options.logger || null;
   const sourceMessageId = options.sourceMessageId || null;
   const suppressMedia = options.suppressMedia === true;
+  const isYouTubePreview = isYouTubeSourceUrl(socialPreview.sourceUrl);
 
   const previewMediaUrls = Array.isArray(socialPreview.mediaUrls) && socialPreview.mediaUrls.length
     ? socialPreview.mediaUrls
@@ -610,7 +691,25 @@ function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls =
     if (dedupedPreviewImages.length) {
       const gallery = new MediaGalleryBuilder();
 
-      for (const mediaUrl of dedupedPreviewImages.slice(0, MAX_MEDIA_ITEMS)) {
+      const limitedImages = dedupedPreviewImages.slice(0, MAX_MEDIA_ITEMS);
+      logger?.info?.('media gallery final item order', {
+        sourceMessageId,
+        items: limitedImages.map((mediaUrl, index) => ({
+          index,
+          url: mediaUrl,
+          source: isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview',
+          source_type: isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview'
+        }))
+      });
+      for (const [index, mediaUrl] of limitedImages.entries()) {
+        const sourceType = isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview';
+        logger?.info?.('media gallery item source', {
+          sourceMessageId,
+          index,
+          mediaUrl,
+          source: sourceType,
+          source_type: sourceType
+        });
         gallery.addItems(new MediaGalleryItemBuilder().setURL(mediaUrl));
       }
 
@@ -626,7 +725,12 @@ function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls =
     lines.push(`**${socialPreview.title}**`);
   }
 
-  if (socialPreview.description) {
+  if (socialPreview.description && isYouTubePreview) {
+    logger?.info?.('youtube description suppressed', {
+      sourceMessageId,
+      sourceUrl: socialPreview.sourceUrl || null
+    });
+  } else if (socialPreview.description) {
     lines.push(truncateText(socialPreview.description, 240));
   }
 
@@ -664,7 +768,25 @@ function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls =
   if (dedupedPreviewImages.length) {
     const gallery = new MediaGalleryBuilder();
 
-    for (const mediaUrl of dedupedPreviewImages.slice(0, MAX_MEDIA_ITEMS)) {
+    const limitedImages = dedupedPreviewImages.slice(0, MAX_MEDIA_ITEMS);
+    logger?.info?.('media gallery final item order', {
+      sourceMessageId,
+      items: limitedImages.map((mediaUrl, index) => ({
+        index,
+        url: mediaUrl,
+        source: isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview',
+        source_type: isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview'
+      }))
+    });
+    for (const [index, mediaUrl] of limitedImages.entries()) {
+      const sourceType = isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview';
+      logger?.info?.('media gallery item source', {
+        sourceMessageId,
+        index,
+        mediaUrl,
+        source: sourceType,
+        source_type: sourceType
+      });
       gallery.addItems(new MediaGalleryItemBuilder().setURL(mediaUrl));
     }
 
@@ -813,6 +935,7 @@ function buildTweetTimelineMessage({ post, config, logger = null }) {
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
   const body = formatPrimaryTweetBody(trimmedContent);
   const uploadedMediaPresent = hasUploadedMediaAttachments(post);
+  const uploadedVideoPresent = hasUploadedVideoAttachments(post);
   const primaryMediaUrls = [...new Set([
     ...(Array.isArray(post.imageUrls) ? post.imageUrls : []),
     post.firstImageUrl,
@@ -852,7 +975,7 @@ function buildTweetTimelineMessage({ post, config, logger = null }) {
       {
         logger,
         sourceMessageId: post.messageId || null,
-        suppressMedia: uploadedMediaPresent
+        suppressMedia: uploadedMediaPresent && !(uploadedVideoPresent && isYouTubeSourceUrl(post.socialPreview?.sourceUrl))
       }
     );
   }
@@ -880,6 +1003,7 @@ function buildQuestionTimelineMessage({ post, config, logger = null }) {
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
   const body = trimmedContent || null;
   const uploadedMediaPresent = hasUploadedMediaAttachments(post);
+  const uploadedVideoPresent = hasUploadedVideoAttachments(post);
   const questionTitle = post.title?.trim() || 'タイトルなし';
   const statusLabel = post.isResolved ? '解決済み' : '受付中';
   const attachmentNamesBlock = buildAttachmentFileNameBlock(post);
@@ -937,7 +1061,7 @@ function buildQuestionTimelineMessage({ post, config, logger = null }) {
     {
       logger,
       sourceMessageId: post.messageId || null,
-      suppressMedia: uploadedMediaPresent
+      suppressMedia: uploadedMediaPresent && !(uploadedVideoPresent && isYouTubeSourceUrl(post.socialPreview?.sourceUrl))
     }
   );
   addFileComponentsIfPresent(container, post, logger);
@@ -963,6 +1087,7 @@ function buildKnowledgeTimelineMessage({ post, config, logger = null }) {
   const trimmedContent = truncateText(post.content || '', config.timeline.maxContentLength)?.trim();
   const body = trimmedContent || null;
   const uploadedMediaPresent = hasUploadedMediaAttachments(post);
+  const uploadedVideoPresent = hasUploadedVideoAttachments(post);
   const title = post.title?.trim() || 'タイトルなし';
   const tagLine = Array.isArray(post.knowledgeTagLabels) && post.knowledgeTagLabels.length
     ? post.knowledgeTagLabels.join(' / ')
@@ -1009,7 +1134,7 @@ function buildKnowledgeTimelineMessage({ post, config, logger = null }) {
   addSocialPreviewIfPresent(container, post.socialPreview, primaryMediaUrls, {
     logger,
     sourceMessageId: post.messageId || null,
-    suppressMedia: uploadedMediaPresent
+    suppressMedia: uploadedMediaPresent && !(uploadedVideoPresent && isYouTubeSourceUrl(post.socialPreview?.sourceUrl))
   });
   addFileComponentsIfPresent(container, post, logger);
   if (post.hasMoreDownloadableAttachments) {

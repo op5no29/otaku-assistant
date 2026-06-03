@@ -1207,6 +1207,116 @@ function createDatabase(databasePath) {
       ORDER BY datetime(COALESCE(updated_at, posted_at)) DESC, intro_message_id DESC
       LIMIT ?
     `),
+    getIntroProfileByMessageId: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        intro_channel_id AS introChannelId,
+        intro_message_id AS introMessageId,
+        display_name AS displayName,
+        username,
+        global_name AS globalName,
+        nickname,
+        intro_text AS introText,
+        links_json AS linksJson,
+        embeds_json AS embedsJson,
+        attachments_json AS attachmentsJson,
+        search_aliases_json AS searchAliasesJson,
+        posted_at AS postedAt,
+        updated_at AS updatedAt,
+        archived_at AS archivedAt
+      FROM intro_profiles
+      WHERE intro_message_id = ?
+      LIMIT 1
+    `),
+    upsertIntroProfileAddendum: sqlite.prepare(`
+      INSERT INTO intro_profile_addendums (
+        guild_id,
+        user_id,
+        addendum_message_id,
+        channel_id,
+        target_intro_message_id,
+        absorbed_text,
+        absorbed_urls_json,
+        status,
+        created_at,
+        updated_at,
+        removed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, addendum_message_id) DO UPDATE SET
+        user_id = excluded.user_id,
+        channel_id = excluded.channel_id,
+        target_intro_message_id = excluded.target_intro_message_id,
+        absorbed_text = excluded.absorbed_text,
+        absorbed_urls_json = excluded.absorbed_urls_json,
+        status = excluded.status,
+        updated_at = excluded.updated_at,
+        removed_at = excluded.removed_at
+    `),
+    getIntroProfileAddendum: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        addendum_message_id AS addendumMessageId,
+        channel_id AS channelId,
+        target_intro_message_id AS targetIntroMessageId,
+        absorbed_text AS absorbedText,
+        absorbed_urls_json AS absorbedUrlsJson,
+        status,
+        created_at AS createdAt,
+        updated_at AS updatedAt,
+        removed_at AS removedAt
+      FROM intro_profile_addendums
+      WHERE guild_id = ? AND addendum_message_id = ?
+      LIMIT 1
+    `),
+    listActiveIntroProfileAddendumsForProfile: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        addendum_message_id AS addendumMessageId,
+        channel_id AS channelId,
+        target_intro_message_id AS targetIntroMessageId,
+        absorbed_text AS absorbedText,
+        absorbed_urls_json AS absorbedUrlsJson,
+        status,
+        created_at AS createdAt,
+        updated_at AS updatedAt,
+        removed_at AS removedAt
+      FROM intro_profile_addendums
+      WHERE guild_id = ?
+        AND user_id = ?
+        AND target_intro_message_id = ?
+        AND status = 'active'
+      ORDER BY datetime(created_at) ASC, addendum_message_id ASC
+    `),
+    listActiveIntroProfileAddendumsByChannel: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        addendum_message_id AS addendumMessageId,
+        channel_id AS channelId,
+        target_intro_message_id AS targetIntroMessageId,
+        absorbed_text AS absorbedText,
+        absorbed_urls_json AS absorbedUrlsJson,
+        status,
+        created_at AS createdAt,
+        updated_at AS updatedAt,
+        removed_at AS removedAt
+      FROM intro_profile_addendums
+      WHERE guild_id = ?
+        AND channel_id = ?
+        AND status = 'active'
+      ORDER BY datetime(created_at) ASC, addendum_message_id ASC
+      LIMIT ?
+    `),
+    markIntroProfileAddendumStatus: sqlite.prepare(`
+      UPDATE intro_profile_addendums
+      SET status = ?,
+          updated_at = ?,
+          removed_at = ?
+      WHERE guild_id = ? AND addendum_message_id = ?
+    `),
     upsertGuildMember: sqlite.prepare(`
       INSERT INTO guild_members (
         guild_id,
@@ -2248,6 +2358,70 @@ function createDatabase(databasePath) {
     `)
   };
 
+  function parseJsonArray(value) {
+    try {
+      const parsed = JSON.parse(value || '[]');
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function extractUrls(text) {
+    return Array.from(String(text || '').matchAll(/https?:\/\/[^\s>]+/giu))
+      .map((match) => String(match[0] || '').replace(/[.,、。!?！？;；]+$/u, ''))
+      .filter(Boolean);
+  }
+
+  function stripLegacyIntroAddendumSection(introText) {
+    const text = String(introText || '').trim();
+    if (!text) {
+      return '';
+    }
+
+    const lines = text.split(/\r?\n/u);
+    const index = lines.findIndex((line) => /^SNS\s*\/\s*Links\s*:\s*$/iu.test(String(line || '').trim()));
+    if (index < 0) {
+      return text;
+    }
+
+    return lines.slice(0, index).join('\n').trim();
+  }
+
+  function renderIntroProfileRow(row) {
+    if (!row) {
+      return null;
+    }
+
+    const baseIntroText = stripLegacyIntroAddendumSection(row.introText);
+    const addendums = statements.listActiveIntroProfileAddendumsForProfile.all(
+      row.guildId,
+      row.userId,
+      row.introMessageId
+    );
+    const addendumTexts = addendums
+      .map((entry) => String(entry.absorbedText || '').trim())
+      .filter(Boolean);
+    const renderedIntroText = [baseIntroText, ...addendumTexts]
+      .filter(Boolean)
+      .join('\n\n');
+
+    const mergedLinks = [
+      ...extractUrls(baseIntroText),
+      ...addendums.flatMap((entry) => parseJsonArray(entry.absorbedUrlsJson))
+    ].filter(Boolean);
+
+    return {
+      ...row,
+      introText: renderedIntroText,
+      linksJson: JSON.stringify([...new Set(mergedLinks)])
+    };
+  }
+
+  function renderIntroProfileRows(rows) {
+    return rows.map(renderIntroProfileRow).filter(Boolean);
+  }
+
   return {
     sqlite,
     relays: {
@@ -2823,15 +2997,18 @@ function createDatabase(databasePath) {
       deleteByChannel(guildId, introChannelId) {
         statements.deleteIntroProfilesByChannel.run(guildId, introChannelId);
       },
+      getByMessageId(messageId) {
+        return renderIntroProfileRow(statements.getIntroProfileByMessageId.get(messageId) || null);
+      },
       getLatestByUser(guildId, userId, introChannelId) {
-        return statements.getLatestIntroProfileByUser.get(guildId, userId, introChannelId) || null;
+        return renderIntroProfileRow(statements.getLatestIntroProfileByUser.get(guildId, userId, introChannelId) || null);
       },
       listByUser(guildId, userId, introChannelId) {
-        return statements.listIntroProfilesByUser.all(guildId, userId, introChannelId);
+        return renderIntroProfileRows(statements.listIntroProfilesByUser.all(guildId, userId, introChannelId));
       },
       search(guildId, introChannelId, query, limit) {
         const like = `%${String(query || '').toLowerCase()}%`;
-        return statements.searchIntroProfiles.all(guildId, introChannelId, like, like, like, like, like, limit);
+        return renderIntroProfileRows(statements.searchIntroProfiles.all(guildId, introChannelId, like, like, like, like, like, limit));
       },
       count(guildId, introChannelId) {
         return Number(statements.countIntroProfiles.get(guildId, introChannelId)?.count || 0);
@@ -2840,7 +3017,47 @@ function createDatabase(databasePath) {
         return statements.getLatestIntroProfileDate.get(guildId, introChannelId)?.latestDate || null;
       },
       listByChannel(guildId, introChannelId, limit = 1000) {
-        return statements.listIntroProfilesByChannel.all(guildId, introChannelId, limit);
+        return renderIntroProfileRows(statements.listIntroProfilesByChannel.all(guildId, introChannelId, limit));
+      }
+    },
+    introProfileAddendums: {
+      upsert(record) {
+        const now = new Date().toISOString();
+        statements.upsertIntroProfileAddendum.run(
+          record.guildId,
+          record.userId,
+          record.addendumMessageId,
+          record.channelId,
+          record.targetIntroMessageId,
+          record.absorbedText,
+          record.absorbedUrlsJson,
+          record.status || 'active',
+          record.createdAt || now,
+          record.updatedAt || now,
+          record.removedAt || null
+        );
+      },
+      get(guildId, addendumMessageId) {
+        return statements.getIntroProfileAddendum.get(guildId, addendumMessageId) || null;
+      },
+      listActiveForProfile(guildId, userId, targetIntroMessageId) {
+        return statements.listActiveIntroProfileAddendumsForProfile.all(
+          guildId,
+          userId,
+          targetIntroMessageId
+        );
+      },
+      listActiveByChannel(guildId, channelId, limit = 2000) {
+        return statements.listActiveIntroProfileAddendumsByChannel.all(guildId, channelId, limit);
+      },
+      markStatus(guildId, addendumMessageId, status, removedAt = null) {
+        return statements.markIntroProfileAddendumStatus.run(
+          status,
+          new Date().toISOString(),
+          removedAt,
+          guildId,
+          addendumMessageId
+        ).changes;
       }
     },
     introReactions: {

@@ -269,6 +269,26 @@ function runMigrations(database) {
     CREATE INDEX IF NOT EXISTS idx_intro_profiles_guild_username
       ON intro_profiles (guild_id, username);
 
+    CREATE TABLE IF NOT EXISTS intro_profile_addendums (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      addendum_message_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      target_intro_message_id TEXT NOT NULL,
+      absorbed_text TEXT NOT NULL,
+      absorbed_urls_json TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      removed_at TEXT,
+      PRIMARY KEY (guild_id, addendum_message_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_intro_profile_addendums_target
+      ON intro_profile_addendums (guild_id, user_id, target_intro_message_id, status);
+    CREATE INDEX IF NOT EXISTS idx_intro_profile_addendums_channel
+      ON intro_profile_addendums (guild_id, channel_id, status);
+
     CREATE TABLE IF NOT EXISTS guild_members (
       guild_id TEXT NOT NULL,
       user_id TEXT NOT NULL,

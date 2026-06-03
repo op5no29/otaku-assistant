@@ -10,11 +10,18 @@ const { startIntroDmQueueProcessor } = require('../modules/introDm');
 const { runAnimeOrphanScan } = require('../modules/anime');
 const { getAnnictAccessToken } = require('../modules/anime/annictClient');
 const { startQuestionRolePromptTimeouts } = require('../modules/timelineRelay');
+const { backfillIntroAddendums } = require('../modules/introProfiles');
 
 module.exports = {
   async execute(client) {
     client.db.deletableMessages.deleteExpired();
     await initializeVoiceProfileMappings(client);
+    await backfillIntroAddendums(client, process.env.GUILD_ID).catch((error) => {
+      client.logger.error('intro addendum backfill failed', {
+        guildId: process.env.GUILD_ID,
+        error: error.message
+      });
+    });
     await rebuildVoiceProfileState(client, { reason: 'ready_resync' });
     startVoiceProfileReconciliation(client);
     startQuestionRolePromptTimeouts(client);

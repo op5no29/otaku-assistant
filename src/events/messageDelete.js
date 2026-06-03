@@ -8,13 +8,23 @@ module.exports = {
 
     try {
       client.db.archives.deleteMessage(messageId);
-      client.db.introProfiles.deleteByMessageId(messageId);
       client.logger.info('Message archive deleted', {
         messageId,
         channelId: message.channelId || null
       });
     } catch (error) {
       client.logger.error('delete archive failed', {
+        messageId,
+        channelId: message.channelId || null,
+        error: error.message
+      });
+    }
+
+    try {
+      const { handleIntroProfileMessageDeleted } = require('../modules/introProfiles');
+      await handleIntroProfileMessageDeleted(client, message);
+    } catch (error) {
+      client.logger.error('intro profile delete sync failed', {
         messageId,
         channelId: message.channelId || null,
         error: error.message

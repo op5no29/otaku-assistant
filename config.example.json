@@ -129,6 +129,12 @@
       "323041740963446785"
     ]
   },
+  "introAddendums": {
+    "enabled": true,
+    "maxMessages": 500,
+    "lookbackDays": 90,
+    "addReaction": true
+  },
   "introDm": {
     "enabled": false,
     "devTestMode": false,

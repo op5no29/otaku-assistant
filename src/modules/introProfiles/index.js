@@ -74,37 +74,8 @@ function isLinkFocusedIntroAddendum(content, urls) {
   return nonUrlCharCount <= 80 && totalCharCount <= 400;
 }
 
-function buildAddendumLines(content, newUrls) {
-  const newUrlSet = new Set(newUrls);
-  const lines = String(content || '')
-    .split(/\r?\n/gu)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .filter((line) => extractUrls(line).some((url) => newUrlSet.has(url)));
-
-  if (lines.length) {
-    return lines;
-  }
-
-  return newUrls;
-}
-
-function appendIntroAddendumText(existingIntroText, addendumLines) {
-  const baseText = String(existingIntroText || '').trim();
-  const addendumText = addendumLines.join('\n').trim();
-  if (!addendumText) {
-    return baseText;
-  }
-
-  if (!baseText) {
-    return `SNS / Links:\n${addendumText}`;
-  }
-
-  if (/SNS\s*\/\s*Links\s*:/iu.test(baseText)) {
-    return `${baseText}\n${addendumText}`;
-  }
-
-  return `${baseText}\n\nSNS / Links:\n${addendumText}`;
+function normalizeAddendumText(content) {
+  return String(content || '').trim();
 }
 
 function buildSearchAliasesFromIdentity(identity, links) {
@@ -208,21 +179,21 @@ function buildIntroProfileRecord(client, message) {
   };
 }
 
-async function refreshVcProfilesForIntroUser(client, message, reason) {
-  const guild = message.guild || (message.guildId ? await client.guilds.fetch(message.guildId).catch(() => null) : null);
+async function refreshVcProfilesForIntroUserId(client, guildId, userId, reason, introMessageId = null) {
+  const guild = guildId ? await client.guilds.fetch(guildId).catch(() => null) : null;
   if (!guild) {
     return 0;
   }
 
   try {
     const { queueVoiceProfileRefreshForUser } = require('../vcProfile');
-    const queuedCount = await queueVoiceProfileRefreshForUser(client, guild, message.author.id, { reason });
+    const queuedCount = await queueVoiceProfileRefreshForUser(client, guild, userId, { reason });
     if (queuedCount > 0) {
       if (reason === 'intro_profile_edit') {
         client.logger.info('intro profile edit refresh queued', {
-          guildId: message.guildId || guild.id,
-          userId: message.author.id,
-          introMessageId: message.id,
+          guildId: guildId || guild.id,
+          userId,
+          introMessageId,
           queuedCount
         });
       }
@@ -233,9 +204,9 @@ async function refreshVcProfilesForIntroUser(client, message, reason) {
             ? 'vc profile refresh queued due intro edit'
             : 'vc profile refresh queued due intro profile update',
         {
-          guildId: message.guildId || guild.id,
-          userId: message.author.id,
-          introMessageId: message.id,
+          guildId: guildId || guild.id,
+          userId,
+          introMessageId,
           queuedCount
         }
       );
@@ -243,14 +214,24 @@ async function refreshVcProfilesForIntroUser(client, message, reason) {
     return queuedCount;
   } catch (error) {
     client.logger.warn('vc profile refresh queue failed after intro profile update', {
-      guildId: message.guildId || guild.id,
-      userId: message.author.id,
-      introMessageId: message.id,
+      guildId: guildId || guild.id,
+      userId,
+      introMessageId,
       reason,
       error: error.message
     });
     return 0;
   }
+}
+
+async function refreshVcProfilesForIntroUser(client, message, reason) {
+  return refreshVcProfilesForIntroUserId(
+    client,
+    message.guildId,
+    message.author.id,
+    reason,
+    message.id
+  );
 }
 
 async function reactToAbsorbedAddendum(client, message) {
@@ -273,13 +254,16 @@ async function reactToAbsorbedAddendum(client, message) {
   }
 }
 
-async function maybeAbsorbIntroAddendum(client, message, existingProfile) {
+async function maybeAbsorbIntroAddendum(client, message, existingProfile, options = {}) {
+  const source = options.source || 'live';
+  const existingAddendum = client.db.introProfileAddendums.get(message.guildId, message.id);
   const rawUrls = extractUrls(message.content || '').filter(isUsefulIntroProfileUrl);
   client.logger.info('intro addendum candidate detected', {
     guildId: message.guildId,
     userId: message.author.id,
     introMessageId: message.id,
     currentIntroMessageId: existingProfile?.introMessageId || null,
+    existingAddendumStatus: existingAddendum?.status || null,
     urlCount: rawUrls.length,
     nonUrlCharCount: countLinkFocusedNonUrlChars(message.content || '')
   });
@@ -297,6 +281,35 @@ async function maybeAbsorbIntroAddendum(client, message, existingProfile) {
   }
 
   if (!isLinkFocusedIntroAddendum(message.content || '', rawUrls)) {
+    if (existingAddendum?.status === 'active') {
+      client.db.introProfileAddendums.markStatus(
+        message.guildId,
+        message.id,
+        'removed',
+        new Date().toISOString()
+      );
+      client.logger.info('intro addendum removed after edit no longer qualifies', {
+        guildId: message.guildId,
+        userId: message.author.id,
+        addendumMessageId: message.id,
+        targetIntroMessageId: existingAddendum.targetIntroMessageId
+      });
+      await refreshVcProfilesForIntroUserId(
+        client,
+        message.guildId,
+        message.author.id,
+        'intro_addendum_edit_removed',
+        existingAddendum.targetIntroMessageId
+      );
+      return {
+        absorbed: true,
+        removedAddendum: true,
+        skippedReason: null,
+        introMessageId: existingAddendum.targetIntroMessageId,
+        addedUrls: []
+      };
+    }
+
     client.logger.info('intro addendum skipped not link focused', {
       guildId: message.guildId,
       userId: message.author.id,
@@ -312,11 +325,71 @@ async function maybeAbsorbIntroAddendum(client, message, existingProfile) {
   }
 
   const existingLinks = parseJsonArray(existingProfile.linksJson).map(normalizeProfileUrl).filter(Boolean);
+  const existingAddendumUrls = parseJsonArray(existingAddendum?.absorbedUrlsJson).map(normalizeProfileUrl).filter(Boolean);
   const existingUrlSet = new Set([
     ...existingLinks,
     ...extractUrls(existingProfile.introText || '')
   ]);
-  const newUrls = [...new Set(rawUrls)].filter((url) => !existingUrlSet.has(url));
+  for (const url of existingAddendumUrls) {
+    existingUrlSet.delete(url);
+  }
+
+  const uniqueRawUrls = [...new Set(rawUrls)];
+  const newUrls = uniqueRawUrls.filter((url) => !existingUrlSet.has(url));
+  const absorbedText = normalizeAddendumText(message.content || '');
+
+  if (existingAddendum?.status === 'active' && absorbedText === String(existingAddendum.absorbedText || '').trim()) {
+    if (source === 'backfill' && options.addReaction !== false) {
+      await reactToAbsorbedAddendum(client, message);
+    }
+    client.logger.info(
+      source === 'backfill'
+        ? 'intro addendum backfill skipped duplicate'
+        : 'intro addendum skipped duplicate url',
+      {
+        guildId: message.guildId,
+        userId: message.author.id,
+        introMessageId: message.id,
+        urls: rawUrls,
+        reason: 'existing_active_addendum'
+      }
+    );
+    return {
+      absorbed: false,
+      skippedReason: 'duplicate_addendum'
+    };
+  }
+
+  if (!newUrls.length && existingAddendum) {
+    client.db.introProfileAddendums.markStatus(
+      message.guildId,
+      message.id,
+      'removed',
+      new Date().toISOString()
+    );
+    client.logger.info('intro addendum skipped duplicate url', {
+      guildId: message.guildId,
+      userId: message.author.id,
+      introMessageId: message.id,
+      urls: rawUrls,
+      removedExistingAddendum: true
+    });
+    await refreshVcProfilesForIntroUserId(
+      client,
+      message.guildId,
+      message.author.id,
+      'intro_addendum_edit_removed',
+      existingAddendum.targetIntroMessageId
+    );
+    return {
+      absorbed: true,
+      removedAddendum: true,
+      skippedReason: null,
+      introMessageId: existingAddendum.targetIntroMessageId,
+      addedUrls: []
+    };
+  }
+
   if (!newUrls.length) {
     client.logger.info('intro addendum skipped duplicate url', {
       guildId: message.guildId,
@@ -330,51 +403,37 @@ async function maybeAbsorbIntroAddendum(client, message, existingProfile) {
     };
   }
 
-  const mergedLinks = [...new Set([...existingLinks, ...newUrls])];
-  const displayName = message.member?.displayName || existingProfile.displayName || message.author?.globalName || message.author?.username || null;
-  const username = message.author?.username || existingProfile.username || null;
-  const globalName = message.author?.globalName || existingProfile.globalName || null;
-  const nickname = message.member?.nickname || existingProfile.nickname || null;
-  const addendumLines = buildAddendumLines(message.content || '', newUrls);
-  const updatedRecord = {
-    guildId: existingProfile.guildId,
-    userId: existingProfile.userId,
-    introChannelId: existingProfile.introChannelId,
-    introMessageId: existingProfile.introMessageId,
-    displayName,
-    username,
-    globalName,
-    nickname,
-    sourceType: existingProfile.sourceType || 'first_top_level_message',
-    introText: appendIntroAddendumText(existingProfile.introText, addendumLines),
-    linksJson: JSON.stringify(mergedLinks),
-    embedsJson: existingProfile.embedsJson || '[]',
-    attachmentsJson: existingProfile.attachmentsJson || '[]',
-    searchAliasesJson: JSON.stringify([
-      ...new Set([
-        ...parseJsonArray(existingProfile.searchAliasesJson),
-        ...buildSearchAliasesFromIdentity({ displayName, username, globalName, nickname }, mergedLinks)
-      ])
-    ]),
-    postedAt: existingProfile.postedAt || new Date().toISOString(),
-    updatedAt: message.createdAt ? message.createdAt.toISOString() : new Date().toISOString()
-  };
+  client.db.introProfileAddendums.upsert({
+    guildId: message.guildId,
+    userId: message.author.id,
+    addendumMessageId: message.id,
+    channelId: message.channelId,
+    targetIntroMessageId: existingAddendum?.targetIntroMessageId || existingProfile.introMessageId,
+    absorbedText,
+    absorbedUrlsJson: JSON.stringify(uniqueRawUrls),
+    status: 'active',
+    createdAt: existingAddendum?.createdAt || (message.createdAt ? message.createdAt.toISOString() : new Date().toISOString()),
+    updatedAt: message.editedAt ? message.editedAt.toISOString() : new Date().toISOString(),
+    removedAt: null
+  });
 
-  client.db.introProfiles.upsert(updatedRecord);
   client.logger.info('intro addendum absorbed', {
     guildId: message.guildId,
     userId: message.author.id,
     introMessageId: message.id,
     targetIntroMessageId: existingProfile.introMessageId,
-    addedUrls: newUrls
+    addedUrls: newUrls,
+    updatedExistingAddendum: Boolean(existingAddendum)
   });
   client.logger.info('intro profile updated from addendum', {
-    guildId: updatedRecord.guildId,
-    userId: updatedRecord.userId,
-    introMessageId: updatedRecord.introMessageId,
+    guildId: message.guildId,
+    userId: message.author.id,
+    introMessageId: existingProfile.introMessageId,
     addendumMessageId: message.id
   });
-  await reactToAbsorbedAddendum(client, message);
+  if (options.addReaction !== false) {
+    await reactToAbsorbedAddendum(client, message);
+  }
   await refreshVcProfilesForIntroUser(client, message, 'intro_addendum_absorbed');
 
   return {
@@ -392,6 +451,23 @@ function isIntroProfileMessage(client, message) {
 async function saveIntroProfileFromMessage(client, message) {
   const skipReason = getIntroProfileSkipReason(client, message);
   if (skipReason) {
+    const existingAddendum = message.guildId && message.id
+      ? client.db.introProfileAddendums.get(message.guildId, message.id)
+      : null;
+    if (existingAddendum?.status === 'active' && message.author?.id) {
+      const existingProfile = getLatestIntroProfileByUser(client, message.guildId, message.author.id);
+      if (existingProfile) {
+        const addendumResult = await maybeAbsorbIntroAddendum(client, message, existingProfile);
+        return {
+          saved: Boolean(addendumResult.absorbed),
+          skippedReason: addendumResult.skippedReason || skipReason,
+          updatedExisting: Boolean(addendumResult.absorbed),
+          removedAddendum: Boolean(addendumResult.removedAddendum),
+          introMessageId: addendumResult.introMessageId || existingProfile.introMessageId
+        };
+      }
+    }
+
     if (skipReason === 'reply') {
       client.logger.info('intro profile save skipped reply', {
         guildId: message.guildId || null,
@@ -486,6 +562,74 @@ function deleteIntroProfileByMessageId(client, messageId) {
   client.db.introProfiles.deleteByMessageId(messageId);
 }
 
+async function handleIntroProfileMessageDeleted(client, message) {
+  const guildId = message.guildId || null;
+  const messageId = message.id;
+  if (!guildId || !messageId) {
+    return {
+      handled: false,
+      reason: 'missing_context'
+    };
+  }
+
+  const addendum = client.db.introProfileAddendums.get(guildId, messageId);
+  if (addendum?.status === 'active') {
+    client.db.introProfileAddendums.markStatus(
+      guildId,
+      messageId,
+      'deleted',
+      new Date().toISOString()
+    );
+    client.logger.info('intro addendum deleted; profile render updated', {
+      guildId,
+      userId: addendum.userId,
+      addendumMessageId: messageId,
+      targetIntroMessageId: addendum.targetIntroMessageId
+    });
+    await refreshVcProfilesForIntroUserId(
+      client,
+      guildId,
+      addendum.userId,
+      'intro_addendum_deleted',
+      addendum.targetIntroMessageId
+    );
+    return {
+      handled: true,
+      type: 'addendum_deleted',
+      userId: addendum.userId,
+      targetIntroMessageId: addendum.targetIntroMessageId
+    };
+  }
+
+  const profile = client.db.introProfiles.getByMessageId(messageId);
+  if (profile) {
+    client.db.introProfiles.deleteByMessageId(messageId);
+    client.logger.info('intro profile deleted by source message deletion', {
+      guildId,
+      userId: profile.userId,
+      introMessageId: messageId
+    });
+    await refreshVcProfilesForIntroUserId(
+      client,
+      guildId,
+      profile.userId,
+      'intro_profile_deleted',
+      messageId
+    );
+    return {
+      handled: true,
+      type: 'profile_deleted',
+      userId: profile.userId,
+      targetIntroMessageId: messageId
+    };
+  }
+
+  return {
+    handled: false,
+    reason: 'no_intro_state'
+  };
+}
+
 function normalizeProfile(row) {
   if (!row) {
     return null;
@@ -573,6 +717,268 @@ function searchIntroProfilesScored(client, guildId, query, limit = 3) {
 
 function hasUserIntro(client, guildId, userId) {
   return Boolean(getLatestIntroProfileByUser(client, guildId, userId));
+}
+
+function getIntroAddendumBackfillConfig(client, overrides = {}) {
+  const configured = client.appConfig.introAddendums || {};
+  return {
+    enabled: overrides.enabled ?? configured.enabled !== false,
+    maxMessages: Math.max(1, Math.min(Number(overrides.maxMessages ?? configured.maxMessages ?? 500), 2000)),
+    lookbackDays: Math.max(1, Number(overrides.lookbackDays ?? configured.lookbackDays ?? 90)),
+    addReaction: overrides.addReaction ?? configured.addReaction !== false
+  };
+}
+
+async function fetchIntroChannelMessages(introChannel, { maxMessages, lookbackDays }) {
+  const cutoff = Date.now() - (lookbackDays * 24 * 60 * 60 * 1000);
+  const collectedMessages = [];
+  let before = null;
+
+  while (collectedMessages.length < maxMessages) {
+    const batchSize = Math.min(100, maxMessages - collectedMessages.length);
+    const batch = await introChannel.messages.fetch(before ? { limit: batchSize, before } : { limit: batchSize }).catch(() => null);
+    if (!batch?.size) {
+      break;
+    }
+
+    const ordered = Array.from(batch.values());
+    for (const message of ordered) {
+      before = message.id;
+      if (message.createdTimestamp && message.createdTimestamp < cutoff) {
+        return collectedMessages;
+      }
+      collectedMessages.push(message);
+    }
+
+    if (batch.size < batchSize) {
+      break;
+    }
+  }
+
+  return collectedMessages;
+}
+
+async function syncStoredIntroProfileSourceMessages(client, guildId, introChannel) {
+  const profiles = client.db.introProfiles.listByChannel(guildId, introChannel.id, 2000);
+  let refreshedCount = 0;
+  let deletedCount = 0;
+  let errorCount = 0;
+
+  for (const profile of profiles) {
+    try {
+      const sourceMessage = await introChannel.messages.fetch(profile.introMessageId).catch(() => null);
+      if (!sourceMessage) {
+        client.db.introProfiles.deleteByMessageId(profile.introMessageId);
+        deletedCount += 1;
+        client.logger.info('intro profile source message missing; DB profile deleted', {
+          guildId,
+          userId: profile.userId,
+          introMessageId: profile.introMessageId
+        });
+        await refreshVcProfilesForIntroUserId(
+          client,
+          guildId,
+          profile.userId,
+          'intro_profile_source_deleted',
+          profile.introMessageId
+        );
+        continue;
+      }
+
+      client.db.introProfiles.upsert(buildIntroProfileRecord(client, sourceMessage));
+      refreshedCount += 1;
+    } catch (error) {
+      errorCount += 1;
+      client.logger.warn('intro profile source message sync failed', {
+        guildId,
+        userId: profile.userId,
+        introMessageId: profile.introMessageId,
+        error: error.message
+      });
+    }
+  }
+
+  return {
+    scannedCount: profiles.length,
+    refreshedCount,
+    deletedCount,
+    errorCount
+  };
+}
+
+async function syncStoredIntroAddendumMessages(client, guildId, introChannel, { addReaction }) {
+  const addendums = client.db.introProfileAddendums.listActiveByChannel(guildId, introChannel.id, 5000);
+  let refreshedCount = 0;
+  let deletedCount = 0;
+  let errorCount = 0;
+
+  for (const addendum of addendums) {
+    try {
+      const addendumMessage = await introChannel.messages.fetch(addendum.addendumMessageId).catch(() => null);
+      if (!addendumMessage) {
+        client.db.introProfileAddendums.markStatus(
+          guildId,
+          addendum.addendumMessageId,
+          'deleted',
+          new Date().toISOString()
+        );
+        deletedCount += 1;
+        client.logger.info('intro addendum source message missing; DB addendum marked deleted', {
+          guildId,
+          userId: addendum.userId,
+          addendumMessageId: addendum.addendumMessageId,
+          targetIntroMessageId: addendum.targetIntroMessageId
+        });
+        await refreshVcProfilesForIntroUserId(
+          client,
+          guildId,
+          addendum.userId,
+          'intro_addendum_source_deleted',
+          addendum.targetIntroMessageId
+        );
+        continue;
+      }
+
+      const profile = getLatestIntroProfileByUser(client, guildId, addendum.userId);
+      if (profile) {
+        const result = await maybeAbsorbIntroAddendum(client, addendumMessage, profile, {
+          source: 'backfill',
+          addReaction
+        });
+        if (result.absorbed) {
+          refreshedCount += 1;
+        }
+      }
+    } catch (error) {
+      errorCount += 1;
+      client.logger.warn('intro addendum source message sync failed', {
+        guildId,
+        userId: addendum.userId,
+        addendumMessageId: addendum.addendumMessageId,
+        error: error.message
+      });
+    }
+  }
+
+  return {
+    scannedCount: addendums.length,
+    refreshedCount,
+    deletedCount,
+    errorCount
+  };
+}
+
+async function backfillIntroAddendums(client, guildId, overrides = {}) {
+  const config = getIntroAddendumBackfillConfig(client, overrides);
+  if (!config.enabled) {
+    return {
+      skippedReason: 'disabled',
+      scannedCount: 0,
+      absorbedCount: 0,
+      skippedCount: 0,
+      errorCount: 0
+    };
+  }
+
+  const introChannelId = getIntroChannelId(client);
+  const introChannel = await client.channels.fetch(introChannelId).catch(() => null);
+  if (!introChannel?.isTextBased?.()) {
+    return {
+      skippedReason: 'intro_channel_unavailable',
+      scannedCount: 0,
+      absorbedCount: 0,
+      skippedCount: 0,
+      errorCount: 0
+    };
+  }
+
+  client.logger.info('intro addendum backfill started', {
+    guildId,
+    introChannelId,
+    maxMessages: config.maxMessages,
+    lookbackDays: config.lookbackDays
+  });
+
+  const profileSync = await syncStoredIntroProfileSourceMessages(client, guildId, introChannel);
+  const addendumSync = await syncStoredIntroAddendumMessages(client, guildId, introChannel, {
+    addReaction: config.addReaction
+  });
+
+  const messages = await fetchIntroChannelMessages(introChannel, config);
+  const orderedMessages = messages.reverse();
+  let absorbedCount = 0;
+  let skippedCount = 0;
+  let errorCount = profileSync.errorCount + addendumSync.errorCount;
+
+  for (const message of orderedMessages) {
+    try {
+      if (message.author?.bot || message.reference?.messageId) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const existingProfile = getLatestIntroProfileByUser(client, guildId, message.author.id);
+      if (!existingProfile || existingProfile.introMessageId === message.id) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const profileTime = existingProfile.postedAt ? Date.parse(existingProfile.postedAt) : 0;
+      if (profileTime && message.createdTimestamp && message.createdTimestamp <= profileTime) {
+        skippedCount += 1;
+        continue;
+      }
+
+      const result = await maybeAbsorbIntroAddendum(client, message, existingProfile, {
+        source: 'backfill',
+        addReaction: config.addReaction
+      });
+      if (result.absorbed) {
+        absorbedCount += 1;
+        client.logger.info('intro addendum backfill absorbed', {
+          guildId,
+          userId: message.author.id,
+          addendumMessageId: message.id,
+          targetIntroMessageId: result.introMessageId
+        });
+      } else {
+        skippedCount += 1;
+        if (result.skippedReason === 'duplicate_addendum' || result.skippedReason === 'duplicate_url') {
+          client.logger.info('intro addendum backfill skipped duplicate', {
+            guildId,
+            userId: message.author.id,
+            addendumMessageId: message.id,
+            skippedReason: result.skippedReason
+          });
+        }
+      }
+    } catch (error) {
+      errorCount += 1;
+      client.logger.warn('intro addendum backfill message failed', {
+        guildId,
+        messageId: message.id,
+        error: error.message
+      });
+    }
+  }
+
+  const result = {
+    scannedCount: orderedMessages.length,
+    absorbedCount,
+    skippedCount,
+    errorCount,
+    profileSourceDeletedCount: profileSync.deletedCount,
+    addendumSourceDeletedCount: addendumSync.deletedCount,
+    skippedReason: null
+  };
+
+  client.logger.info('intro addendum backfill finished', {
+    guildId,
+    introChannelId,
+    ...result
+  });
+
+  return result;
 }
 
 async function backfillIntroProfiles(client, guildId, limit = 500) {
@@ -818,11 +1224,13 @@ async function cleanupIntroProfiles(client, guildId, { dryRun = true, limit = 10
 module.exports = {
   saveIntroProfileFromMessage,
   deleteIntroProfileByMessageId,
+  handleIntroProfileMessageDeleted,
   getLatestIntroProfileByUser,
   searchIntroProfiles,
   searchIntroProfilesScored,
   hasUserIntro,
   getMembersWithoutIntroOlderThan,
+  backfillIntroAddendums,
   backfillIntroProfiles,
   getIntroProfileStatus,
   cleanupIntroProfiles,
