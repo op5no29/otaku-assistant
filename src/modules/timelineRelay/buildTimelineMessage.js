@@ -198,6 +198,22 @@ function buildTweetBodySection({ body, avatarUrl, avatarDescription }) {
   return section;
 }
 
+function buildTweetHeaderFallbackSection({ headline, avatarUrl, avatarDescription }) {
+  const section = new SectionBuilder().addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(`**${headline}**`)
+  );
+
+  if (avatarUrl) {
+    section.setThumbnailAccessory(
+      new ThumbnailBuilder()
+        .setURL(avatarUrl)
+        .setDescription(avatarDescription || '投稿者のアイコン')
+    );
+  }
+
+  return section;
+}
+
 function normalizePosthocTagLabel(label) {
   const value = String(label || '').trim();
   if (!value) {
@@ -975,9 +991,28 @@ function buildTweetTimelineMessage({ post, config, logger = null }) {
 
   const headline = buildPosthocHashtagHeadline(post) || post.timelineHeadline || `${post.displayName} さんが投稿しました`;
 
-  container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`**${headline}**`)
-  );
+  if (!body && post.avatarUrl) {
+    container.addSectionComponents(
+      buildTweetHeaderFallbackSection({
+        headline,
+        avatarUrl: post.avatarUrl,
+        avatarDescription: `${post.displayName || '投稿者'} のアイコン`
+      })
+    );
+    logger?.info?.('timeline avatar attached to header fallback for empty body', {
+      sourceMessageId: post.messageId || null,
+      hasFallbackContent: hasNormalTimelineFallbackContent(post)
+    });
+    if (hasNormalTimelineFallbackContent(post)) {
+      logger?.info?.('timeline avatar section added for media-only card', {
+        sourceMessageId: post.messageId || null
+      });
+    }
+  } else {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent(`**${headline}**`)
+    );
+  }
   container.addSeparatorComponents(
     new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
   );
@@ -989,6 +1024,11 @@ function buildTweetTimelineMessage({ post, config, logger = null }) {
         avatarDescription: `${post.displayName || '投稿者'} のアイコン`
       })
     );
+    if (post.avatarUrl) {
+      logger?.info?.('timeline avatar attached to body section', {
+        sourceMessageId: post.messageId || null
+      });
+    }
   } else if (!hasNormalTimelineFallbackContent(post)) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent('（本文はまだありません）'));
   }
