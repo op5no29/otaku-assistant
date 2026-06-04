@@ -182,16 +182,16 @@ function addQuestionHeader(container, { title, subtitle }) {
   }
 }
 
-function buildTweetContextSection({ title, avatarUrl }) {
+function buildTweetBodySection({ body, avatarUrl, avatarDescription }) {
   const section = new SectionBuilder().addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`**${title}**`)
+    new TextDisplayBuilder().setContent(body)
   );
 
   if (avatarUrl) {
     section.setThumbnailAccessory(
       new ThumbnailBuilder()
         .setURL(avatarUrl)
-        .setDescription(`${title} のアイコン`)
+        .setDescription(avatarDescription || '投稿者のアイコン')
     );
   }
 
@@ -273,8 +273,22 @@ function addImageIfPresent(container, firstImageUrl) {
 
 function buildMediaGalleryItem(item, logger = null, context = {}) {
   const mediaItem = new MediaGalleryItemBuilder().setURL(item.url);
-  if (item.description) {
+  const suppressDescriptionForSource = new Set([
+    'uploaded_image',
+    'uploaded_video_playable',
+    'uploaded_media',
+    'uploaded_video_thumbnail_static'
+  ]);
+  if (item.description && !suppressDescriptionForSource.has(item.source)) {
     mediaItem.setDescription(item.description);
+  } else if (item.description && suppressDescriptionForSource.has(item.source)) {
+    logger?.info?.('attachment filename text suppressed', {
+      ...context,
+      mediaUrl: item.url,
+      source: item.source,
+      source_type: item.source,
+      suppressedDescription: item.description
+    });
   }
 
   if (item.spoiler === true || item.isSpoiler === true) {
@@ -899,6 +913,20 @@ function addAttachmentNamesSection(container, post, { showOnlyAsFallback = false
   return true;
 }
 
+function hasNormalTimelineFallbackContent(post) {
+  return Boolean(
+    post.firstImageUrl ||
+    post.generatedVideoThumbnailUrl ||
+    post.musicLink?.artworkUrl ||
+    post.socialPreview ||
+    (Array.isArray(post.imageUrls) && post.imageUrls.length) ||
+    (Array.isArray(post.mediaGalleryItems) && post.mediaGalleryItems.length) ||
+    (Array.isArray(post.customEmojiMediaItems) && post.customEmojiMediaItems.length) ||
+    (Array.isArray(post.fileComponentUrls) && post.fileComponentUrls.length) ||
+    (Array.isArray(post.downloadableAttachments) && post.downloadableAttachments.length)
+  );
+}
+
 function normalizeRoleMentionIds(roleIds) {
   return [...new Set((Array.isArray(roleIds) ? roleIds : [])
     .map((roleId) => String(roleId || '').trim())
@@ -945,25 +973,26 @@ function buildTweetTimelineMessage({ post, config, logger = null }) {
     ...(Array.isArray(post.customEmojiMediaItems) ? post.customEmojiMediaItems.map((item) => item.url) : [])
   ].filter(Boolean))];
 
-  container.addSectionComponents(
-    buildTweetContextSection({
-      title: buildPosthocHashtagHeadline(post) || post.timelineHeadline || `${post.displayName} さんが投稿しました`,
-      avatarUrl: post.avatarUrl
-    })
+  const headline = buildPosthocHashtagHeadline(post) || post.timelineHeadline || `${post.displayName} さんが投稿しました`;
+
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(`**${headline}**`)
   );
-  addReplyContextIfPresent(container, post);
   container.addSeparatorComponents(
     new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
   );
   if (body) {
-    container.addTextDisplayComponents(new TextDisplayBuilder().setContent(body));
-  } else if (
-    !addAttachmentNamesSection(container, post, { showOnlyAsFallback: true }) &&
-    !post.socialPreview?.isGifShare &&
-    !(Array.isArray(post.customEmojiMediaItems) && post.customEmojiMediaItems.length)
-  ) {
+    container.addSectionComponents(
+      buildTweetBodySection({
+        body,
+        avatarUrl: post.avatarUrl,
+        avatarDescription: `${post.displayName || '投稿者'} のアイコン`
+      })
+    );
+  } else if (!hasNormalTimelineFallbackContent(post)) {
     container.addTextDisplayComponents(new TextDisplayBuilder().setContent('（本文はまだありません）'));
   }
+  addReplyContextIfPresent(container, post);
   addBotHashtagSection(container, post);
   addMediaIfPresent(container, post, logger);
   addMusicLinkPreviewIfPresent(container, post);

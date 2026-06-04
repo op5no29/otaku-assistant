@@ -82,11 +82,10 @@ function formatDownloadLabel(attachment, index, total) {
   }
 
   if (total === 1) {
-    const label = `${attachment.displayName || attachment.originalFileName || attachment.name} をダウンロード`;
-    return label.length <= 80 ? label : '添付ファイルをダウンロード';
+    return '添付ファイルを開く';
   }
 
-  return `添付ファイル${index + 1}をダウンロード`;
+  return `添付ファイル${index + 1}を開く`;
 }
 
 function buildAttachmentDisplayLine(attachment) {
@@ -120,7 +119,6 @@ function addVideoMediaGalleryItem({
 
   mediaGalleryItems.push({
     url,
-    description: attachment.displayName,
     spoiler: attachment.isSpoiler === true
   });
   attachment.playableMediaSucceeded = true;
@@ -418,7 +416,6 @@ async function prepareAttachmentRelay(post, config, logger) {
         });
         mediaGalleryItems.push({
           url: attachmentUrl,
-          description: attachment.displayName,
           spoiler: attachment.isSpoiler === true
         });
         logger.info('media gallery spoiler item', {
