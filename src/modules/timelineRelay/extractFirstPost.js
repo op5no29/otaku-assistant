@@ -21,6 +21,14 @@ const QUESTION_CATEGORY_LABELS = {
   '1230488177232445550': '個人開発'
 };
 
+const PREVIEW_IMAGE_VALIDATION_TIMEOUT_MS = 6_000;
+const PREVIEW_IMAGE_VALIDATION_PREFIX_BYTES = 4_096;
+const MAX_PREVIEW_IMAGE_VALIDATION_CANDIDATES = 8;
+const PREVIEW_IMAGE_FETCH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 compatible preview fetcher',
+  Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,video/*,*/*;q=0.8'
+};
+
 const KNOWLEDGE_FORUM_TAG_LABELS = {
   '1503794375451476118': '技術',
   '1503794402730967182': 'アート',
@@ -157,6 +165,94 @@ function isSoundCloudPlayerUrl(url) {
   }
 }
 
+function decodeHtmlEntities(value) {
+  return String(value || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>');
+}
+
+function normalizePreviewImageUrl(rawUrl, baseUrl = null) {
+  const rawValue = String(rawUrl || '');
+  const decoded = decodeHtmlEntities(rawValue).trim().replace(/^["']|["']$/g, '');
+  if (!decoded) {
+    return {
+      rawUrl: rawValue,
+      normalizedUrl: null,
+      urlShape: 'empty',
+      absolute: false,
+      rejectionReason: 'empty_url'
+    };
+  }
+
+  let candidate = decoded;
+  let urlShape = 'absolute';
+
+  try {
+    if (/^\/\//u.test(candidate)) {
+      candidate = `https:${candidate}`;
+      urlShape = 'protocol_relative';
+    } else if (/^\//u.test(candidate)) {
+      urlShape = 'relative';
+      if (!baseUrl) {
+        return {
+          rawUrl: rawValue,
+          normalizedUrl: null,
+          urlShape,
+          absolute: false,
+          rejectionReason: 'relative_url_without_base'
+        };
+      }
+      candidate = new URL(candidate, baseUrl).toString();
+    } else if (!/^[a-z][a-z0-9+.-]*:/iu.test(candidate)) {
+      urlShape = 'relative';
+      if (!baseUrl) {
+        return {
+          rawUrl: rawValue,
+          normalizedUrl: null,
+          urlShape,
+          absolute: false,
+          rejectionReason: 'relative_url_without_base'
+        };
+      }
+      candidate = new URL(candidate, baseUrl).toString();
+    }
+
+    const parsed = new URL(candidate);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return {
+        rawUrl: rawValue,
+        normalizedUrl: null,
+        urlShape,
+        absolute: false,
+        rejectionReason: 'invalid_scheme',
+        scheme: parsed.protocol
+      };
+    }
+    parsed.hash = '';
+
+    return {
+      rawUrl: rawValue,
+      normalizedUrl: parsed.toString(),
+      urlShape,
+      absolute: true,
+      rejectionReason: null,
+      scheme: parsed.protocol
+    };
+  } catch (error) {
+    return {
+      rawUrl: rawValue,
+      normalizedUrl: null,
+      urlShape,
+      absolute: false,
+      rejectionReason: 'invalid_url',
+      error: error.message
+    };
+  }
+}
+
 function isPreviewMediaUrl(url) {
   return looksLikePreviewImageUrl(url) || looksLikeAnimatedMediaUrl(url);
 }
@@ -187,7 +283,276 @@ function isPreviewCandidateUsableAsMedia(candidate) {
   if (isPreviewMediaUrl(candidate.url)) {
     return true;
   }
+  if (/(?:^|\.)(?:image|thumbnail|photo|og:image|twitter:image|image:secure_url)(?:$|\.)/i.test(String(candidate.source || '')) && isHttpUrl(candidate.url)) {
+    return true;
+  }
   return isLikelyDiscordEmbedImageCandidate(candidate);
+}
+
+function hasPreviewMediaExtension(url) {
+  return /\.(png|jpe?g|webp|gif|mp4|webm|mov|m4v|svg)(?:[?#].*)?$/i.test(String(url || ''));
+}
+
+function isDiscordProxyImageUrl(url) {
+  try {
+    const host = new URL(String(url || '')).hostname.toLowerCase();
+    return host === 'media.discordapp.net' || /^images-ext-\d+\.discordapp\.net$/i.test(host);
+  } catch {
+    return false;
+  }
+}
+
+function inferContentTypeFromMagic(buffer) {
+  if (!Buffer.isBuffer(buffer) || !buffer.length) {
+    return null;
+  }
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+    return 'image/png';
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (buffer.length >= 6 && /^GIF8[79]a/u.test(buffer.subarray(0, 6).toString('ascii'))) {
+    return 'image/gif';
+  }
+  if (buffer.length >= 12 && buffer.subarray(0, 4).toString('ascii') === 'RIFF' && buffer.subarray(8, 12).toString('ascii') === 'WEBP') {
+    return 'image/webp';
+  }
+  const asciiPrefix = buffer.subarray(0, Math.min(buffer.length, 512)).toString('utf8').trimStart().toLowerCase();
+  if (asciiPrefix.startsWith('<svg') || asciiPrefix.startsWith('<?xml')) {
+    return 'image/svg+xml';
+  }
+  if (buffer.length >= 12 && buffer.subarray(4, 8).toString('ascii') === 'ftyp') {
+    return 'video/mp4';
+  }
+  if (buffer.length >= 4 && buffer[0] === 0x1a && buffer[1] === 0x45 && buffer[2] === 0xdf && buffer[3] === 0xa3) {
+    return 'video/webm';
+  }
+  return null;
+}
+
+function extensionForContentType(contentType) {
+  const normalized = String(contentType || '').toLowerCase().split(';')[0].trim();
+  if (normalized === 'image/jpeg') return 'jpg';
+  if (normalized === 'image/png') return 'png';
+  if (normalized === 'image/webp') return 'webp';
+  if (normalized === 'image/gif') return 'gif';
+  if (normalized === 'image/svg+xml') return 'svg';
+  if (normalized === 'video/mp4') return 'mp4';
+  if (normalized === 'video/webm') return 'webm';
+  return null;
+}
+
+function isRenderablePreviewContentType(contentType) {
+  const normalized = String(contentType || '').toLowerCase();
+  return normalized.startsWith('image/') || normalized.startsWith('video/');
+}
+
+function shouldReuploadPreviewCandidate(candidate, validation) {
+  const finalUrl = validation?.finalUrl || candidate?.url;
+  const contentType = String(validation?.contentType || '').toLowerCase();
+  if (!String(contentType).startsWith('image/')) {
+    return false;
+  }
+  if (isDiscordProxyImageUrl(finalUrl)) {
+    return false;
+  }
+  return !hasPreviewMediaExtension(finalUrl);
+}
+
+async function readResponsePrefix(response, maxBytes = PREVIEW_IMAGE_VALIDATION_PREFIX_BYTES) {
+  if (!response?.body?.getReader) {
+    const arrayBuffer = await response.arrayBuffer();
+    return Buffer.from(arrayBuffer).subarray(0, maxBytes);
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let total = 0;
+  try {
+    while (total < maxBytes) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      const buffer = Buffer.from(value);
+      chunks.push(buffer);
+      total += buffer.length;
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+
+  return Buffer.concat(chunks).subarray(0, maxBytes);
+}
+
+async function fetchPreviewImageCandidate(url, method) {
+  const headers = {
+    ...PREVIEW_IMAGE_FETCH_HEADERS
+  };
+  if (method === 'GET') {
+    headers.Range = `bytes=0-${PREVIEW_IMAGE_VALIDATION_PREFIX_BYTES - 1}`;
+  }
+
+  return fetch(url, {
+    method,
+    headers,
+    redirect: 'follow',
+    signal: AbortSignal.timeout(PREVIEW_IMAGE_VALIDATION_TIMEOUT_MS)
+  });
+}
+
+function buildValidationResultFromResponse(candidate, response, method, prefixBuffer = null) {
+  const headerContentType = response.headers.get('content-type') || null;
+  const contentLengthHeader = response.headers.get('content-length');
+  const contentLength = contentLengthHeader ? Number(contentLengthHeader) : null;
+  const magicContentType = prefixBuffer ? inferContentTypeFromMagic(prefixBuffer) : null;
+  const contentType = headerContentType || magicContentType;
+  const finalUrl = response.url || candidate.url;
+
+  if (!response.ok && response.status !== 206) {
+    return {
+      ok: false,
+      method,
+      httpStatus: response.status,
+      finalUrl,
+      contentType,
+      contentLength,
+      redirected: finalUrl !== candidate.url,
+      failureReason: 'http_status'
+    };
+  }
+
+  if (!isRenderablePreviewContentType(contentType)) {
+    return {
+      ok: false,
+      method,
+      httpStatus: response.status,
+      finalUrl,
+      contentType,
+      contentLength,
+      redirected: finalUrl !== candidate.url,
+      failureReason: String(contentType || '').toLowerCase().startsWith('text/html')
+        ? 'html_content'
+        : 'unsupported_content_type'
+    };
+  }
+
+  return {
+    ok: true,
+    method,
+    httpStatus: response.status,
+    finalUrl,
+    contentType,
+    headerContentType,
+    magicContentType,
+    contentLength,
+    redirected: finalUrl !== candidate.url,
+    extension: extensionForContentType(contentType),
+    requiresReupload: shouldReuploadPreviewCandidate(candidate, {
+      finalUrl,
+      contentType
+    })
+  };
+}
+
+async function validatePreviewImageCandidate(candidate, logger = null, context = {}) {
+  const logBase = {
+    sourceMessageId: context.messageId || null,
+    sourceUrl: context.sourceUrl || candidate.sourceUrl || null,
+    rawUrl: candidate.rawUrl || candidate.url || null,
+    normalizedUrl: candidate.url || null,
+    sourceType: candidate.source,
+    priority: candidate.priority
+  };
+
+  logger?.info?.('preview image candidate validation started', logBase);
+
+  let headResult = null;
+  try {
+    const headResponse = await fetchPreviewImageCandidate(candidate.url, 'HEAD');
+    headResult = buildValidationResultFromResponse(candidate, headResponse, 'HEAD');
+    if (headResult.ok && headResult.contentType) {
+      const result = {
+        ...headResult,
+        requiresReupload: shouldReuploadPreviewCandidate(candidate, headResult)
+      };
+      logger?.info?.('preview image candidate validation succeeded', {
+        ...logBase,
+        finalUrl: result.finalUrl,
+        httpStatus: result.httpStatus,
+        contentType: result.contentType,
+        contentLength: result.contentLength,
+        validationMethod: result.method,
+        requiresReupload: result.requiresReupload,
+        selected: false
+      });
+      return result;
+    }
+  } catch (error) {
+    headResult = {
+      ok: false,
+      method: 'HEAD',
+      failureReason: error.name === 'TimeoutError' || error.name === 'AbortError' ? 'timeout' : 'request_failed',
+      error: error.message
+    };
+  }
+
+  try {
+    const getResponse = await fetchPreviewImageCandidate(candidate.url, 'GET');
+    const prefix = await readResponsePrefix(getResponse);
+    const getResult = buildValidationResultFromResponse(candidate, getResponse, 'GET', prefix);
+    if (getResult.ok) {
+      const result = {
+        ...getResult,
+        requiresReupload: shouldReuploadPreviewCandidate(candidate, getResult)
+      };
+      logger?.info?.('preview image candidate validation succeeded', {
+        ...logBase,
+        finalUrl: result.finalUrl,
+        httpStatus: result.httpStatus,
+        contentType: result.contentType,
+        contentLength: result.contentLength,
+        validationMethod: result.method,
+        requiresReupload: result.requiresReupload,
+        selected: false
+      });
+      return result;
+    }
+
+    logger?.info?.('preview image candidate validation failed', {
+      ...logBase,
+      finalUrl: getResult.finalUrl,
+      httpStatus: getResult.httpStatus,
+      contentType: getResult.contentType,
+      contentLength: getResult.contentLength,
+      validationMethod: getResult.method,
+      failureReason: getResult.failureReason,
+      headFailureReason: headResult?.failureReason || null,
+      selected: false
+    });
+    return getResult;
+  } catch (error) {
+    const failureReason = error.name === 'TimeoutError' || error.name === 'AbortError' ? 'timeout' : 'request_failed';
+    logger?.info?.('preview image candidate validation failed', {
+      ...logBase,
+      finalUrl: null,
+      httpStatus: null,
+      contentType: null,
+      contentLength: null,
+      validationMethod: 'GET',
+      failureReason,
+      headFailureReason: headResult?.failureReason || null,
+      error: error.message,
+      selected: false
+    });
+    return {
+      ok: false,
+      method: 'GET',
+      failureReason,
+      error: error.message
+    };
+  }
 }
 
 function extractTwitterStatusId(url) {
@@ -250,17 +615,53 @@ function buildPreviewCandidate(url, source, sourceUrl) {
     return null;
   }
 
-  const provider = getPreviewProvider(url || sourceUrl);
-  const kind = looksLikeLogoCandidate(url) ? 'logo' : inferCandidateKind(url, source);
+  const normalized = normalizePreviewImageUrl(url, sourceUrl);
+  if (!normalized.normalizedUrl) {
+    return {
+      rawUrl: url,
+      url: null,
+      normalizedUrl: null,
+      kind: 'invalid',
+      source,
+      provider: '',
+      sourceUrl: sourceUrl || null,
+      priority: 0,
+      twitterStatusId: extractTwitterStatusId(sourceUrl),
+      urlShape: normalized.urlShape,
+      absolute: normalized.absolute,
+      normalizationError: normalized.rejectionReason,
+      normalizationErrorDetail: normalized.error || null
+    };
+  }
+
+  const normalizedUrl = normalized.normalizedUrl;
+  const provider = getPreviewProvider(normalizedUrl || sourceUrl);
+  const kind = looksLikeLogoCandidate(normalizedUrl) ? 'logo' : inferCandidateKind(normalizedUrl, source);
+  let priority = inferCandidatePriority({ kind, url: normalizedUrl, sourceUrl });
+  if (/embed\.image$/i.test(source)) {
+    priority = Math.max(priority, 95);
+  } else if (/embed\.thumbnail$/i.test(source)) {
+    priority = Math.max(priority, 88);
+  } else if (/twitter:image|og:image|image:secure_url/i.test(source)) {
+    priority = Math.max(priority, 92);
+  }
+  if (/proxy/i.test(source) || isDiscordProxyImageUrl(normalizedUrl)) {
+    priority -= 8;
+  }
+
   return {
-    url,
-    normalizedUrl: normalizeMediaUrl(url),
+    rawUrl: url,
+    url: normalizedUrl,
+    normalizedUrl: normalizeMediaUrl(normalizedUrl),
     kind,
     source,
     provider,
     sourceUrl: sourceUrl || null,
-    priority: inferCandidatePriority({ kind, url, sourceUrl }),
-    twitterStatusId: extractTwitterStatusId(sourceUrl)
+    priority,
+    twitterStatusId: extractTwitterStatusId(sourceUrl),
+    urlShape: normalized.urlShape,
+    absolute: normalized.absolute,
+    normalizationError: null
   };
 }
 
@@ -288,23 +689,52 @@ function collectPreviewMediaCandidates(embeds, sourceUrl = null) {
       pushCandidate(embed.video.url, 'embed.video');
     }
 
-    const rawMediaUrls = new Set();
+    const rawMediaUrls = [];
     collectPreviewMediaUrlsFromRawEmbed(embed.data || embed, rawMediaUrls);
-    for (const url of rawMediaUrls) {
-      pushCandidate(url, 'socialPreview');
+    const seenRawMediaUrls = new Set();
+    for (const entry of rawMediaUrls) {
+      const rawUrl = typeof entry === 'string' ? entry : entry?.url;
+      if (!rawUrl || seenRawMediaUrls.has(rawUrl)) {
+        continue;
+      }
+      seenRawMediaUrls.add(rawUrl);
+      const key = typeof entry === 'object' ? entry.key : '';
+      pushCandidate(rawUrl, key ? `socialPreview.${key.replace(/^\./u, '')}` : 'socialPreview');
     }
   }
 
   return candidates;
 }
 
-function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger = null, messageId = null) {
+async function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger = null, messageId = null) {
   const rejected = [];
   const deduped = [];
   const seenNormalized = new Set();
 
   for (const candidate of candidates) {
+    logger?.info?.('preview image candidate normalized', {
+      sourceMessageId: messageId,
+      sourceUrl,
+      rawUrl: candidate?.rawUrl || candidate?.url || null,
+      normalizedUrl: candidate?.url || null,
+      sourceType: candidate?.source || null,
+      urlShape: candidate?.urlShape || null,
+      absolute: candidate?.absolute === true,
+      failureReason: candidate?.normalizationError || null,
+      priority: candidate?.priority || 0
+    });
+
     if (!candidate?.url) {
+      rejected.push({ ...candidate, reason: candidate?.normalizationError || 'invalid_url' });
+      logger?.info?.('preview image candidate rejected', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        rawUrl: candidate?.rawUrl || null,
+        normalizedUrl: null,
+        sourceType: candidate?.source || null,
+        failureReason: candidate?.normalizationError || 'invalid_url',
+        selected: false
+      });
       continue;
     }
 
@@ -334,6 +764,15 @@ function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger = null,
 
     if (seenNormalized.has(candidate.normalizedUrl)) {
       rejected.push({ ...candidate, reason: 'duplicate_normalized_url' });
+      logger?.info?.('preview image candidate rejected', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        rawUrl: candidate.rawUrl || candidate.url,
+        normalizedUrl: candidate.url,
+        sourceType: candidate.source,
+        failureReason: 'duplicate_normalized_url',
+        selected: false
+      });
       continue;
     }
 
@@ -341,9 +780,71 @@ function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger = null,
     deduped.push(candidate);
   }
 
+  const validationCandidates = [...deduped]
+    .sort((left, right) => right.priority - left.priority)
+    .slice(0, MAX_PREVIEW_IMAGE_VALIDATION_CANDIDATES);
+  const validationCandidateKeys = new Set(validationCandidates.map((candidate) => candidate.normalizedUrl));
+  const validatedDeduped = [];
+
+  const validationResults = await Promise.all(validationCandidates.map(async (candidate) => ({
+    candidate,
+    validation: await validatePreviewImageCandidate(candidate, logger, {
+      messageId,
+      sourceUrl
+    })
+  })));
+
+  for (const { candidate, validation } of validationResults) {
+    if (!validation.ok) {
+      rejected.push({
+        ...candidate,
+        reason: validation.failureReason || 'validation_failed',
+        validation
+      });
+      logger?.info?.('preview image candidate rejected', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        rawUrl: candidate.rawUrl || candidate.url,
+        normalizedUrl: candidate.url,
+        finalUrl: validation.finalUrl || null,
+        sourceType: candidate.source,
+        httpStatus: validation.httpStatus || null,
+        contentType: validation.contentType || null,
+        contentLength: validation.contentLength || null,
+        failureReason: validation.failureReason || 'validation_failed',
+        selected: false
+      });
+      continue;
+    }
+
+    validatedDeduped.push({
+      ...candidate,
+      url: validation.finalUrl || candidate.url,
+      normalizedUrl: normalizeMediaUrl(validation.finalUrl || candidate.url),
+      validation,
+      requiresReupload: validation.requiresReupload === true,
+      extension: validation.extension || null
+    });
+  }
+
+  for (const candidate of deduped) {
+    if (!validationCandidateKeys.has(candidate.normalizedUrl)) {
+      rejected.push({ ...candidate, reason: 'validation_candidate_limit' });
+      logger?.info?.('preview image candidate rejected', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        rawUrl: candidate.rawUrl || candidate.url,
+        normalizedUrl: candidate.url,
+        sourceType: candidate.source,
+        failureReason: 'validation_candidate_limit',
+        selected: false
+      });
+    }
+  }
+
   const isTwitterStatus = Boolean(extractTwitterStatusId(sourceUrl));
   const isYoutubeSource = isYoutubeLikeUrl(sourceUrl);
-  const nonLogo = deduped.filter((candidate) => candidate.kind !== 'logo');
+  const nonLogo = validatedDeduped.filter((candidate) => candidate.kind !== 'logo');
   const selected = [];
 
   if (isTwitterStatus) {
@@ -452,20 +953,52 @@ function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger = null,
     sourceMessageId: messageId,
     sourceUrl,
     candidates: candidates.map((candidate) => ({
+      rawUrl: candidate.rawUrl || candidate.url,
       url: candidate.url,
+      normalizedUrl: candidate.normalizedUrl,
       source: candidate.source,
       kind: candidate.kind,
-      priority: candidate.priority
+      priority: candidate.priority,
+      urlShape: candidate.urlShape,
+      absolute: candidate.absolute === true
     })),
     rejected: rejected.map((candidate) => ({
+      rawUrl: candidate.rawUrl || candidate.url,
       url: candidate.url,
       source: candidate.source,
       kind: candidate.kind,
-      reason: candidate.reason
+      reason: candidate.reason,
+      httpStatus: candidate.validation?.httpStatus || null,
+      contentType: candidate.validation?.contentType || null
     })),
     selectedMediaCount: selected.length,
     selectedUrls: selected.map((candidate) => candidate.url)
   });
+
+  for (const candidate of selected) {
+    logger?.info?.('preview image candidate selected', {
+      sourceMessageId: messageId,
+      sourceUrl,
+      rawUrl: candidate.rawUrl || candidate.url,
+      normalizedUrl: candidate.normalizedUrl || candidate.url,
+      finalUrl: candidate.validation?.finalUrl || candidate.url,
+      sourceType: candidate.source,
+      httpStatus: candidate.validation?.httpStatus || null,
+      contentType: candidate.validation?.contentType || null,
+      contentLength: candidate.validation?.contentLength || null,
+      selected: true,
+      requiresReupload: candidate.requiresReupload === true
+    });
+  }
+
+  if (!selected.length && candidates.length) {
+    logger?.info?.('preview image omitted no valid candidate', {
+      sourceMessageId: messageId,
+      sourceUrl,
+      candidateCount: candidates.length,
+      rejectedCount: rejected.length
+    });
+  }
 
   if (isYoutubeSource) {
     logger?.info?.('youtube embed preview candidate extracted', {
@@ -532,6 +1065,20 @@ function looksLikePreviewImageUrl(url) {
   );
 }
 
+function looksLikeRawPreviewMediaValue(value) {
+  const text = decodeHtmlEntities(String(value || '')).trim();
+  if (!text || text.length > 2_000) {
+    return false;
+  }
+  return (
+    /^https?:\/\//i.test(text) ||
+    /^\/\//u.test(text) ||
+    /^\//u.test(text) ||
+    /\.(png|jpe?g|webp|gif|mp4|webm|mov|m4v|svg)(?:[?#].*)?$/i.test(text) ||
+    /[?&]format=(jpg|jpeg|png|webp|gif)\b/i.test(text)
+  );
+}
+
 function collectPreviewImageUrlsFromRawEmbed(value, collector, context = { key: '' }) {
   if (!value) {
     return;
@@ -571,9 +1118,12 @@ function collectPreviewMediaUrlsFromRawEmbed(value, collector, context = { key: 
   if (typeof value === 'string') {
     if (
       /(image|images|thumbnail|thumbnails|photo|photos|media|video|videos|gif|gifs|proxy)/i.test(context.key) &&
-      (looksLikePreviewImageUrl(value) || looksLikeAnimatedMediaUrl(value))
+      (looksLikeRawPreviewMediaValue(value) || looksLikePreviewImageUrl(value) || looksLikeAnimatedMediaUrl(value))
     ) {
-      collector.add(value);
+      collector.push({
+        url: value,
+        key: context.key
+      });
     }
     return;
   }
@@ -594,25 +1144,207 @@ function collectPreviewMediaUrlsFromRawEmbed(value, collector, context = { key: 
   }
 }
 
-function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null, logger = null, messageId = null) {
+function extractHtmlAttributes(tag) {
+  const attributes = {};
+  const pattern = /([^\s=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/giu;
+  let match;
+  while ((match = pattern.exec(String(tag || ''))) !== null) {
+    attributes[String(match[1] || '').toLowerCase()] = decodeHtmlEntities(match[2] || match[3] || match[4] || '');
+  }
+  return attributes;
+}
+
+function extractHtmlTitle(html) {
+  const match = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/iu);
+  return match ? decodeHtmlEntities(match[1]).replace(/\s+/gu, ' ').trim() : null;
+}
+
+function collectHtmlPreviewMetadata(html, sourceUrl) {
+  const metadata = {
+    title: extractHtmlTitle(html),
+    description: null,
+    siteName: null,
+    candidates: []
+  };
+  const imageMetaNames = new Set([
+    'og:image',
+    'og:image:url',
+    'og:image:secure_url',
+    'twitter:image',
+    'twitter:image:src',
+    'thumbnail',
+    'image'
+  ]);
+  const titleMetaNames = new Set(['og:title', 'twitter:title']);
+  const descriptionMetaNames = new Set(['description', 'og:description', 'twitter:description']);
+  const siteNameMetaNames = new Set(['og:site_name', 'application-name']);
+  const seenImageUrls = new Set();
+
+  for (const match of String(html || '').matchAll(/<meta\b[^>]*>/giu)) {
+    const attrs = extractHtmlAttributes(match[0]);
+    const key = String(attrs.property || attrs.name || attrs.itemprop || '').toLowerCase();
+    const content = attrs.content || '';
+    if (!key || !content) {
+      continue;
+    }
+
+    if (titleMetaNames.has(key) && !metadata.title) {
+      metadata.title = content.trim();
+    }
+    if (descriptionMetaNames.has(key) && !metadata.description) {
+      metadata.description = content.trim();
+    }
+    if (siteNameMetaNames.has(key) && !metadata.siteName) {
+      metadata.siteName = content.trim();
+    }
+    if (imageMetaNames.has(key) && !seenImageUrls.has(content)) {
+      seenImageUrls.add(content);
+      metadata.candidates.push(buildPreviewCandidate(content, `html.${key}`, sourceUrl));
+    }
+  }
+
+  return metadata;
+}
+
+async function fetchHtmlPreviewMetadata(sourceUrl, logger = null, messageId = null) {
+  if (!isHttpUrl(sourceUrl)) {
+    return null;
+  }
+
+  try {
+    const response = await fetch(sourceUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 compatible preview fetcher',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(PREVIEW_IMAGE_VALIDATION_TIMEOUT_MS)
+    });
+    const contentType = response.headers.get('content-type') || null;
+    if (!response.ok) {
+      logger?.info?.('preview html metadata fetch failed', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        httpStatus: response.status,
+        contentType,
+        failureReason: 'http_status'
+      });
+      return null;
+    }
+    if (contentType && !/text\/html|application\/xhtml\+xml/i.test(contentType)) {
+      logger?.info?.('preview html metadata fetch failed', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        httpStatus: response.status,
+        contentType,
+        failureReason: 'non_html_content_type'
+      });
+      return null;
+    }
+
+    const html = await response.text();
+    const metadata = collectHtmlPreviewMetadata(html, response.url || sourceUrl);
+    logger?.info?.('preview html metadata fetched', {
+      sourceMessageId: messageId,
+      sourceUrl,
+      finalUrl: response.url || sourceUrl,
+      httpStatus: response.status,
+      contentType,
+      candidateCount: metadata.candidates.filter(Boolean).length,
+      hasTitle: Boolean(metadata.title),
+      hasDescription: Boolean(metadata.description),
+      siteName: metadata.siteName || null
+    });
+    return {
+      ...metadata,
+      sourceUrl: response.url || sourceUrl
+    };
+  } catch (error) {
+    logger?.info?.('preview html metadata fetch failed', {
+      sourceMessageId: messageId,
+      sourceUrl,
+      failureReason: error.name === 'TimeoutError' || error.name === 'AbortError' ? 'timeout' : 'request_failed',
+      error: error.message
+    });
+    return null;
+  }
+}
+
+function buildSocialPreviewMediaItem(candidate) {
+  return {
+    url: candidate.url,
+    source: isYoutubeLikeUrl(candidate.url) || isYoutubeLikeUrl(candidate.sourceUrl)
+      ? 'youtube_thumbnail'
+      : 'link_preview_image',
+    sourceType: candidate.source,
+    kind: candidate.kind,
+    rawUrl: candidate.rawUrl || candidate.url,
+    normalizedUrl: candidate.normalizedUrl || candidate.url,
+    finalUrl: candidate.validation?.finalUrl || candidate.url,
+    validated: true,
+    httpStatus: candidate.validation?.httpStatus || null,
+    contentType: candidate.validation?.contentType || null,
+    contentLength: candidate.validation?.contentLength || null,
+    requiresReupload: candidate.requiresReupload === true,
+    extension: candidate.extension || candidate.validation?.extension || null
+  };
+}
+
+async function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null, logger = null, messageId = null) {
   let primaryPreview = null;
   const gifProvider = getGifProviderName(sourceUrl);
-  const candidates = collectPreviewMediaCandidates(embeds, sourceUrl);
+  let candidates = collectPreviewMediaCandidates(embeds, sourceUrl);
   for (const candidate of candidates) {
     logger?.info?.('relay link preview image candidate found', {
       sourceMessageId: messageId,
       sourceUrl,
+      rawUrl: candidate.rawUrl || candidate.url,
       imageUrl: candidate.url,
+      normalizedUrl: candidate.normalizedUrl,
       source: candidate.source,
-      kind: candidate.kind
+      sourceType: candidate.source,
+      kind: candidate.kind,
+      priority: candidate.priority,
+      absolute: candidate.absolute === true,
+      urlShape: candidate.urlShape
     });
   }
-  const selectedCandidates = selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger, messageId);
+  let selectedCandidates = await selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger, messageId);
+  let htmlMetadata = null;
+  if (!selectedCandidates.length && sourceUrl) {
+    htmlMetadata = await fetchHtmlPreviewMetadata(sourceUrl, logger, messageId);
+    const htmlCandidates = (htmlMetadata?.candidates || []).filter(Boolean);
+    for (const candidate of htmlCandidates) {
+      logger?.info?.('preview image candidate found', {
+        sourceMessageId: messageId,
+        sourceUrl,
+        rawUrl: candidate.rawUrl || candidate.url,
+        normalizedUrl: candidate.url,
+        sourceType: candidate.source,
+        priority: candidate.priority,
+        urlShape: candidate.urlShape,
+        absolute: candidate.absolute === true
+      });
+    }
+    if (htmlCandidates.length) {
+      candidates = [...candidates, ...htmlCandidates];
+      selectedCandidates = await selectPreviewMediaForComponentsV2(htmlCandidates, htmlMetadata.sourceUrl || sourceUrl, logger, messageId);
+      if (selectedCandidates.length) {
+        logger?.info?.('preview image candidate fallback selected', {
+          sourceMessageId: messageId,
+          sourceUrl,
+          fallbackSourceUrl: htmlMetadata.sourceUrl || null,
+          imageUrls: selectedCandidates.map((candidate) => candidate.url)
+        });
+      }
+    }
+  }
   if (selectedCandidates.length) {
     logger?.info?.('relay link preview image selected', {
       sourceMessageId: messageId,
       sourceUrl,
-      imageUrls: selectedCandidates.map((candidate) => candidate.url)
+      imageUrls: selectedCandidates.map((candidate) => candidate.url),
+      sourceTypes: selectedCandidates.map((candidate) => candidate.source)
     });
     if (/^https?:\/\/(?:on\.)?soundcloud\.com\//i.test(String(sourceUrl || '')) || /\/\/[^/]*soundcloud\.com\//i.test(String(sourceUrl || ''))) {
       logger?.info?.('soundcloud preview image selected', {
@@ -634,7 +1366,7 @@ function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null, logger = null,
       primaryPreview = {
         title,
         description,
-        imageUrl: imageUrl || selectedCandidates.find((candidate) => candidate.kind !== 'video')?.url || null,
+        imageUrl: selectedCandidates.find((candidate) => candidate.kind !== 'video')?.url || null,
         imageUrls: [],
         sourceUrl: embedSourceUrl,
         siteName
@@ -642,22 +1374,39 @@ function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null, logger = null,
     }
   }
 
+  if (!primaryPreview && htmlMetadata && (htmlMetadata.title || htmlMetadata.description || selectedCandidates.length)) {
+    primaryPreview = {
+      title: htmlMetadata.title || null,
+      description: htmlMetadata.description || null,
+      imageUrl: selectedCandidates.find((candidate) => candidate.kind !== 'video')?.url || null,
+      imageUrls: [],
+      sourceUrl: htmlMetadata.sourceUrl || sourceUrl,
+      siteName: htmlMetadata.siteName || null
+    };
+  } else if (primaryPreview && htmlMetadata) {
+    primaryPreview.title ||= htmlMetadata.title || null;
+    primaryPreview.description ||= htmlMetadata.description || null;
+    primaryPreview.siteName ||= htmlMetadata.siteName || null;
+  }
+
   if (!primaryPreview && !selectedCandidates.length) {
     return null;
   }
 
-  const finalMediaUrls = selectedCandidates.map((candidate) => candidate.url);
+  const finalMediaItems = selectedCandidates.map(buildSocialPreviewMediaItem);
+  const finalMediaUrls = finalMediaItems.map((item) => item.url);
   const finalImageUrls = selectedCandidates
     .filter((candidate) => candidate.kind !== 'video')
     .map((candidate) => candidate.url);
 
   if (logger && messageId) {
-    for (const candidate of selectedCandidates) {
+    for (const candidate of finalMediaItems) {
       logger.info('media gallery item added', {
         sourceMessageId: messageId,
         sourceUrl,
         url: candidate.url,
-        kind: candidate.kind
+        kind: candidate.kind,
+        source_type: candidate.source
       });
     }
     if (candidates.length !== selectedCandidates.length) {
@@ -676,6 +1425,7 @@ function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null, logger = null,
     imageUrl: primaryPreview?.imageUrl || finalImageUrls[0] || null,
     imageUrls: finalImageUrls,
     mediaUrls: finalMediaUrls,
+    mediaItems: finalMediaItems,
     sourceUrl: primaryPreview?.sourceUrl || null,
     siteName: primaryPreview?.siteName || null,
     isGifShare: isGifProviderUrl(sourceUrl) || finalMediaUrls.some((url) => looksLikeAnimatedMediaUrl(url)),
@@ -699,7 +1449,7 @@ async function getSocialPreviewData(message, logger, attempts = 3, retryDelayMs 
   let workingMessage = message;
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      const preview = extractSocialPreviewFromEmbeds(workingMessage.embeds, socialLink, logger, message.id);
+      const preview = await extractSocialPreviewFromEmbeds(workingMessage.embeds, socialLink, logger, message.id);
 
     if (preview) {
       logger.info('Link preview embed data found', {

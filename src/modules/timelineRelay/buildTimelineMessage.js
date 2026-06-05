@@ -119,6 +119,38 @@ function isYouTubeSourceUrl(url) {
   }
 }
 
+function getSocialPreviewMediaItems(socialPreview) {
+  if (!socialPreview) {
+    return [];
+  }
+  if (Array.isArray(socialPreview.mediaItems) && socialPreview.mediaItems.length) {
+    return socialPreview.mediaItems
+      .filter((item) => item?.url)
+      .map((item) => ({
+        ...item,
+        source: item.source || (isYouTubePreviewMediaUrl(item.url) ? 'youtube_thumbnail' : 'link_preview_image')
+      }));
+  }
+
+  const previewMediaUrls = Array.isArray(socialPreview.mediaUrls) && socialPreview.mediaUrls.length
+    ? socialPreview.mediaUrls
+    : Array.isArray(socialPreview.imageUrls)
+      ? socialPreview.imageUrls
+      : [socialPreview.imageUrl].filter(Boolean);
+
+  return previewMediaUrls
+    .filter(Boolean)
+    .map((url) => ({
+      url,
+      source: isYouTubePreviewMediaUrl(url) ? 'youtube_thumbnail' : 'link_preview_image',
+      validated: false
+    }));
+}
+
+function isRenderableMediaGalleryItem(item) {
+  return item?.validated === true || isImageOrVideoMediaUrl(item?.url);
+}
+
 function getAttachmentSourceForUrl(post, url) {
   const value = String(url || '');
   const attachments = Array.isArray(post.attachments) ? post.attachments : [];
@@ -361,13 +393,10 @@ function addMediaIfPresent(container, post, logger = null) {
       }))
     : [];
   const imageUrls = Array.isArray(post.imageUrls) ? post.imageUrls : [];
-  const socialPreviewMediaUrls = post.musicLink
-    ? Array.isArray(post.socialPreview?.mediaUrls) && post.socialPreview.mediaUrls.length
-      ? post.socialPreview.mediaUrls
-      : Array.isArray(post.socialPreview?.imageUrls) && post.socialPreview.imageUrls.length
-        ? post.socialPreview.imageUrls
-        : [post.socialPreview?.imageUrl].filter(Boolean)
+  const socialPreviewMediaItems = post.musicLink
+    ? getSocialPreviewMediaItems(post.socialPreview)
     : [];
+  const socialPreviewMediaUrls = socialPreviewMediaItems.map((item) => item.url);
   const primaryImageUrls = imageUrls.length
     ? imageUrls
     : [post.firstImageUrl].filter(Boolean);
@@ -384,12 +413,15 @@ function addMediaIfPresent(container, post, logger = null) {
       url,
       source: 'uploaded_video_thumbnail_static'
     }));
-  const linkPreviewItems = [...socialPreviewMediaUrls, ...musicArtworkUrls]
-    .filter(Boolean)
-    .map((url) => ({
-      url,
-      source: isYouTubePreviewMediaUrl(url) ? 'youtube_thumbnail' : 'link_preview'
-    }));
+  const linkPreviewItems = socialPreviewMediaItems.length
+    ? socialPreviewMediaItems
+    : musicArtworkUrls
+      .filter(Boolean)
+      .map((url) => ({
+        url,
+        source: isYouTubePreviewMediaUrl(url) ? 'youtube_thumbnail' : 'link_preview_image',
+        validated: false
+      }));
   if (
     post.musicLink &&
     post.socialPreview?.description &&
@@ -471,7 +503,7 @@ function addMediaIfPresent(container, post, logger = null) {
       return false;
     }
 
-    if (!isImageOrVideoMediaUrl(item.url)) {
+    if (!isRenderableMediaGalleryItem(item)) {
       logger?.info?.('relay link preview image validation failed', {
         sourceMessageId,
         imageUrl: item.url,
@@ -481,6 +513,14 @@ function addMediaIfPresent(container, post, logger = null) {
         sourceMessageId,
         imageUrl: item.url
       });
+      if (item.source === 'link_preview_image' || item.source === 'youtube_thumbnail') {
+        logger?.warn?.('media gallery item skipped broken_preview_image', {
+          sourceMessageId,
+          mediaUrl: item.url,
+          source_type: item.source,
+          failureReason: 'unvalidated_or_invalid_preview_media'
+        });
+      }
       return false;
     }
 
@@ -504,7 +544,7 @@ function addMediaIfPresent(container, post, logger = null) {
   }
 
   const selectedLinkPreviewItems = galleryItems.filter(
-    (item) => item.source === 'link_preview' || item.source === 'youtube_thumbnail'
+    (item) => item.source === 'link_preview_image' || item.source === 'youtube_thumbnail'
   );
   if (selectedLinkPreviewItems.length) {
     logger?.info?.('relay link preview image selected', {
@@ -557,6 +597,14 @@ function addMediaIfPresent(container, post, logger = null) {
         index,
         mediaUrl: item.url,
         source_type: 'uploaded_video_playable'
+      });
+    }
+    if (item.source === 'link_preview_image' || item.source === 'youtube_thumbnail') {
+      logger?.info?.('media gallery item added source_type=link_preview_image', {
+        sourceMessageId,
+        index,
+        mediaUrl: item.url,
+        source_type: item.source
       });
     }
     gallery.addItems(buildMediaGalleryItem(item, logger, {
@@ -678,69 +726,84 @@ function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls =
   const suppressMedia = options.suppressMedia === true;
   const isYouTubePreview = isYouTubeSourceUrl(socialPreview.sourceUrl);
 
-  const previewMediaUrls = Array.isArray(socialPreview.mediaUrls) && socialPreview.mediaUrls.length
-    ? socialPreview.mediaUrls
-    : Array.isArray(socialPreview.imageUrls)
-      ? socialPreview.imageUrls
-      : [socialPreview.imageUrl].filter(Boolean);
+  const previewMediaItems = getSocialPreviewMediaItems(socialPreview);
   const existingNormalized = new Set(existingMediaUrls.map((url) => normalizeMediaUrl(url)));
-  const dedupedPreviewImages = previewMediaUrls.filter((imageUrl, index, array) => {
-    if (!imageUrl) {
+  const dedupedPreviewItems = previewMediaItems.filter((item, index, array) => {
+    if (!item?.url) {
       return false;
     }
 
-    const normalized = normalizeMediaUrl(imageUrl);
+    const normalized = normalizeMediaUrl(item.url);
     return (
-      array.findIndex((entry) => normalizeMediaUrl(entry) === normalized) === index &&
+      array.findIndex((entry) => normalizeMediaUrl(entry.url) === normalized) === index &&
       !existingNormalized.has(normalized)
     );
   });
+  const renderablePreviewItems = dedupedPreviewItems.filter((item) => {
+    const renderable = isRenderableMediaGalleryItem(item);
+    if (!renderable) {
+      logger?.warn?.('media gallery item skipped broken_preview_image', {
+        sourceMessageId,
+        sourceUrl: socialPreview.sourceUrl || null,
+        mediaUrl: item.url,
+        source_type: item.source || 'link_preview_image',
+        failureReason: 'unvalidated_or_invalid_preview_media'
+      });
+    }
+    return renderable;
+  });
 
   if (socialPreview.isGifShare) {
-    if (suppressMedia && dedupedPreviewImages.length) {
+    if (suppressMedia && renderablePreviewItems.length) {
       logger?.info?.('relay uploaded media present; suppressing link preview media', {
         sourceMessageId,
         sourceUrl: socialPreview.sourceUrl || null,
-        suppressedCount: dedupedPreviewImages.length,
-        suppressedUrls: dedupedPreviewImages
+        suppressedCount: renderablePreviewItems.length,
+        suppressedUrls: renderablePreviewItems.map((item) => item.url)
       });
-      if (dedupedPreviewImages.some(isYouTubePreviewMediaUrl)) {
+      if (renderablePreviewItems.some((item) => isYouTubePreviewMediaUrl(item.url))) {
         logger?.info?.('youtube thumbnail suppressed due to uploaded media', {
           sourceMessageId,
           sourceUrl: socialPreview.sourceUrl || null,
-          suppressedUrls: dedupedPreviewImages.filter(isYouTubePreviewMediaUrl)
+          suppressedUrls: renderablePreviewItems.map((item) => item.url).filter(isYouTubePreviewMediaUrl)
         });
       }
       logger?.info?.('link preview media suppressed due to attachment priority', {
         sourceMessageId,
         sourceUrl: socialPreview.sourceUrl || null,
-        suppressedUrls: dedupedPreviewImages
+        suppressedUrls: renderablePreviewItems.map((item) => item.url)
       });
       return;
     }
-    if (dedupedPreviewImages.length) {
+    if (renderablePreviewItems.length) {
       const gallery = new MediaGalleryBuilder();
 
-      const limitedImages = dedupedPreviewImages.slice(0, MAX_MEDIA_ITEMS);
+      const limitedImages = renderablePreviewItems.slice(0, MAX_MEDIA_ITEMS);
       logger?.info?.('media gallery final item order', {
         sourceMessageId,
-        items: limitedImages.map((mediaUrl, index) => ({
+        items: limitedImages.map((item, index) => ({
           index,
-          url: mediaUrl,
-          source: isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview',
-          source_type: isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview'
+          url: item.url,
+          source: item.source || (isYouTubePreviewMediaUrl(item.url) ? 'youtube_thumbnail' : 'link_preview_image'),
+          source_type: item.source || (isYouTubePreviewMediaUrl(item.url) ? 'youtube_thumbnail' : 'link_preview_image')
         }))
       });
-      for (const [index, mediaUrl] of limitedImages.entries()) {
-        const sourceType = isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview';
+      for (const [index, item] of limitedImages.entries()) {
+        const sourceType = item.source || (isYouTubePreviewMediaUrl(item.url) ? 'youtube_thumbnail' : 'link_preview_image');
         logger?.info?.('media gallery item source', {
           sourceMessageId,
           index,
-          mediaUrl,
+          mediaUrl: item.url,
           source: sourceType,
           source_type: sourceType
         });
-        gallery.addItems(new MediaGalleryItemBuilder().setURL(mediaUrl));
+        logger?.info?.('media gallery item added source_type=link_preview_image', {
+          sourceMessageId,
+          sourceUrl: socialPreview.sourceUrl || null,
+          mediaUrl: item.url,
+          source_type: sourceType
+        });
+        gallery.addItems(buildMediaGalleryItem(item, logger, { sourceMessageId }));
       }
 
       container.addMediaGalleryComponents(gallery);
@@ -773,54 +836,66 @@ function addSocialPreviewIfPresent(container, socialPreview, existingMediaUrls =
   );
   container.addTextDisplayComponents(new TextDisplayBuilder().setContent(lines.join('\n')));
 
-  if (suppressMedia && dedupedPreviewImages.length) {
+  if (suppressMedia && renderablePreviewItems.length) {
     logger?.info?.('relay uploaded media present; suppressing link preview media', {
       sourceMessageId,
       sourceUrl: socialPreview.sourceUrl || null,
-      suppressedCount: dedupedPreviewImages.length,
-      suppressedUrls: dedupedPreviewImages
+      suppressedCount: renderablePreviewItems.length,
+      suppressedUrls: renderablePreviewItems.map((item) => item.url)
     });
-    if (dedupedPreviewImages.some(isYouTubePreviewMediaUrl)) {
+    if (renderablePreviewItems.some((item) => isYouTubePreviewMediaUrl(item.url))) {
       logger?.info?.('youtube thumbnail suppressed due to uploaded media', {
         sourceMessageId,
         sourceUrl: socialPreview.sourceUrl || null,
-        suppressedUrls: dedupedPreviewImages.filter(isYouTubePreviewMediaUrl)
+        suppressedUrls: renderablePreviewItems.map((item) => item.url).filter(isYouTubePreviewMediaUrl)
       });
     }
     logger?.info?.('link preview media suppressed due to attachment priority', {
       sourceMessageId,
       sourceUrl: socialPreview.sourceUrl || null,
-      suppressedUrls: dedupedPreviewImages
+      suppressedUrls: renderablePreviewItems.map((item) => item.url)
     });
     return;
   }
 
-  if (dedupedPreviewImages.length) {
+  if (renderablePreviewItems.length) {
     const gallery = new MediaGalleryBuilder();
 
-    const limitedImages = dedupedPreviewImages.slice(0, MAX_MEDIA_ITEMS);
+    const limitedImages = renderablePreviewItems.slice(0, MAX_MEDIA_ITEMS);
     logger?.info?.('media gallery final item order', {
       sourceMessageId,
-      items: limitedImages.map((mediaUrl, index) => ({
+      items: limitedImages.map((item, index) => ({
         index,
-        url: mediaUrl,
-        source: isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview',
-        source_type: isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview'
+        url: item.url,
+        source: item.source || (isYouTubePreviewMediaUrl(item.url) ? 'youtube_thumbnail' : 'link_preview_image'),
+        source_type: item.source || (isYouTubePreviewMediaUrl(item.url) ? 'youtube_thumbnail' : 'link_preview_image')
       }))
     });
-    for (const [index, mediaUrl] of limitedImages.entries()) {
-      const sourceType = isYouTubePreviewMediaUrl(mediaUrl) ? 'youtube_thumbnail' : 'link_preview';
+    for (const [index, item] of limitedImages.entries()) {
+      const sourceType = item.source || (isYouTubePreviewMediaUrl(item.url) ? 'youtube_thumbnail' : 'link_preview_image');
       logger?.info?.('media gallery item source', {
         sourceMessageId,
         index,
-        mediaUrl,
+        mediaUrl: item.url,
         source: sourceType,
         source_type: sourceType
       });
-      gallery.addItems(new MediaGalleryItemBuilder().setURL(mediaUrl));
+      logger?.info?.('media gallery item added source_type=link_preview_image', {
+        sourceMessageId,
+        sourceUrl: socialPreview.sourceUrl || null,
+        mediaUrl: item.url,
+        source_type: sourceType
+      });
+      gallery.addItems(buildMediaGalleryItem(item, logger, { sourceMessageId }));
     }
 
     container.addMediaGalleryComponents(gallery);
+  } else if (dedupedPreviewItems.length) {
+    logger?.info?.('preview image omitted no valid candidate', {
+      sourceMessageId,
+      sourceUrl: socialPreview.sourceUrl || null,
+      candidateCount: dedupedPreviewItems.length
+    });
   }
 }
 

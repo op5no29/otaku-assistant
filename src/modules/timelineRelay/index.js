@@ -10,6 +10,7 @@ const { buildTimelineMessage } = require('./buildTimelineMessage');
 const { extractFirstPost, extractThreadMessagePost, extractPlainMessagePost } = require('./extractFirstPost');
 const { prepareVideoThumbnail } = require('./videoThumbnail');
 const { prepareAttachmentRelay } = require('./attachmentRelay');
+const { preparePreviewImageRelay } = require('./previewImageRelay');
 const { resolveTwitterMedia } = require('./twitterMediaResolver');
 const { enrichPostWithMusicLink } = require('./musicLinks');
 const { applyQuestionStatusTag } = require('../questionResolver/threadTags');
@@ -751,6 +752,7 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
   const twitterResolved = await resolveTwitterMedia(post, config, logger);
   const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, logger);
   const attachmentPrepared = await prepareAttachmentRelay(videoPrepared.post, config, logger);
+  const previewPrepared = await preparePreviewImageRelay(attachmentPrepared.post, config, logger);
   if (postHasYouTubeRelayUrl(attachmentPrepared.post)) {
     logger.info('youtube preview strategy selected', {
       sourceMessageId: attachmentPrepared.post?.messageId || null,
@@ -761,22 +763,22 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
       reason: 'components_v2_messages_cannot_use_content_or_embeds'
     });
   }
-  if (attachmentPrepared.post?.relayOrigin === 'posthoc_hashtag') {
-    const posthocAttachments = Array.isArray(attachmentPrepared.post.attachments)
-      ? attachmentPrepared.post.attachments
+  if (previewPrepared.post?.relayOrigin === 'posthoc_hashtag') {
+    const posthocAttachments = Array.isArray(previewPrepared.post.attachments)
+      ? previewPrepared.post.attachments
       : [];
     logger.info('posthoc source attachment count', {
-      sourceMessageId: attachmentPrepared.post.messageId || null,
+      sourceMessageId: previewPrepared.post.messageId || null,
       attachmentCount: posthocAttachments.length,
-      componentFileCount: Array.isArray(attachmentPrepared.post.componentFiles) ? attachmentPrepared.post.componentFiles.length : 0,
-      mediaGalleryItemCount: Array.isArray(attachmentPrepared.post.mediaGalleryItems) ? attachmentPrepared.post.mediaGalleryItems.length : 0,
-      downloadableAttachmentCount: Array.isArray(attachmentPrepared.post.downloadableAttachments) ? attachmentPrepared.post.downloadableAttachments.length : 0,
+      componentFileCount: Array.isArray(previewPrepared.post.componentFiles) ? previewPrepared.post.componentFiles.length : 0,
+      mediaGalleryItemCount: Array.isArray(previewPrepared.post.mediaGalleryItems) ? previewPrepared.post.mediaGalleryItems.length : 0,
+      downloadableAttachmentCount: Array.isArray(previewPrepared.post.downloadableAttachments) ? previewPrepared.post.downloadableAttachments.length : 0,
       relayStage: 'payload_prepared'
     });
     for (const attachment of posthocAttachments) {
       if (attachment.isImage && !attachment.isSpoiler) {
         logger.info('posthoc source media attachment relayed', {
-          sourceMessageId: attachmentPrepared.post.messageId || null,
+          sourceMessageId: previewPrepared.post.messageId || null,
           attachmentId: attachment.id || null,
           name: attachment.name || attachment.originalFileName || null,
           mediaKind: attachment.isGif ? 'gif' : 'image',
@@ -785,29 +787,29 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
       }
     }
   }
-  const matchedGlobalRoutes = Array.isArray(attachmentPrepared.post?.matchedGlobalHashtagRoutes)
-    ? attachmentPrepared.post.matchedGlobalHashtagRoutes
+  const matchedGlobalRoutes = Array.isArray(previewPrepared.post?.matchedGlobalHashtagRoutes)
+    ? previewPrepared.post.matchedGlobalHashtagRoutes
     : [];
-  const matchedBotRoutes = Array.isArray(attachmentPrepared.post?.matchedBotHashtagRoutes)
-    ? attachmentPrepared.post.matchedBotHashtagRoutes
+  const matchedBotRoutes = Array.isArray(previewPrepared.post?.matchedBotHashtagRoutes)
+    ? previewPrepared.post.matchedBotHashtagRoutes
     : [];
   const isRouteRelayCard = forumType === 'knowledge' || (forumType !== 'question' && (
     matchedGlobalRoutes.length > 0 ||
     matchedBotRoutes.length > 0 ||
-    attachmentPrepared.post?.relayOrigin === 'posthoc_hashtag'
+    previewPrepared.post?.relayOrigin === 'posthoc_hashtag'
   ));
   if (isRouteRelayCard) {
-    const existingExtraButtons = Array.isArray(attachmentPrepared.post.extraLinkButtons)
-      ? attachmentPrepared.post.extraLinkButtons
+    const existingExtraButtons = Array.isArray(previewPrepared.post.extraLinkButtons)
+      ? previewPrepared.post.extraLinkButtons
       : [];
-    const relayLinkButtons = extractRelayLinkButtons(attachmentPrepared.post, logger);
-    attachmentPrepared.post.extraLinkButtons = [
+    const relayLinkButtons = extractRelayLinkButtons(previewPrepared.post, logger);
+    previewPrepared.post.extraLinkButtons = [
       ...existingExtraButtons,
       ...relayLinkButtons
     ];
   }
   if (forumType !== 'question' && (matchedGlobalRoutes.length || matchedBotRoutes.length)) {
-    attachmentPrepared.post.accentColor = resolveRouteAccentColor({
+    previewPrepared.post.accentColor = resolveRouteAccentColor({
       globalRouteKeys: matchedGlobalRoutes,
       botRouteKeys: matchedBotRoutes,
       config,
@@ -828,7 +830,7 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
       duplicateBlocksSkipped: true
     });
   }
-  const allowedMentionRoleIds = normalizeRoleIds(attachmentPrepared.post.allowedMentionRoleIds);
+  const allowedMentionRoleIds = normalizeRoleIds(previewPrepared.post.allowedMentionRoleIds);
   if (forumType === 'question' && allowedMentionRoleIds.length) {
     logger.info('question role allowed mentions applied', {
       sourceMessageId: post.messageId,
@@ -846,12 +848,13 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
 
   return {
     payload: buildTimelineMessage({
-      post: attachmentPrepared.post,
+      post: previewPrepared.post,
       config,
       forumType,
       logger
     }),
     cleanup: async () => {
+      await previewPrepared.cleanup();
       await attachmentPrepared.cleanup();
       await videoPrepared.cleanup();
       await twitterResolved.cleanup();
