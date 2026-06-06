@@ -66,6 +66,52 @@ function createDatabase(databasePath) {
       DELETE FROM relayed_messages
       WHERE timeline_message_id = ?
     `),
+    getLogDashboardMessage: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        channel_id AS channelId,
+        dashboard_kind AS dashboardKind,
+        message_id AS messageId,
+        last_payload_json AS lastPayloadJson,
+        recent_events_json AS recentEventsJson,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM bot_log_dashboard_messages
+      WHERE guild_id = ? AND dashboard_kind = ?
+      LIMIT 1
+    `),
+    listLogDashboardMessages: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        channel_id AS channelId,
+        dashboard_kind AS dashboardKind,
+        message_id AS messageId,
+        last_payload_json AS lastPayloadJson,
+        recent_events_json AS recentEventsJson,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM bot_log_dashboard_messages
+      WHERE guild_id = ?
+      ORDER BY dashboard_kind ASC
+    `),
+    upsertLogDashboardMessage: sqlite.prepare(`
+      INSERT INTO bot_log_dashboard_messages (
+        guild_id,
+        channel_id,
+        dashboard_kind,
+        message_id,
+        last_payload_json,
+        recent_events_json,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, dashboard_kind) DO UPDATE SET
+        channel_id = excluded.channel_id,
+        message_id = excluded.message_id,
+        last_payload_json = excluded.last_payload_json,
+        recent_events_json = excluded.recent_events_json,
+        updated_at = excluded.updated_at
+    `),
     listMessageRelayTargets: sqlite.prepare(`
       SELECT
         source_message_id AS sourceMessageId,
@@ -2877,6 +2923,35 @@ function createDatabase(databasePath) {
 
   return {
     sqlite,
+    logDashboards: {
+      get(guildId, dashboardKind) {
+        return statements.getLogDashboardMessage.get(guildId, dashboardKind) || null;
+      },
+      list(guildId) {
+        return statements.listLogDashboardMessages.all(guildId);
+      },
+      upsert({
+        guildId,
+        channelId,
+        dashboardKind,
+        messageId = null,
+        lastPayloadJson = null,
+        recentEventsJson = '[]'
+      }) {
+        const existing = statements.getLogDashboardMessage.get(guildId, dashboardKind) || null;
+        const now = new Date().toISOString();
+        statements.upsertLogDashboardMessage.run(
+          guildId,
+          channelId,
+          dashboardKind,
+          messageId,
+          lastPayloadJson,
+          recentEventsJson,
+          existing?.createdAt || now,
+          now
+        );
+      }
+    },
     relays: {
       hasThreadRelay(threadId) {
         return Boolean(statements.hasThreadRelay.get(threadId));

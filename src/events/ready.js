@@ -6,6 +6,7 @@ const {
 const pkg = require('../../package.json');
 const { getBotHealth } = require('../modules/ops/health');
 const { notifyOpsChannel } = require('../modules/ops/notify');
+const { ensureLogDashboards } = require('../modules/logDashboard');
 const { startIntroDmQueueProcessor } = require('../modules/introDm');
 const { runAnimeOrphanScan } = require('../modules/anime');
 const { getAnnictAccessToken } = require('../modules/anime/annictClient');
@@ -19,8 +20,14 @@ const {
 
 module.exports = {
   async execute(client) {
+    client.logDashboardStatus = 'running';
     client.db.deletableMessages.deleteExpired();
     await initializeVoiceProfileMappings(client);
+    await ensureLogDashboards(client, { reason: 'startup' }).catch((error) => {
+      client.logger.error('log dashboard startup ensure failed', {
+        error: error.message
+      });
+    });
     await backfillIntroAddendums(client, process.env.GUILD_ID).catch((error) => {
       client.logger.error('intro addendum backfill failed', {
         guildId: process.env.GUILD_ID,

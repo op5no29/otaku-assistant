@@ -1,5 +1,6 @@
 const { requestOllamaChat } = require('../llm/ollamaClient');
 const { hasUserIntro } = require('../guildMembers');
+const { appendOperationLog } = require('../logDashboard');
 
 const PROMPT_TYPES = {
   VC_NO_INTRO: 'vc_no_intro',
@@ -312,11 +313,6 @@ async function sendIntroDmReport(client, {
   errorMessage = null
 }) {
   const config = getPromptConfig(client, promptType);
-  const channelId = config.logChannelId;
-  if (!channelId) {
-    return null;
-  }
-
   const label = promptType === PROMPT_TYPES.WELCOME_JOIN ? '挨拶DM' : '自己紹介DM';
   const content = success
     ? [
@@ -337,41 +333,19 @@ async function sendIntroDmReport(client, {
         `時刻: ${new Date().toISOString()}`
       ].join('\n');
 
-  try {
-    const channel = client.channels.cache.get(channelId) || await client.channels.fetch(channelId);
-    if (!channel?.isTextBased?.()) {
-      client.logger.warn('intro DM report failed', {
-        channelId,
-        reason: 'not_text_based'
-      });
-      return null;
+  appendOperationLog(client, {
+    severity: success ? 'info' : 'error',
+    eventType: success ? 'intro_dm_sent' : 'intro_dm_failed',
+    title: success ? `${label}を送信しました` : `${label}の送信に失敗しました`,
+    body: content,
+    metadata: {
+      userId,
+      promptType,
+      success,
+      logChannelId: config.logChannelId || null
     }
-
-    const sent = await channel.send({
-      content,
-      allowedMentions: {
-        parse: [],
-        repliedUser: false
-      }
-    });
-    client.logger.info('intro DM report sent', {
-      channelId,
-      userId,
-      promptType,
-      success,
-      reportMessageId: sent.id
-    });
-    return sent;
-  } catch (error) {
-    client.logger.warn('intro DM report failed', {
-      channelId,
-      userId,
-      promptType,
-      success,
-      error: error.message
-    });
-    return null;
-  }
+  });
+  return null;
 }
 
 function isAllowedTargetUser(client, userId, promptType = null) {
@@ -727,10 +701,6 @@ async function sendIntroVcReminderReport(client, {
   nextEligibleAt = null
 }) {
   const config = getIntroVcReminderConfig(client);
-  const logChannelId = config.logChannelId;
-  if (!logChannelId) {
-    return null;
-  }
 
   const status = success
     ? 'intro reminder DM sent'
@@ -753,34 +723,45 @@ async function sendIntroVcReminderReport(client, {
   }
   lines.push(`時刻: ${new Date().toISOString()}`);
 
-  try {
-    const channel = client.channels.cache.get(logChannelId) || await client.channels.fetch(logChannelId);
-    if (!channel?.isTextBased?.()) {
-      client.logger.warn('intro reminder report failed', {
-        logChannelId,
-        userId,
-        reason: 'not_text_based'
-      });
-      return null;
-    }
+  const importantSkipReasons = new Set([
+    'missing_config',
+    'reminder_limit_reached'
+  ]);
+  const shouldShowRoutineSkip = client.appConfig.moderatorLogs?.introReminderSkipLogs === true;
+  const shouldRecordVisible =
+    success ||
+    Boolean(errorMessage) ||
+    importantSkipReasons.has(String(skippedReason || '')) ||
+    shouldShowRoutineSkip;
 
-    return await channel.send({
-      content: lines.join('\n'),
-      allowedMentions: {
-        parse: [],
-        users: [],
-        roles: [],
-        repliedUser: false
-      }
-    });
-  } catch (error) {
-    client.logger.warn('intro reminder report failed', {
-      logChannelId,
+  if (!shouldRecordVisible) {
+    client.logger.info('intro reminder visible report suppressed routine skip', {
       userId,
-      error: error.message
+      skippedReason: skippedReason || null,
+      reminderCount
     });
     return null;
   }
+
+  appendOperationLog(client, {
+    severity: success ? 'info' : errorMessage ? 'error' : 'warn',
+    eventType: success
+      ? 'intro_reminder_dm_sent'
+      : errorMessage
+        ? 'intro_reminder_dm_failed'
+        : `intro_reminder_${skippedReason || 'skipped'}`,
+    title: status,
+    body: lines.join('\n'),
+    metadata: {
+      userId,
+      channelId,
+      voiceChannelId: voiceChannel?.id || channelId || null,
+      reminderCount,
+      skippedReason,
+      logChannelId: config.logChannelId || null
+    }
+  });
+  return null;
 }
 
 async function withIntroVcReminderLock(client, guildId, userId, callback) {

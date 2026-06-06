@@ -223,6 +223,17 @@
     "developerPortalUrl": "https://discord.com/developers/applications/YOUR_APPLICATION_ID/bot",
     "allowRestartCommand": false
   },
+  "moderatorLogs": {
+    "routineDiscordLogs": false,
+    "introReminderSkipLogs": false,
+    "dashboard": {
+      "enabled": true,
+      "channelId": "YOUR_OPS_LOG_CHANNEL_ID",
+      "maxEvents": 3,
+      "recreateOnStartup": false,
+      "debounceMs": 5000
+    }
+  },
   "questionForumTags": {
     "YOUR_QUESTION_FORUM_ID_1": {
       "resolved": "YOUR_RESOLVED_TAG_ID",

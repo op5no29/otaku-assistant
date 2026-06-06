@@ -53,6 +53,9 @@ function createBotClient({ appConfig, database, logger }) {
   client.introDmQueueProcessing = false;
   client.introDmQueueInterval = null;
   client.introVcReminderLocks = new Map();
+  client.logDashboardStartedAt = new Date().toISOString();
+  client.logDashboardStatus = 'starting';
+  client.logDashboardUpdateTimers = new Map();
   client.voiceSessionSummaryQueues = new Map();
   client.voiceSessionSummaryReconcileInterval = null;
   client.vcSummarySelectionState = new Map();

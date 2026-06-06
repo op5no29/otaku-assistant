@@ -10,6 +10,7 @@ const {
   TextDisplayBuilder
 } = require('discord.js');
 const { registerVcSummaryDeletableMessage } = require('../deletableMessages');
+const { appendOperationLog } = require('../logDashboard');
 
 const DEFAULT_ACCENT_COLOR = 0x3b82f6;
 const SESSION_STATUSES = {
@@ -100,6 +101,16 @@ function createSessionId(categoryId) {
 
 function getVoiceSessionQueueKey(guildId, categoryId, profileChannelId) {
   return `${String(guildId || '')}:${String(categoryId || '')}:${String(profileChannelId || '')}`;
+}
+
+function isReadyReconcileReason(reason) {
+  return /ready|restart|startup/i.test(String(reason || ''));
+}
+
+function isOpenSessionUniqueConflict(error) {
+  const message = String(error?.message || '');
+  return (error?.code === 'SQLITE_CONSTRAINT_UNIQUE' || error?.code === 'SQLITE_CONSTRAINT') &&
+    /UNIQUE constraint failed: vc_voice_sessions\.guild_id, vc_voice_sessions\.category_id, vc_voice_sessions\.profile_channel_id/i.test(message);
 }
 
 function getVoiceSessionQueues(client) {
@@ -548,6 +559,19 @@ async function deleteVoiceSessionEndCardRecord(client, record, {
           reason,
           error: error.message
         });
+        appendOperationLog(client, {
+          severity: 'error',
+          eventType: 'vc_end_summary_delete_failed',
+          title: 'VC end summary card delete failed',
+          body: [
+            `session: \`${record.sessionId}\``,
+            `category: \`${record.categoryId}\``,
+            `message: \`${record.messageId}\``,
+            `reason: ${reason}`,
+            `error: ${error.message}`
+          ].join('\n'),
+          metadata: record
+        });
         client.db.vcVoiceSessions.updateSummaryMessageStatus({
           guildId: record.guildId,
           sessionId: record.sessionId,
@@ -574,6 +598,26 @@ async function deleteVoiceSessionEndCardRecord(client, record, {
     status,
     reason,
     messageDeleted: deleted
+  });
+  appendOperationLog(client, {
+    severity: 'info',
+    eventType: 'vc_end_summary_deleted',
+    title: 'VC end summary card deleted',
+    body: [
+      `session: \`${record.sessionId}\``,
+      `category: \`${record.categoryId}\``,
+      `status: ${status}`,
+      `reason: ${reason}`
+    ].join('\n'),
+    metadata: {
+      guildId: record.guildId,
+      sessionId: record.sessionId,
+      categoryId: record.categoryId,
+      profileChannelId: record.profileChannelId,
+      messageId: record.messageId,
+      status,
+      reason
+    }
   });
   return true;
 }
@@ -632,6 +676,23 @@ async function deleteActiveVoiceSessionEndCardsForCategory(client, {
           profileChannelId,
           messageId: record.messageId
         });
+        appendOperationLog(client, {
+          severity: 'info',
+          eventType: 'vc_end_summary_replaced_by_live',
+          title: 'VC end summary replaced by live card',
+          body: [
+            `category: \`${categoryId}\``,
+            `session: \`${record.sessionId}\``,
+            `message: \`${record.messageId}\``
+          ].join('\n'),
+          metadata: {
+            guildId,
+            sessionId: record.sessionId,
+            categoryId,
+            profileChannelId,
+            messageId: record.messageId
+          }
+        });
       }
     }
   }
@@ -672,6 +733,22 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
       categoryId: session.categoryId,
       reason: 'missing_profile_channel'
     });
+    appendOperationLog(client, {
+      severity: 'warn',
+      eventType: 'vc_end_summary_post_failed',
+      title: 'VC end summary card post failed',
+      body: [
+        `session: \`${session.sessionId}\``,
+        `category: \`${session.categoryId}\``,
+        'reason: missing_profile_channel'
+      ].join('\n'),
+      metadata: {
+        guildId: session.guildId,
+        sessionId: session.sessionId,
+        categoryId: session.categoryId,
+        reason: 'missing_profile_channel'
+      }
+    });
     return null;
   }
 
@@ -689,6 +766,24 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
       categoryId: session.categoryId,
       profileChannelId,
       reason: 'profile_channel_unavailable'
+    });
+    appendOperationLog(client, {
+      severity: 'warn',
+      eventType: 'vc_end_summary_post_failed',
+      title: 'VC end summary card post failed',
+      body: [
+        `session: \`${session.sessionId}\``,
+        `category: \`${session.categoryId}\``,
+        `profileChannel: \`${profileChannelId}\``,
+        'reason: profile_channel_unavailable'
+      ].join('\n'),
+      metadata: {
+        guildId: session.guildId,
+        sessionId: session.sessionId,
+        categoryId: session.categoryId,
+        profileChannelId,
+        reason: 'profile_channel_unavailable'
+      }
     });
     return null;
   }
@@ -709,6 +804,24 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
       profileChannelId,
       reason: 'send_failed',
       error: error.message
+    });
+    appendOperationLog(client, {
+      severity: 'error',
+      eventType: 'vc_end_summary_post_failed',
+      title: 'VC end summary card post failed',
+      body: [
+        `session: \`${session.sessionId}\``,
+        `category: \`${session.categoryId}\``,
+        `profileChannel: \`${profileChannelId}\``,
+        `error: ${error.message}`
+      ].join('\n'),
+      metadata: {
+        guildId: session.guildId,
+        sessionId: session.sessionId,
+        categoryId: session.categoryId,
+        profileChannelId,
+        reason: 'send_failed'
+      }
     });
     return null;
   });
@@ -738,6 +851,24 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
     participantCount: parseJsonArray(session.allParticipantIdsJson).length,
     maxHumanCount: Number(session.maxHumanCount || 0),
     durationSeconds: getSessionDurationSeconds(session)
+  });
+  appendOperationLog(client, {
+    severity: 'info',
+    eventType: 'vc_end_summary_posted',
+    title: 'VC end summary card posted',
+    body: [
+      `${resolveCategoryName(client, guild, session.categoryId, session)} / ${resolvePrimaryVoiceChannelName(guild, session)}`,
+      `参加人数: ${parseJsonArray(session.allParticipantIdsJson).length} / 最大人数: ${Number(session.maxHumanCount || 0)}`,
+      `通話時間: ${formatDurationSeconds(getSessionDurationSeconds(session))}`
+    ].join('\n'),
+    metadata: {
+      guildId: session.guildId,
+      sessionId: session.sessionId,
+      categoryId: session.categoryId,
+      profileChannelId,
+      messageId: message.id,
+      expiresAt
+    }
   });
   return message;
 }
@@ -775,12 +906,48 @@ async function cleanupVoiceSessionEndSummaryCards(client, { reason = 'ready_clea
   return { activeCount: records.length, deletedCount, scheduledCount, errorCount };
 }
 
+function updateExistingOpenSessionFromSnapshot(client, session, snapshot, {
+  nowIso,
+  reason,
+  metadata = {}
+}) {
+  session.allParticipantIds = [...new Set([...session.allParticipantIds, ...snapshot.memberIds])];
+  session.voiceChannelIds = [...new Set([...session.voiceChannelIds, ...snapshot.voiceChannelIds])];
+  session.mainVoiceChannelId = snapshot.mainVoiceChannelId || session.mainVoiceChannelId || null;
+  session.firstTwoPlusAt = session.firstTwoPlusAt || nowIso;
+  session.lastTwoPlusAt = nowIso;
+
+  const syncResult = syncSessionMembers(client, session, snapshot, { nowIso });
+  session.lastLeaveUserId = syncResult.lastLeaveUserId || session.lastLeaveUserId || null;
+  session.lastLeaveAt = syncResult.lastLeaveAt || session.lastLeaveAt || null;
+
+  if (session.status === SESSION_STATUSES.SOLO_GRACE) {
+    session.status = SESSION_STATUSES.ACTIVE;
+    session.soloSince = null;
+    insertSessionEvent(client, session, {
+      eventType: 'session_resume',
+      occurredAt: nowIso,
+      snapshot,
+      metadata: { reason, ...metadata }
+    });
+  } else {
+    addActiveSeconds(session, nowIso);
+  }
+
+  session.lastActiveAt = nowIso;
+  updateSessionPeakIfNeeded(client, session, snapshot, nowIso);
+  session.updatedAt = nowIso;
+  client.db.vcVoiceSessions.upsert(serializeSession(session));
+  return session;
+}
+
 function createSessionFromSnapshot(client, {
   guildId,
   categoryId,
   profileChannelId,
   snapshot,
-  nowIso
+  nowIso,
+  reason = 'voice_state_update'
 }) {
   const firstMember = snapshot.members[0] || null;
   const session = {
@@ -810,7 +977,50 @@ function createSessionFromSnapshot(client, {
     createdAt: nowIso,
     updatedAt: nowIso
   };
-  client.db.vcVoiceSessions.upsert(serializeSession(session));
+  try {
+    client.db.vcVoiceSessions.upsert(serializeSession(session));
+  } catch (error) {
+    if (!isOpenSessionUniqueConflict(error)) {
+      throw error;
+    }
+
+    const existingSession = getSessionWithJson(client.db.vcVoiceSessions.getOpen({
+      guildId,
+      categoryId,
+      profileChannelId
+    }));
+    if (!existingSession) {
+      throw error;
+    }
+
+    client.logger.info('vc session duplicate active prevented', {
+      guildId,
+      categoryId,
+      profileChannelId,
+      attemptedSessionId: session.sessionId,
+      existingSessionId: existingSession.sessionId,
+      reason,
+      humanCount: snapshot.humanCount
+    });
+    insertSessionEvent(client, existingSession, {
+      eventType: 'restart_reconcile',
+      occurredAt: nowIso,
+      snapshot,
+      metadata: {
+        reason,
+        duplicateActivePrevented: true,
+        attemptedSessionId: session.sessionId
+      }
+    });
+    return updateExistingOpenSessionFromSnapshot(client, existingSession, snapshot, {
+      nowIso,
+      reason,
+      metadata: {
+        duplicateActivePrevented: true,
+        attemptedSessionId: session.sessionId
+      }
+    });
+  }
   for (const member of snapshot.members) {
     upsertCurrentMember(client, session, member, {
       nowIso,
@@ -823,7 +1033,7 @@ function createSessionFromSnapshot(client, {
     eventType: 'session_start',
     occurredAt: nowIso,
     snapshot,
-    metadata: { reason: 'min_humans_reached' }
+    metadata: { reason: isReadyReconcileReason(reason) ? 'restart_reconcile' : 'min_humans_reached' }
   });
   insertSessionEvent(client, session, {
     eventType: 'peak_update',
@@ -840,6 +1050,17 @@ function createSessionFromSnapshot(client, {
     startedAt: session.startedAt,
     maxHumanCount: session.maxHumanCount
   });
+  if (isReadyReconcileReason(reason)) {
+    client.logger.info('vc session restart reconcile created new', {
+      guildId,
+      categoryId,
+      profileChannelId,
+      sessionId: session.sessionId,
+      humanCount: snapshot.humanCount,
+      startedAt: session.startedAt,
+      reason
+    });
+  }
   return session;
 }
 
@@ -979,6 +1200,7 @@ async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapp
   const guildId = guild.id;
   const snapshot = await collectCategorySnapshot(client, guild, categoryId, mapping);
   const minHumansToStart = Math.max(2, Number(config.minHumansToStart || 2));
+  const readyReconcile = isReadyReconcileReason(reason);
   const openSession = getSessionWithJson(client.db.vcVoiceSessions.getOpen({
     guildId,
     categoryId,
@@ -992,7 +1214,8 @@ async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapp
         categoryId,
         profileChannelId: mapping.profileChannelId,
         snapshot,
-        nowIso
+        nowIso,
+        reason
       });
     }
     return null;
@@ -1003,7 +1226,42 @@ async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapp
   session.voiceChannelIds = [...new Set([...session.voiceChannelIds, ...snapshot.voiceChannelIds])];
   session.mainVoiceChannelId = snapshot.mainVoiceChannelId || session.mainVoiceChannelId || null;
 
+  if (readyReconcile) {
+    client.logger.info('vc session restored on ready', {
+      guildId,
+      categoryId,
+      profileChannelId: mapping.profileChannelId,
+      sessionId: session.sessionId,
+      status: session.status,
+      humanCount: snapshot.humanCount,
+      startedAt: session.startedAt,
+      reason
+    });
+    insertSessionEvent(client, session, {
+      eventType: 'restart_reconcile',
+      occurredAt: nowIso,
+      snapshot,
+      metadata: {
+        reason,
+        restoredStatus: session.status
+      }
+    });
+  }
+
   if (session.status === SESSION_STATUSES.SOLO_GRACE && snapshot.humanCount < minHumansToStart) {
+    if (!session.soloSince) {
+      session.soloSince = nowIso;
+      session.updatedAt = nowIso;
+      client.db.vcVoiceSessions.upsert(serializeSession(session));
+      client.logger.info('vc session solo grace timestamp restored', {
+        guildId,
+        categoryId,
+        profileChannelId: mapping.profileChannelId,
+        sessionId: session.sessionId,
+        soloSince: session.soloSince,
+        reason
+      });
+    }
     const expiresAt = addMinutes(session.soloSince, config.soloGraceMinutes);
     if (expiresAt && new Date(nowIso).getTime() >= new Date(expiresAt).getTime()) {
       return await closeSession(client, session, snapshot, {
@@ -1036,6 +1294,18 @@ async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapp
         humanCount: snapshot.humanCount
       });
     } else {
+      if (readyReconcile) {
+        client.logger.info('vc session resume existing active', {
+          guildId,
+          categoryId,
+          profileChannelId: mapping.profileChannelId,
+          sessionId: session.sessionId,
+          humanCount: snapshot.humanCount,
+          startedAt: session.startedAt,
+          maxHumanCount: session.maxHumanCount,
+          reason
+        });
+      }
       addActiveSeconds(session, nowIso);
       session.lastActiveAt = nowIso;
     }
@@ -1048,9 +1318,21 @@ async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapp
 
   if (snapshot.humanCount === 0) {
     addActiveSeconds(session, nowIso);
+    if (readyReconcile) {
+      client.logger.info('vc session restart reconcile closed empty', {
+        guildId,
+        categoryId,
+        profileChannelId: mapping.profileChannelId,
+        sessionId: session.sessionId,
+        humanCount: snapshot.humanCount,
+        startedAt: session.startedAt,
+        maxHumanCount: session.maxHumanCount,
+        reason
+      });
+    }
     return await closeSession(client, session, snapshot, {
       closedAt: nowIso,
-      reason: 'empty',
+      reason: readyReconcile ? 'restart_reconcile_empty' : 'empty',
       config
     });
   }
@@ -1172,6 +1454,12 @@ async function reconcileVoiceSessions(client, {
 } = {}) {
   const config = getConfig(client);
   if (!config.enabled || !client.voiceProfileCategoryMap?.size) {
+    if (config.enabled && isReadyReconcileReason(reason)) {
+      client.logger.info('vc session ready reconcile skipped no configured category', {
+        reason,
+        configuredCategoryCount: client.voiceProfileCategoryMap?.size || 0
+      });
+    }
     return { updatedCount: 0, skippedReason: config.enabled ? 'no_categories' : 'disabled' };
   }
 

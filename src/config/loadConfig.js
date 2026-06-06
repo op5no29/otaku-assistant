@@ -140,6 +140,25 @@ function ensureOpsConfig(value) {
   };
 }
 
+function ensureModeratorLogsConfig(value, opsConfig = {}) {
+  const fallbackChannelId = String(opsConfig.logChannelId || '');
+  const dashboardValue = value?.dashboard && typeof value.dashboard === 'object' && !Array.isArray(value.dashboard)
+    ? value.dashboard
+    : {};
+
+  return {
+    routineDiscordLogs: value?.routineDiscordLogs === true,
+    introReminderSkipLogs: value?.introReminderSkipLogs === true,
+    dashboard: {
+      enabled: dashboardValue.enabled == null ? Boolean(fallbackChannelId) : dashboardValue.enabled !== false,
+      channelId: String(dashboardValue.channelId || value?.channelId || fallbackChannelId),
+      maxEvents: Math.max(1, Math.min(Number(dashboardValue.maxEvents ?? 3), 10)),
+      recreateOnStartup: dashboardValue.recreateOnStartup === true,
+      debounceMs: Math.max(1000, Number(dashboardValue.debounceMs ?? 5000))
+    }
+  };
+}
+
 function ensureIntroDmConfig(value, introChannelId = '') {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
@@ -466,6 +485,7 @@ function loadConfig(configPath) {
 
   const raw = fs.readFileSync(configPath, 'utf8');
   const parsed = JSON.parse(raw);
+  const normalizedOps = ensureOpsConfig(parsed.ops);
   const normalizedIntroDm = ensureIntroDmConfig(parsed.introDm, parsed.introChannelId);
 
   return {
@@ -553,11 +573,12 @@ function loadConfig(configPath) {
     posthocRelay: ensurePosthocRelayConfig(parsed.posthocRelay),
     introAddendums: ensureIntroAddendumsConfig(parsed.introAddendums),
     introDm: normalizedIntroDm,
-    introVcReminder: ensureIntroVcReminderConfig(parsed.introVcReminder, normalizedIntroDm, parsed.ops?.logChannelId || ''),
-    welcomeDm: ensureWelcomeDmConfig(parsed.welcomeDm, parsed.ops?.logChannelId || ''),
+    introVcReminder: ensureIntroVcReminderConfig(parsed.introVcReminder, normalizedIntroDm, normalizedOps.logChannelId || ''),
+    welcomeDm: ensureWelcomeDmConfig(parsed.welcomeDm, normalizedOps.logChannelId || ''),
     anime: ensureAnimeConfig(parsed.anime),
     annict: ensureAnnictConfig(parsed.annict),
-    ops: ensureOpsConfig(parsed.ops),
+    ops: normalizedOps,
+    moderatorLogs: ensureModeratorLogsConfig(parsed.moderatorLogs, normalizedOps),
     questionForumTags: ensureTagMap(parsed.questionForumTags, 'questionForumTags'),
     botHashtagRoutes: ensureBotHashtagRoutes(parsed.botHashtagRoutes, 'botHashtagRoutes'),
     vcListenOnlyChannelIds: ensureArray(parsed.vcListenOnlyChannelIds || [], 'vcListenOnlyChannelIds'),

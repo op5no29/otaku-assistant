@@ -20,7 +20,12 @@ async function notifyFatal(title, error) {
     title,
     `- Error: ${error?.message || String(error)}`,
     `- PID: ${process.pid}`
-  ].join('\n'));
+  ].join('\n'), {
+    severity: 'error',
+    eventType: 'fatal_error',
+    immediateDashboard: true,
+    standalone: true
+  });
 }
 
 async function shutdown(signal, exitCode = 0) {
@@ -32,11 +37,16 @@ async function shutdown(signal, exitCode = 0) {
   bootstrapLogger.warn('Shutdown requested', { signal, exitCode });
 
   if (activeClient?.isReady?.()) {
+    activeClient.logDashboardStatus = 'shutting_down';
     await notifyOpsChannel(activeClient, [
       '⚠️ Otaku Assistant shutting down',
       `- Signal: ${signal}`,
       `- PID: ${process.pid}`
-    ].join('\n'));
+  ].join('\n'), {
+    severity: 'warn',
+    eventType: 'shutdown',
+    immediateDashboard: true
+  });
   }
 
   try {

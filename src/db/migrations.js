@@ -49,6 +49,18 @@ function runMigrations(database) {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_role_panel_messages_message
       ON role_panel_messages (message_id);
 
+    CREATE TABLE IF NOT EXISTS bot_log_dashboard_messages (
+      guild_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      dashboard_kind TEXT NOT NULL,
+      message_id TEXT,
+      last_payload_json TEXT,
+      recent_events_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, dashboard_kind)
+    );
+
     CREATE TABLE IF NOT EXISTS relayed_messages (
       message_id TEXT PRIMARY KEY,
       thread_id TEXT NOT NULL,

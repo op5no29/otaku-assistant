@@ -241,7 +241,11 @@ module.exports = {
         '⚠️ Otaku Assistant restart requested',
         `- Requested by: ${interaction.user.tag} (${interaction.user.id})`,
         `- Guild: ${interaction.guildId || 'unknown'}`
-      ].join('\n'));
+      ].join('\n'), {
+        severity: 'warn',
+        eventType: 'restart_requested',
+        immediateDashboard: true
+      });
 
       setTimeout(() => {
         process.exit(0);
