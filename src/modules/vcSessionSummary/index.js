@@ -507,8 +507,10 @@ function buildVoiceSessionEndSummaryPayload(client, guild, sessionRow) {
   container.addTextDisplayComponents(
     new TextDisplayBuilder().setContent(title),
     new TextDisplayBuilder().setContent([
-      `**通話時間:** ${formatTime(session.startedAt)}〜${formatTime(session.endedAt)}（${formatDurationSeconds(durationSeconds)}）`,
-      `**参加人数:** ${participantIds.length}人 / **最大人数:** ${Number(session.maxHumanCount || 0)}人`,
+      `**日時:** ${formatSessionDateTimeRange(session.startedAt, session.endedAt)}`,
+      `**通話時間:** ${formatDurationSeconds(durationSeconds)}`,
+      `**累計参加人数:** ${participantIds.length}人`,
+      `**最大同時接続人数:** ${Number(session.maxHumanCount || 0)}人`,
       `**主な通話チャンネル:** ${mainVoiceChannelName}`,
       activeSeconds > 0 ? `**2人以上で話していた時間:** ${formatDurationSeconds(activeSeconds)}` : null
     ].filter(Boolean).join('\n'))
@@ -858,7 +860,7 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
     title: 'VC end summary card posted',
     body: [
       `${resolveCategoryName(client, guild, session.categoryId, session)} / ${resolvePrimaryVoiceChannelName(guild, session)}`,
-      `参加人数: ${parseJsonArray(session.allParticipantIdsJson).length} / 最大人数: ${Number(session.maxHumanCount || 0)}`,
+      `累計参加人数: ${parseJsonArray(session.allParticipantIdsJson).length} / 最大同時接続人数: ${Number(session.maxHumanCount || 0)}`,
       `通話時間: ${formatDurationSeconds(getSessionDurationSeconds(session))}`
     ].join('\n'),
     metadata: {
@@ -1517,16 +1519,67 @@ function formatTime(iso) {
   if (!iso) {
     return '不明';
   }
+  return formatDateTimeJa(iso);
+}
+
+function getJstDateTimeParts(iso) {
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) {
+    return null;
+  }
+  const parts = new Intl.DateTimeFormat('ja-JP', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(date);
+  const valueByType = new Map(parts.map((part) => [part.type, part.value]));
+  return {
+    year: valueByType.get('year'),
+    month: valueByType.get('month'),
+    day: valueByType.get('day'),
+    hour: valueByType.get('hour'),
+    minute: valueByType.get('minute')
+  };
+}
+
+function formatDateTimeJa(iso) {
   try {
-    return new Intl.DateTimeFormat('ja-JP', {
-      timeZone: 'Asia/Tokyo',
-      month: 'numeric',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit'
-    }).format(new Date(iso));
+    const parts = getJstDateTimeParts(iso);
+    if (!parts) {
+      return String(iso);
+    }
+    return `${Number(parts.month)}月${Number(parts.day)}日 ${parts.hour}:${parts.minute}`;
   } catch {
     return String(iso);
+  }
+}
+
+function formatSessionDateTimeRange(startIso, endIso) {
+  if (!startIso && !endIso) {
+    return '不明';
+  }
+  if (!startIso || !endIso) {
+    return formatDateTimeJa(startIso || endIso);
+  }
+  try {
+    const start = getJstDateTimeParts(startIso);
+    const end = getJstDateTimeParts(endIso);
+    if (!start || !end) {
+      return `${formatDateTimeJa(startIso)}〜${formatDateTimeJa(endIso)}`;
+    }
+    const startDate = `${start.year}-${start.month}-${start.day}`;
+    const endDate = `${end.year}-${end.month}-${end.day}`;
+    const startLabel = `${Number(start.month)}月${Number(start.day)}日 ${start.hour}:${start.minute}`;
+    if (startDate === endDate) {
+      return `${startLabel}〜${end.hour}:${end.minute}`;
+    }
+    return `${startLabel}〜${Number(end.month)}月${Number(end.day)}日 ${end.hour}:${end.minute}`;
+  } catch {
+    return `${formatDateTimeJa(startIso)}〜${formatDateTimeJa(endIso)}`;
   }
 }
 
@@ -1556,7 +1609,7 @@ function formatDurationSeconds(seconds) {
 }
 
 function getCloseReasonLabel(reason) {
-  if (reason === 'empty') {
+  if (reason === 'empty' || reason === 'restart_reconcile_empty') {
     return '全員退出';
   }
   if (reason === 'solo_grace_expired') {
@@ -1721,8 +1774,8 @@ async function buildVcSummaryPayload(client, guild, sessionRow, {
   const graphLines = buildCountGraphLines(events, session);
   const peakTime = session.peakStartedAt
     ? session.peakEndedAt
-      ? `${formatTime(session.peakStartedAt)}〜${formatTime(session.peakEndedAt)}`
-      : `${formatTime(session.peakStartedAt)}ごろ`
+      ? formatSessionDateTimeRange(session.peakStartedAt, session.peakEndedAt)
+      : `${formatDateTimeJa(session.peakStartedAt)}ごろ`
     : '記録なし';
 
   const container = new ContainerBuilder().setAccentColor(DEFAULT_ACCENT_COLOR);
@@ -1738,13 +1791,14 @@ async function buildVcSummaryPayload(client, guild, sessionRow, {
   );
   container.addTextDisplayComponents(
     new TextDisplayBuilder().setContent([
-      `**通話カテゴリ**\n${categoryName}`,
-      `**主な通話チャンネル**\n${voiceChannelNames}`,
-      `**通話時間**\n${formatTime(session.startedAt)}〜${formatTime(session.endedAt)}`,
-      `**持続時間**\n${formatDurationSeconds(durationSeconds)}（2人以上: ${formatDurationSeconds(activeSeconds)}）`,
-      `**最大人数**\n${Number(session.maxHumanCount || 0)}人`,
-      `**ピーク時間**\n${peakTime}`
-    ].join('\n\n'))
+      `**日時:** ${formatSessionDateTimeRange(session.startedAt, session.endedAt)}`,
+      `**通話時間:** ${formatDurationSeconds(durationSeconds)}`,
+      `**累計参加人数:** ${allParticipantIds.length}人`,
+      `**最大同時接続人数:** ${Number(session.maxHumanCount || 0)}人`,
+      `**主な通話チャンネル:** ${voiceChannelNames}`,
+      activeSeconds > 0 ? `**2人以上で話していた時間:** ${formatDurationSeconds(activeSeconds)}` : null,
+      `**ピーク時間:** ${peakTime}`
+    ].filter(Boolean).join('\n'))
   );
 
   container.addSeparatorComponents(
@@ -1818,8 +1872,8 @@ function buildHistoryLine(client, guild, sessionRow) {
   const visibleParticipants = participantIds.slice(0, 5).map((userId) => `<@${userId}>`).join(' / ');
   const extra = participantIds.length > 5 ? ` ほか${participantIds.length - 5}人` : '';
   return [
-    `**${formatTime(session.startedAt)}〜${formatTime(session.endedAt)}**`,
-    `${formatDurationSeconds(getSessionDurationSeconds(session))} / 最大${Number(session.maxHumanCount || 0)}人 / ${resolvePrimaryVoiceChannelName(guild, session)}`,
+    `**${formatSessionDateTimeRange(session.startedAt, session.endedAt)}**`,
+    `${formatDurationSeconds(getSessionDurationSeconds(session))} / 最大同時接続${Number(session.maxHumanCount || 0)}人 / ${resolvePrimaryVoiceChannelName(guild, session)}`,
     visibleParticipants ? `${visibleParticipants}${extra}` : '参加者記録なし'
   ].join('\n');
 }
@@ -1945,7 +1999,7 @@ function buildSessionSelectLabel(client, guild, sessionRow) {
   const voiceChannelName = resolvePrimaryVoiceChannelName(guild, session);
   const timeRange = `${formatClock(session.startedAt)}〜${formatClock(session.endedAt)}`;
   return truncateForDiscord(
-    `${categoryName} / ${voiceChannelName} / 最大${Number(session.maxHumanCount || 0)}人 / ${timeRange}`,
+    `${categoryName} / ${voiceChannelName} / 同時${Number(session.maxHumanCount || 0)}人 / ${timeRange}`,
     100
   );
 }
@@ -1954,7 +2008,7 @@ function buildSessionSelectDescription(sessionRow) {
   const session = normalizeSession(sessionRow);
   const participantCount = parseJsonArray(session.allParticipantIdsJson).length;
   return truncateForDiscord(
-    `${formatTime(session.startedAt)} / ${formatDurationSeconds(getSessionDurationSeconds(session))} / 参加${participantCount}人`,
+    `${formatTime(session.startedAt)} / ${formatDurationSeconds(getSessionDurationSeconds(session))} / 累計参加${participantCount}人`,
     100
   );
 }

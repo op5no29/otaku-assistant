@@ -63,7 +63,9 @@ function buildProfileMessage({
 }) {
   const container = new ContainerBuilder().setAccentColor(accentColor);
   const countLabel = `${totalMemberCount}名`;
-  const pageLabel = `${pageIndex + 1}/${totalPages}`;
+  const title = totalPages > 1
+    ? `${voiceChannelName || '通話チャンネル'} ${pageIndex + 1}/${totalPages}`
+    : `${voiceChannelName || '通話チャンネル'}`;
   const statusLine = statusText?.trim()
     ? `**ステータス**\n${statusText.trim()}\n\n`
     : '';
@@ -72,7 +74,7 @@ function buildProfileMessage({
     : '';
 
   container.addTextDisplayComponents(
-    new TextDisplayBuilder().setContent(`## VCにいる人のプロフィール ${pageLabel}`),
+    new TextDisplayBuilder().setContent(`## ${title}`),
     new TextDisplayBuilder().setContent(`${voiceChannelLine}${statusLine}**現在の人数**\n${countLabel}`)
   );
 
@@ -92,7 +94,7 @@ function buildProfileMessage({
   return {
     flags: MessageFlags.IsComponentsV2,
     components: [container],
-    allowedMentions: { parse: [], users: [] }
+    allowedMentions: { parse: [], users: [], roles: [] }
   };
 }
 

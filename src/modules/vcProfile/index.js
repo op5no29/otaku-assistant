@@ -807,14 +807,14 @@ async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapp
       }
       return String(left.name || '').localeCompare(String(right.name || ''), 'ja');
     });
-  const statusLines = [];
+  const statusByChannelId = new Map();
 
   for (const activeChannel of activeChannels) {
     const statusText = await resolveVoiceChannelStatusText(client, activeChannel, mapping);
     if (!statusText) {
       continue;
     }
-    statusLines.push(activeChannels.length === 1 ? statusText : `${activeChannel.name}: ${statusText}`);
+    statusByChannelId.set(String(activeChannel.id), statusText);
   }
 
   const sortedMemberEntries = ensureCategoryMemberSessions(client, {
@@ -845,10 +845,35 @@ async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapp
     });
   }
 
+  const channelSnapshots = activeChannels.map((activeChannel) => {
+    const channelMembers = members.filter((member) => String(member.voiceChannelId || '') === String(activeChannel.id));
+    return {
+      voiceChannelId: String(activeChannel.id),
+      voiceChannelName: activeChannel.name || String(activeChannel.id),
+      activeChannels: [activeChannel],
+      members: channelMembers,
+      statusText: statusByChannelId.get(String(activeChannel.id)) || null
+    };
+  }).filter((channelSnapshot) => channelSnapshot.members.length > 0);
+
+  client.logger.info('vc profile channel groups calculated', {
+    guildId: guild.id,
+    categoryId,
+    profileChannelId: mapping.profileChannelId,
+    groupCount: channelSnapshots.length,
+    groups: channelSnapshots.map((channelSnapshot) => ({
+      voiceChannelId: channelSnapshot.voiceChannelId,
+      voiceChannelName: channelSnapshot.voiceChannelName,
+      memberCount: channelSnapshot.members.length,
+      memberIds: channelSnapshot.members.map((member) => member.id)
+    }))
+  });
+
   return {
     activeChannels,
     members,
-    statusText: [...new Set(statusLines)].join('\n') || null,
+    channelSnapshots,
+    statusText: [...new Set([...statusByChannelId.values()])].join('\n') || null,
     voiceChannelName: activeChannels.length ? formatVoiceChannelName(activeChannels) : ''
   };
 }
@@ -961,6 +986,8 @@ function buildPaginatedProfilePayloads({
           guildId,
           categoryId,
           profileChannelId: mapping.profileChannelId,
+          voiceChannelId: snapshot.voiceChannelId || null,
+          voiceChannelName: snapshot.voiceChannelName || null,
           pageIndex,
           totalPages,
           memberCount: members.length,
@@ -969,12 +996,17 @@ function buildPaginatedProfilePayloads({
           componentCount: normal.componentCount,
           compactFallbackComponentCount: compactFallback.componentCount
         });
-        client.logger.info('vc profile title rendered without category label', {
+        client.logger.info('vc profile title rendered with voice channel name', {
           guildId,
           categoryId,
           profileChannelId: mapping.profileChannelId,
+          voiceChannelId: snapshot.voiceChannelId || null,
           pageIndex,
-          pageTitle: `VCにいる人のプロフィール ${pageIndex + 1}/${totalPages}`
+          totalPages,
+          pageTitle: totalPages > 1
+            ? `${snapshot.voiceChannelName} ${pageIndex + 1}/${totalPages}`
+            : snapshot.voiceChannelName,
+          pageNumberShown: totalPages > 1
         });
         client.logger.info('vc profile user mention rendering enabled', {
           guildId,
@@ -1002,7 +1034,10 @@ function buildPaginatedProfilePayloads({
 
         return {
           pageIndex,
+          channelPageIndex: pageIndex,
           totalPages,
+          voiceChannelId: snapshot.voiceChannelId || null,
+          voiceChannelName: snapshot.voiceChannelName || null,
           members,
           payload: normal.payload,
           componentCount: normal.componentCount,
@@ -1065,7 +1100,10 @@ function buildPaginatedProfilePayloads({
     });
     return {
       pageIndex,
+      channelPageIndex: pageIndex,
       totalPages,
+      voiceChannelId: snapshot.voiceChannelId || null,
+      voiceChannelName: snapshot.voiceChannelName || null,
       members,
       payload: fallback.payload,
       componentCount: fallback.componentCount,
@@ -1105,6 +1143,10 @@ function isVcProfileCardMessage(client, message, mapping) {
   const text = collectTextDisplayContent({ components: message.components || [] }).join('\n');
   return (
     text.includes(`## ${mapping.name} /`) ||
+    (
+      text.includes('**通話チャンネル**') &&
+      text.includes('**現在の人数**')
+    ) ||
     (
       text.includes('## VCにいる人のプロフィール') &&
       text.includes('**通話チャンネル**')
@@ -1608,13 +1650,33 @@ async function syncVoiceProfileCategoryLocked(client, guild, categoryId, mapping
     accentColor,
     pageCountPreview: snapshot.members.length
   });
-  const pages = buildPaginatedProfilePayloads({
+  const channelSnapshots = snapshot.channelSnapshots?.length
+    ? snapshot.channelSnapshots
+    : [snapshot];
+  const pages = channelSnapshots.flatMap((channelSnapshot) => buildPaginatedProfilePayloads({
     client,
     guildId,
     categoryId,
     mapping,
-    snapshot,
+    snapshot: channelSnapshot,
     accentColor
+  }));
+  pages.forEach((page, globalPageIndex) => {
+    page.globalPageIndex = globalPageIndex;
+    page.pageIndex = globalPageIndex;
+  });
+  client.logger.info('vc profile channel pagination calculated', {
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id,
+    channelCount: channelSnapshots.length,
+    totalPageCount: pages.length,
+    channels: channelSnapshots.map((channelSnapshot) => ({
+      voiceChannelId: channelSnapshot.voiceChannelId || null,
+      voiceChannelName: channelSnapshot.voiceChannelName || null,
+      memberCount: channelSnapshot.members.length,
+      pageCount: pages.filter((page) => String(page.voiceChannelId || '') === String(channelSnapshot.voiceChannelId || '')).length
+    }))
   });
   const existingPages = listTrackedCategoryPagesWithLegacy(client, {
     guildId,
