@@ -152,6 +152,17 @@
     "maxLlmReplies": 3,
     "llmRepliesEnabled": false
   },
+  "introVcReminder": {
+    "enabled": false,
+    "devTestMode": false,
+    "devUserId": "YOUR_DEV_USER_ID",
+    "introChannelId": "YOUR_INTRO_CHANNEL_ID",
+    "logChannelId": "YOUR_OPS_LOG_CHANNEL_ID",
+    "maxReminderCount": 3,
+    "cooldownHoursByCount": [0, 24, 168],
+    "failureCooldownHours": 24,
+    "sendOnVoiceJoin": true
+  },
   "welcomeDm": {
     "enabled": false,
     "devTestMode": false,

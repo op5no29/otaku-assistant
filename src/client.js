@@ -52,6 +52,7 @@ function createBotClient({ appConfig, database, logger }) {
   client.questionRolePromptTimers = new Map();
   client.introDmQueueProcessing = false;
   client.introDmQueueInterval = null;
+  client.introVcReminderLocks = new Map();
   client.voiceProfileReconcileInterval = null;
   client.voiceProfileUpdateQueues = new Map();
 

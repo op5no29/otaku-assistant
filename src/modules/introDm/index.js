@@ -135,6 +135,44 @@ function buildVcReminderMessage(introChannelId) {
   ].join('\n');
 }
 
+function buildVcIntroReminderMessage(introChannelId, alreadySentCount = 0) {
+  const introChannelLine = introChannelId ? [`<#${introChannelId}>`] : [];
+
+  if (alreadySentCount >= 2) {
+    return [
+      '何度もすみません。',
+      'まだ自己紹介が確認できていないため、念のためもう一度だけご連絡しています。',
+      '',
+      '通話に参加する方には、簡単な自己紹介の投稿をお願いしています。',
+      'お手すきの時に対応してもらえると助かります。',
+      '',
+      ...introChannelLine
+    ].join('\n').trim();
+  }
+
+  if (alreadySentCount >= 1) {
+    return [
+      '再度のご連絡ですみません。',
+      '以前もお願いしたのですが、まだ自己紹介が確認できていないようです。',
+      '',
+      '通話にいる人が誰なのかわかりやすくするため、簡単で大丈夫なので自己紹介チャンネルへの投稿をお願いします。',
+      'SNSリンクだけでも大丈夫です。',
+      '',
+      ...introChannelLine
+    ].join('\n').trim();
+  }
+
+  return [
+    'こんにちは！サーバーの通話に参加してくださってありがとうございます。',
+    'このサーバーでは、通話で話す人が誰なのかわかりやすくするために、自己紹介チャンネルへの投稿をお願いしています。',
+    '',
+    'よければ、こちらの自己紹介チャンネルに簡単な自己紹介を書いてください。',
+    '映像・音楽・イラスト・開発など、やっていることやSNSリンクだけでも大丈夫です。',
+    '',
+    ...introChannelLine
+  ].join('\n').trim();
+}
+
 function buildJoinReminderMessage(introChannelId) {
   return [
     'こんにちは、Otaku Assistantです。',
@@ -202,6 +240,21 @@ function getIntroDmConfig(client) {
   };
 }
 
+function getIntroVcReminderConfig(client) {
+  const introDmConfig = getIntroDmConfig(client);
+  return client.appConfig.introVcReminder || {
+    enabled: introDmConfig.enabled === true,
+    devTestMode: introDmConfig.devTestMode === true,
+    devUserId: String(introDmConfig.devUserId || ''),
+    introChannelId: getIntroChannelId(client),
+    logChannelId: introDmConfig.logChannelId || client.appConfig.ops?.logChannelId || '',
+    maxReminderCount: 3,
+    cooldownHoursByCount: [0, 24, 168],
+    failureCooldownHours: 24,
+    sendOnVoiceJoin: true
+  };
+}
+
 function getWelcomeDmConfig(client) {
   return client.appConfig.welcomeDm || {
     enabled: false,
@@ -221,6 +274,10 @@ function getPromptConfig(client, promptType) {
 
 function getIntroChannelId(client) {
   return String(getIntroDmConfig(client).introChannelId || client.appConfig.introChannelId || '');
+}
+
+function getIntroVcReminderIntroChannelId(client) {
+  return String(getIntroVcReminderConfig(client).introChannelId || getIntroChannelId(client) || '');
 }
 
 function getIntroDmGuildId(client) {
@@ -624,74 +681,391 @@ function shouldSkipByCooldown(client, guildId, userId, promptType, cooldownDays)
   return new Date(state.sentAt).getTime() >= cutoffMs ? 'cooldown' : false;
 }
 
-async function maybeSendVcNoIntroDm(client, member) {
-  const config = getIntroDmConfig(client);
+function getIntroVcReminderCooldownHours(config, reminderCount) {
+  const cooldowns = Array.isArray(config.cooldownHoursByCount) ? config.cooldownHoursByCount : [0, 24, 168];
+  const fallback = cooldowns.length ? cooldowns[cooldowns.length - 1] : 168;
+  return Math.max(0, Number(cooldowns[reminderCount] ?? fallback ?? 0));
+}
+
+function addHours(dateOrIso, hours) {
+  const base = dateOrIso ? new Date(dateOrIso).getTime() : Date.now();
+  if (!Number.isFinite(base)) {
+    return null;
+  }
+  return new Date(base + (Number(hours || 0) * 60 * 60 * 1000));
+}
+
+function hasElapsedSince(dateOrIso, hours) {
+  if (!dateOrIso) {
+    return true;
+  }
+  const next = addHours(dateOrIso, hours);
+  if (!next) {
+    return true;
+  }
+  return Date.now() >= next.getTime();
+}
+
+function getVoiceChannelLabel(voiceChannel, channelId) {
+  if (voiceChannel?.name) {
+    return `${voiceChannel.name} (\`${voiceChannel.id || channelId}\`)`;
+  }
+  if (channelId) {
+    return `\`${channelId}\``;
+  }
+  return '(不明)';
+}
+
+async function sendIntroVcReminderReport(client, {
+  userId,
+  voiceChannel = null,
+  channelId = null,
+  reminderCount = 0,
+  success = false,
+  skippedReason = null,
+  errorMessage = null,
+  nextEligibleAt = null
+}) {
+  const config = getIntroVcReminderConfig(client);
+  const logChannelId = config.logChannelId;
+  if (!logChannelId) {
+    return null;
+  }
+
+  const status = success
+    ? 'intro reminder DM sent'
+    : errorMessage
+      ? 'intro reminder DM failed'
+      : `intro reminder DM skipped ${skippedReason || 'unknown'}`;
+  const lines = [
+    status,
+    `対象: <@${userId}> (\`${userId}\`)`,
+    `VC: ${getVoiceChannelLabel(voiceChannel, channelId)}`,
+    `reminder_count: ${reminderCount}`,
+    `理由: ${success ? 'sent' : skippedReason || 'unknown'}`
+  ];
+
+  if (nextEligibleAt) {
+    lines.push(`次回送信可能: ${nextEligibleAt.toISOString()}`);
+  }
+  if (errorMessage) {
+    lines.push(`エラー: ${errorMessage}`);
+  }
+  lines.push(`時刻: ${new Date().toISOString()}`);
+
+  try {
+    const channel = client.channels.cache.get(logChannelId) || await client.channels.fetch(logChannelId);
+    if (!channel?.isTextBased?.()) {
+      client.logger.warn('intro reminder report failed', {
+        logChannelId,
+        userId,
+        reason: 'not_text_based'
+      });
+      return null;
+    }
+
+    return await channel.send({
+      content: lines.join('\n'),
+      allowedMentions: {
+        parse: [],
+        users: [],
+        roles: [],
+        repliedUser: false
+      }
+    });
+  } catch (error) {
+    client.logger.warn('intro reminder report failed', {
+      logChannelId,
+      userId,
+      error: error.message
+    });
+    return null;
+  }
+}
+
+async function withIntroVcReminderLock(client, guildId, userId, callback) {
+  if (!client.introVcReminderLocks) {
+    client.introVcReminderLocks = new Map();
+  }
+
+  const key = `${guildId}:${userId}`;
+  const previous = client.introVcReminderLocks.get(key) || Promise.resolve();
+  let release;
+  const current = previous.catch(() => null).then(() => new Promise((resolve) => {
+    release = resolve;
+  }));
+  client.introVcReminderLocks.set(key, current);
+
+  await previous.catch(() => null);
+
+  try {
+    return await callback();
+  } finally {
+    if (typeof release === 'function') {
+      release();
+    }
+    if (client.introVcReminderLocks.get(key) === current) {
+      client.introVcReminderLocks.delete(key);
+    }
+  }
+}
+
+async function maybeSendVcNoIntroDmLocked(client, member, options = {}) {
+  const config = getIntroVcReminderConfig(client);
   const logger = client.logger;
   const guildId = member.guild.id;
+  const userId = member.id;
+  const channelId = String(options.channelId || member.voice?.channelId || '');
+  const voiceChannel = options.voiceChannel || member.voice?.channel || null;
+  const voiceJoinAt = new Date().toISOString();
+
   logger.info('VC intro check started', {
     guildId,
-    userId: member.id,
-    channelId: member.voice?.channelId || null
+    userId,
+    channelId: channelId || null
   });
 
   if (member.user?.bot) {
-    logger.info('skipped bot', { guildId, userId: member.id });
-    return { ok: false, skippedReason: 'bot' };
+    logger.info('intro reminder DM skipped bot', { guildId, userId });
+    return { ok: false, skippedReason: 'bot_user' };
   }
 
-  const introExists = hasUserIntro(client, guildId, member.id);
-  if (introExists && !(config.devTestMode && String(member.id) === String(config.devUserId))) {
-    logger.info('skipped has intro', { guildId, userId: member.id });
-    return { ok: false, skippedReason: 'has_intro' };
+  if (!config.sendOnVoiceJoin) {
+    logger.info('intro reminder DM skipped disabled', { guildId, userId, skippedReason: 'send_on_voice_join_disabled' });
+    return { ok: false, skippedReason: 'send_on_voice_join_disabled' };
   }
 
-  if (config.devTestMode && String(member.id) !== String(config.devUserId)) {
-    logger.info('skipped devTest non-dev', { guildId, userId: member.id });
+  if (config.devTestMode && String(userId) !== String(config.devUserId)) {
+    logger.info('intro reminder DM skipped not dev user', { guildId, userId });
     return { ok: false, skippedReason: 'not_dev_user' };
   }
 
   if (!config.enabled && !config.devTestMode) {
-    logger.info('skipped because disabled', { guildId, userId: member.id });
+    logger.info('intro reminder DM skipped disabled', { guildId, userId });
     return { ok: false, skippedReason: 'disabled' };
   }
 
-  const cooldownState = shouldSkipByCooldown(
-    client,
-    guildId,
-    member.id,
-    PROMPT_TYPES.VC_NO_INTRO,
-    config.vcReminderCooldownDays
-  );
-  if (cooldownState) {
-    logger.info(`skipped ${cooldownState}`, {
+  const introChannelId = getIntroVcReminderIntroChannelId(client);
+  if (!introChannelId) {
+    logger.warn('intro reminder DM skipped missing config', {
       guildId,
-      userId: member.id,
-      promptType: PROMPT_TYPES.VC_NO_INTRO
+      userId,
+      missing: 'introChannelId'
     });
-    return { ok: false, skippedReason: cooldownState };
+    await sendIntroVcReminderReport(client, {
+      userId,
+      voiceChannel,
+      channelId,
+      skippedReason: 'missing_config'
+    });
+    return { ok: false, skippedReason: 'missing_config' };
   }
 
-  const result = await sendIntroDm(client, {
-    guildId,
-    userId: member.id,
-    promptType: PROMPT_TYPES.VC_NO_INTRO
-  });
-
-  if (result.ok) {
-    logger.info('intro DM sent vc_no_intro', {
-      guildId,
-      userId: member.id
+  const introExists = hasUserIntro(client, guildId, userId);
+  if (introExists && !(config.devTestMode && String(userId) === String(config.devUserId))) {
+    const completedAt = new Date().toISOString();
+    client.db.introVcReminder?.markCompleted?.(guildId, userId, completedAt);
+    logger.info('intro reminder DM skipped already introduced', { guildId, userId });
+    await sendIntroVcReminderReport(client, {
+      userId,
+      voiceChannel,
+      channelId,
+      skippedReason: 'already_has_intro',
+      reminderCount: client.db.introVcReminder?.get?.(guildId, userId)?.reminderCount || 0
     });
-  } else {
-    logger.warn('intro DM failed', {
+    return { ok: false, skippedReason: 'already_has_intro' };
+  }
+
+  const previousState = client.db.introVcReminder?.get?.(guildId, userId) || null;
+  client.db.introVcReminder?.recordJoin?.({ guildId, userId, channelId, joinedAt: voiceJoinAt });
+  const state = client.db.introVcReminder?.get?.(guildId, userId) || previousState || null;
+  const reminderCount = Math.max(0, Number(state?.reminderCount || 0));
+  const maxReminderCount = Math.max(1, Number(config.maxReminderCount || 3));
+
+  if (reminderCount >= maxReminderCount) {
+    logger.info('intro reminder limit reached', {
       guildId,
-      userId: member.id,
+      userId,
+      reminderCount,
+      maxReminderCount
+    });
+    await sendIntroVcReminderReport(client, {
+      userId,
+      voiceChannel,
+      channelId,
+      reminderCount,
+      skippedReason: 'reminder_limit_reached'
+    });
+    return { ok: false, skippedReason: 'reminder_limit_reached' };
+  }
+
+  const failureCooldownHours = Math.max(1, Number(config.failureCooldownHours || 24));
+  if (
+    previousState?.lastError &&
+    !hasElapsedSince(previousState.updatedAt, failureCooldownHours)
+  ) {
+    const nextEligibleAt = addHours(previousState.updatedAt, failureCooldownHours);
+    logger.info('intro reminder DM skipped cooldown', {
+      guildId,
+      userId,
+      reminderCount,
+      skippedReason: 'recent_dm_failure',
+      nextEligibleAt: nextEligibleAt?.toISOString() || null
+    });
+    await sendIntroVcReminderReport(client, {
+      userId,
+      voiceChannel,
+      channelId,
+      reminderCount,
+      skippedReason: 'dm_failed',
+      nextEligibleAt
+    });
+    return { ok: false, skippedReason: 'dm_failed' };
+  }
+
+  const cooldownHours = getIntroVcReminderCooldownHours(config, reminderCount);
+  if (
+    state?.lastSentAt &&
+    !hasElapsedSince(state.lastSentAt, cooldownHours)
+  ) {
+    const nextEligibleAt = addHours(state.lastSentAt, cooldownHours);
+    logger.info('intro reminder DM skipped cooldown', {
+      guildId,
+      userId,
+      reminderCount,
+      cooldownHours,
+      lastSentAt: state.lastSentAt,
+      nextEligibleAt: nextEligibleAt?.toISOString() || null
+    });
+    await sendIntroVcReminderReport(client, {
+      userId,
+      voiceChannel,
+      channelId,
+      reminderCount,
+      skippedReason: 'cooldown_not_elapsed',
+      nextEligibleAt
+    });
+    return { ok: false, skippedReason: 'cooldown_not_elapsed' };
+  }
+
+  const user = await client.users.fetch(userId).catch(() => null);
+  if (!user) {
+    client.db.introVcReminder?.markError?.({
+      guildId,
+      userId,
+      channelId,
+      error: 'user_fetch_failed',
+      voiceJoinAt
+    });
+    client.db.introDm.upsertState({
+      guildId,
+      userId,
       promptType: PROMPT_TYPES.VC_NO_INTRO,
-      skippedReason: result.skippedReason || result.error?.message || 'unknown'
+      status: 'failed',
+      lastError: 'user_fetch_failed'
     });
+    logger.warn('intro reminder DM failed', {
+      guildId,
+      userId,
+      error: 'user_fetch_failed'
+    });
+    await sendIntroVcReminderReport(client, {
+      userId,
+      voiceChannel,
+      channelId,
+      reminderCount,
+      success: false,
+      skippedReason: 'dm_failed',
+      errorMessage: 'user_fetch_failed'
+    });
+    return { ok: false, skippedReason: 'user_fetch_failed' };
   }
 
-  return result;
+  try {
+    const dmMessage = await user.send({
+      content: buildVcIntroReminderMessage(introChannelId, reminderCount),
+      allowedMentions: {
+        parse: []
+      }
+    });
+    const sentAt = new Date().toISOString();
+    client.db.introVcReminder?.markSent?.({
+      guildId,
+      userId,
+      channelId,
+      dmMessageId: dmMessage.id,
+      sentAt,
+      voiceJoinAt
+    });
+    client.db.introDm.upsertState({
+      guildId,
+      userId,
+      promptType: PROMPT_TYPES.VC_NO_INTRO,
+      status: 'sent',
+      sentAt,
+      repliedCount: 0,
+      optOut: false,
+      lastError: null
+    });
+    logger.info('intro reminder DM sent', {
+      guildId,
+      userId,
+      reminderNumber: reminderCount + 1,
+      dmMessageId: dmMessage.id
+    });
+    await sendIntroVcReminderReport(client, {
+      userId,
+      voiceChannel,
+      channelId,
+      reminderCount: reminderCount + 1,
+      success: true
+    });
+    return { ok: true, dmMessage, reminderCount: reminderCount + 1 };
+  } catch (error) {
+    client.db.introVcReminder?.markError?.({
+      guildId,
+      userId,
+      channelId,
+      error: error.message,
+      voiceJoinAt
+    });
+    client.db.introDm.upsertState({
+      guildId,
+      userId,
+      promptType: PROMPT_TYPES.VC_NO_INTRO,
+      status: 'failed',
+      lastError: error.message
+    });
+    logger.warn('intro reminder DM failed', {
+      guildId,
+      userId,
+      reminderNumber: reminderCount + 1,
+      error: error.message
+    });
+    await sendIntroVcReminderReport(client, {
+      userId,
+      voiceChannel,
+      channelId,
+      reminderCount,
+      success: false,
+      skippedReason: 'dm_failed',
+      errorMessage: error.message
+    });
+    return {
+      ok: false,
+      skippedReason: 'dm_failed',
+      error,
+      permanentFailure: isPermanentIntroDmFailure(error)
+    };
+  }
+}
+
+async function maybeSendVcNoIntroDm(client, member, options = {}) {
+  const guildId = member.guild.id;
+  const userId = member.id;
+  return withIntroVcReminderLock(client, guildId, userId, () => (
+    maybeSendVcNoIntroDmLocked(client, member, options)
+  ));
 }
 
 function randomIntInclusive(min, max) {

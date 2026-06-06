@@ -1018,6 +1018,98 @@ function createDatabase(databasePath) {
       WHERE status = 'processing'
         AND datetime(updated_at) <= datetime(?)
     `),
+    getIntroVcReminderState: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        reminder_count AS reminderCount,
+        first_sent_at AS firstSentAt,
+        last_sent_at AS lastSentAt,
+        last_voice_join_at AS lastVoiceJoinAt,
+        last_channel_id AS lastChannelId,
+        last_dm_message_id AS lastDmMessageId,
+        last_error AS lastError,
+        completed_at AS completedAt,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM intro_vc_reminder_state
+      WHERE guild_id = ? AND user_id = ?
+      LIMIT 1
+    `),
+    upsertIntroVcReminderJoin: sqlite.prepare(`
+      INSERT INTO intro_vc_reminder_state (
+        guild_id,
+        user_id,
+        reminder_count,
+        first_sent_at,
+        last_sent_at,
+        last_voice_join_at,
+        last_channel_id,
+        last_dm_message_id,
+        last_error,
+        completed_at,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, 0, NULL, NULL, ?, ?, NULL, NULL, NULL, ?, ?)
+      ON CONFLICT(guild_id, user_id) DO UPDATE SET
+        last_voice_join_at = excluded.last_voice_join_at,
+        last_channel_id = excluded.last_channel_id,
+        updated_at = excluded.updated_at
+    `),
+    markIntroVcReminderSent: sqlite.prepare(`
+      INSERT INTO intro_vc_reminder_state (
+        guild_id,
+        user_id,
+        reminder_count,
+        first_sent_at,
+        last_sent_at,
+        last_voice_join_at,
+        last_channel_id,
+        last_dm_message_id,
+        last_error,
+        completed_at,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+      ON CONFLICT(guild_id, user_id) DO UPDATE SET
+        reminder_count = intro_vc_reminder_state.reminder_count + 1,
+        first_sent_at = COALESCE(intro_vc_reminder_state.first_sent_at, excluded.first_sent_at),
+        last_sent_at = excluded.last_sent_at,
+        last_voice_join_at = excluded.last_voice_join_at,
+        last_channel_id = excluded.last_channel_id,
+        last_dm_message_id = excluded.last_dm_message_id,
+        last_error = NULL,
+        completed_at = NULL,
+        updated_at = excluded.updated_at
+    `),
+    markIntroVcReminderError: sqlite.prepare(`
+      INSERT INTO intro_vc_reminder_state (
+        guild_id,
+        user_id,
+        reminder_count,
+        first_sent_at,
+        last_sent_at,
+        last_voice_join_at,
+        last_channel_id,
+        last_dm_message_id,
+        last_error,
+        completed_at,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, 0, NULL, NULL, ?, ?, NULL, ?, NULL, ?, ?)
+      ON CONFLICT(guild_id, user_id) DO UPDATE SET
+        last_voice_join_at = excluded.last_voice_join_at,
+        last_channel_id = excluded.last_channel_id,
+        last_error = excluded.last_error,
+        updated_at = excluded.updated_at
+    `),
+    markIntroVcReminderCompleted: sqlite.prepare(`
+      UPDATE intro_vc_reminder_state
+      SET completed_at = ?,
+          updated_at = ?,
+          last_error = NULL
+      WHERE guild_id = ? AND user_id = ?
+    `),
     insertIntroReaction: sqlite.prepare(`
       INSERT INTO intro_reactions (
         guild_id,
@@ -2965,6 +3057,51 @@ function createDatabase(databasePath) {
       },
       countDue(dueAtIso) {
         return Number(statements.countIntroDmQueueDueAllGuilds.get(dueAtIso)?.count || 0);
+      }
+    },
+    introVcReminder: {
+      get(guildId, userId) {
+        return statements.getIntroVcReminderState.get(guildId, userId) || null;
+      },
+      recordJoin({ guildId, userId, channelId, joinedAt = new Date().toISOString() }) {
+        const now = new Date().toISOString();
+        statements.upsertIntroVcReminderJoin.run(
+          guildId,
+          userId,
+          joinedAt,
+          channelId || null,
+          now,
+          now
+        );
+      },
+      markSent({ guildId, userId, channelId, dmMessageId = null, sentAt = new Date().toISOString(), voiceJoinAt = null }) {
+        const now = new Date().toISOString();
+        statements.markIntroVcReminderSent.run(
+          guildId,
+          userId,
+          sentAt,
+          sentAt,
+          voiceJoinAt || sentAt,
+          channelId || null,
+          dmMessageId || null,
+          now,
+          now
+        );
+      },
+      markError({ guildId, userId, channelId, error, voiceJoinAt = new Date().toISOString() }) {
+        const now = new Date().toISOString();
+        statements.markIntroVcReminderError.run(
+          guildId,
+          userId,
+          voiceJoinAt,
+          channelId || null,
+          String(error || 'unknown'),
+          now,
+          now
+        );
+      },
+      markCompleted(guildId, userId, completedAt = new Date().toISOString()) {
+        return statements.markIntroVcReminderCompleted.run(completedAt, new Date().toISOString(), guildId, userId).changes;
       }
     },
     introProfiles: {

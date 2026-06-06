@@ -180,6 +180,38 @@ function ensureIntroDmConfig(value, introChannelId = '') {
   };
 }
 
+function ensureIntroVcReminderConfig(value, introDmConfig = {}, fallbackLogChannelId = '') {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      enabled: introDmConfig.enabled === true,
+      devTestMode: introDmConfig.devTestMode === true,
+      devUserId: String(introDmConfig.devUserId || ''),
+      introChannelId: String(introDmConfig.introChannelId || ''),
+      logChannelId: String(introDmConfig.logChannelId || fallbackLogChannelId || ''),
+      maxReminderCount: 3,
+      cooldownHoursByCount: [0, 24, 168],
+      failureCooldownHours: 24,
+      sendOnVoiceJoin: true
+    };
+  }
+
+  const rawCooldowns = Array.isArray(value.cooldownHoursByCount)
+    ? value.cooldownHoursByCount
+    : [0, 24, 168];
+
+  return {
+    enabled: value.enabled == null ? introDmConfig.enabled === true : value.enabled === true,
+    devTestMode: value.devTestMode == null ? introDmConfig.devTestMode === true : value.devTestMode === true,
+    devUserId: String(value.devUserId || introDmConfig.devUserId || ''),
+    introChannelId: String(value.introChannelId || introDmConfig.introChannelId || ''),
+    logChannelId: String(value.logChannelId || introDmConfig.logChannelId || fallbackLogChannelId || ''),
+    maxReminderCount: Math.max(1, Number(value.maxReminderCount ?? 3)),
+    cooldownHoursByCount: rawCooldowns.map((entry) => Math.max(0, Number(entry || 0))),
+    failureCooldownHours: Math.max(1, Number(value.failureCooldownHours ?? 24)),
+    sendOnVoiceJoin: value.sendOnVoiceJoin !== false
+  };
+}
+
 function ensureIntroAddendumsConfig(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
@@ -378,6 +410,7 @@ function loadConfig(configPath) {
 
   const raw = fs.readFileSync(configPath, 'utf8');
   const parsed = JSON.parse(raw);
+  const normalizedIntroDm = ensureIntroDmConfig(parsed.introDm, parsed.introChannelId);
 
   return {
     entranceChannelId: String(parsed.entranceChannelId || ''),
@@ -462,7 +495,8 @@ function loadConfig(configPath) {
     questionRolePrompt: ensureQuestionRolePromptConfig(parsed.questionRolePrompt),
     posthocRelay: ensurePosthocRelayConfig(parsed.posthocRelay),
     introAddendums: ensureIntroAddendumsConfig(parsed.introAddendums),
-    introDm: ensureIntroDmConfig(parsed.introDm, parsed.introChannelId),
+    introDm: normalizedIntroDm,
+    introVcReminder: ensureIntroVcReminderConfig(parsed.introVcReminder, normalizedIntroDm, parsed.ops?.logChannelId || ''),
     welcomeDm: ensureWelcomeDmConfig(parsed.welcomeDm, parsed.ops?.logChannelId || ''),
     anime: ensureAnimeConfig(parsed.anime),
     annict: ensureAnnictConfig(parsed.annict),

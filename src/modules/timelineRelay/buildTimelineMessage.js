@@ -17,6 +17,7 @@ const { truncateText } = require('../../utils/text');
 const { ACCENT_COLORS } = require('../../utils/accentColors');
 const MAX_MEDIA_ITEMS = 10;
 const MAX_DOWNLOAD_BUTTONS = 4;
+const MAX_EXTERNAL_LINK_BUTTONS = 3;
 const REPLY_CONTEXT_MAX_LENGTH = 160;
 
 function normalizeMediaUrl(url) {
@@ -116,6 +117,77 @@ function isYouTubeSourceUrl(url) {
     return host === 'youtu.be' || host === 'youtube.com' || host.endsWith('.youtube.com');
   } catch {
     return false;
+  }
+}
+
+function isMusicServiceUrl(url) {
+  try {
+    const host = new URL(String(url || '')).hostname.toLowerCase().replace(/^www\./, '');
+    return (
+      host === 'on.soundcloud.com' ||
+      host.endsWith('soundcloud.com') ||
+      host === 'song.link' ||
+      host.endsWith('.song.link') ||
+      host === 'odesli.co' ||
+      host.endsWith('.odesli.co')
+    );
+  } catch {
+    return false;
+  }
+}
+
+function stripExternalButtonTrackingParams(parsed) {
+  for (const key of Array.from(parsed.searchParams.keys())) {
+    const lower = key.toLowerCase();
+    if (
+      lower === 'si' ||
+      lower === 'feature' ||
+      lower === 't' ||
+      lower === 'fbclid' ||
+      lower === 'gclid' ||
+      lower.startsWith('utm_')
+    ) {
+      parsed.searchParams.delete(key);
+    }
+  }
+}
+
+function extractExternalButtonYouTubeId(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'youtu.be') {
+      return parsed.pathname.split('/').filter(Boolean)[0] || null;
+    }
+    if (host === 'youtube.com' || host === 'm.youtube.com' || host.endsWith('.youtube.com')) {
+      if (parsed.pathname === '/watch') {
+        return parsed.searchParams.get('v') || null;
+      }
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      if (['shorts', 'embed', 'live'].includes(parts[0])) {
+        return parts[1] || null;
+      }
+    }
+  } catch {}
+  return null;
+}
+
+function canonicalizeExternalButtonUrl(url) {
+  try {
+    const parsed = new URL(String(url || ''));
+    parsed.hash = '';
+    const youtubeId = extractExternalButtonYouTubeId(parsed.toString());
+    if (youtubeId) {
+      return `youtube:${youtubeId}`;
+    }
+    parsed.hostname = parsed.hostname.toLowerCase();
+    stripExternalButtonTrackingParams(parsed);
+    if (parsed.pathname.length > 1) {
+      parsed.pathname = parsed.pathname.replace(/\/+$/u, '');
+    }
+    return parsed.toString();
+  } catch {
+    return String(url || '').trim();
   }
 }
 
@@ -650,6 +722,7 @@ function buildBottomActionRows(post, options = {}) {
   const externalButtons = [];
   const jumpLabel = options.jumpLabel || 'メッセージに飛ぶ';
   const logger = options.logger || null;
+  const hasMusicLinkButton = Boolean(post.musicLink?.universalUrl || post.musicLink?.sourceUrl);
 
   if (post.jumpUrl) {
     rows.push(
@@ -687,10 +760,42 @@ function buildBottomActionRows(post, options = {}) {
   }
 
   const extraLinkButtons = Array.isArray(post.extraLinkButtons) ? post.extraLinkButtons : [];
+  const seenExternalButtonKeys = new Set();
   for (const button of extraLinkButtons) {
     if (!button?.label || !button?.url) {
       continue;
     }
+    if (hasMusicLinkButton && isMusicServiceUrl(button.url)) {
+      logger?.info?.('relay external link suppressed', {
+        sourceMessageId: post.messageId || null,
+        url: button.url,
+        label: button.label,
+        reason: 'music_redundant'
+      });
+      continue;
+    }
+    const canonicalKey = canonicalizeExternalButtonUrl(button.url);
+    if (seenExternalButtonKeys.has(canonicalKey)) {
+      logger?.info?.('relay external link suppressed', {
+        sourceMessageId: post.messageId || null,
+        url: button.url,
+        label: button.label,
+        canonicalKey,
+        reason: 'duplicate'
+      });
+      continue;
+    }
+    if (externalButtons.length >= MAX_EXTERNAL_LINK_BUTTONS) {
+      logger?.info?.('relay external link suppressed', {
+        sourceMessageId: post.messageId || null,
+        url: button.url,
+        label: button.label,
+        canonicalKey,
+        reason: 'over_limit'
+      });
+      continue;
+    }
+    seenExternalButtonKeys.add(canonicalKey);
     externalButtons.push(
       new ButtonBuilder()
         .setLabel(button.label)
@@ -704,6 +809,11 @@ function buildBottomActionRows(post, options = {}) {
   }
 
   if (externalButtons.length) {
+    logger?.info?.('relay button layout alignment unsupported', {
+      sourceMessageId: post.messageId || null,
+      reason: 'discord_action_row_buttons_do_not_support_right_alignment',
+      layout: 'separate_rows'
+    });
     for (let index = 0; index < externalButtons.length; index += 5) {
       rows.push(new ActionRowBuilder().addComponents(...externalButtons.slice(index, index + 5)));
     }

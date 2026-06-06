@@ -23,7 +23,10 @@ module.exports = {
     try {
       upsertGuildMember(newState.client, member);
       updateGuildMemberVcJoined(newState.client, member, new Date());
-      await maybeSendVcNoIntroDm(newState.client, member);
+      await maybeSendVcNoIntroDm(newState.client, member, {
+        channelId: newState.channelId,
+        voiceChannel: newState.channel || null
+      });
     } catch (error) {
       newState.client.logger.error('Failed to handle VC intro detection', {
         guildId: member.guild?.id || null,

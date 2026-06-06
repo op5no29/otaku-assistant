@@ -271,6 +271,8 @@ function labelRelayLinkButton(url, index, usedLabels) {
       label = 'Xへ飛ぶ';
     } else if (host.endsWith('github.com')) {
       label = 'GitHubへ飛ぶ';
+    } else if (host === 'tiget.net' || host.endsWith('.tiget.net')) {
+      label = 'TIGETへ飛ぶ';
     }
   } catch {}
 
@@ -284,6 +286,10 @@ function labelRelayLinkButton(url, index, usedLabels) {
     return index === 0 ? 'リンク先へ飛ぶ' : `リンク先へ飛ぶ ${index + 1}`;
   }
   return label;
+}
+
+function isUserAuthoredRelayLinkSource(sourceType) {
+  return sourceType === 'content' || sourceType === 'posthoc_source';
 }
 
 function extractRelayLinkButtons(post, logger = null) {
@@ -322,6 +328,14 @@ function extractRelayLinkButtons(post, logger = null) {
     candidates: candidates.map((candidate) => ({
       rawUrl: candidate.rawUrl,
       sourceType: candidate.sourceType
+    }))
+  });
+  logger?.info?.('relay external link candidates collected', {
+    sourceMessageId: post.messageId || null,
+    candidates: candidates.map((candidate) => ({
+      rawUrl: candidate.rawUrl,
+      sourceType: candidate.sourceType,
+      priority: candidate.priority
     }))
   });
 
@@ -366,9 +380,16 @@ function extractRelayLinkButtons(post, logger = null) {
         canonicalKey: canonical.canonicalKey,
         sourceType: candidate.sourceType,
         kept: false,
-        reason: 'duplicate_soundcloud_preview',
+        reason: 'music_redundant',
         keptUrl: kept?.url || null,
         keptSourceType: kept?.sourceType || null
+      });
+      logger?.info?.('relay external link suppressed', {
+        sourceMessageId: post.messageId || null,
+        rawUrl: candidate.rawUrl,
+        canonicalKey: canonical.canonicalKey,
+        sourceType: candidate.sourceType,
+        reason: 'music_redundant'
       });
       continue;
     }
@@ -385,6 +406,13 @@ function extractRelayLinkButtons(post, logger = null) {
         keptUrl: existing.url,
         keptSourceType: existing.sourceType
       });
+      logger?.info?.('relay external link suppressed', {
+        sourceMessageId: post.messageId || null,
+        rawUrl: candidate.rawUrl,
+        canonicalKey: canonical.canonicalKey,
+        sourceType: candidate.sourceType,
+        reason: candidate.sourceType === 'preview' ? 'preview_metadata' : 'duplicate'
+      });
       continue;
     }
     if (existing) {
@@ -397,6 +425,13 @@ function extractRelayLinkButtons(post, logger = null) {
         reason: 'selected_primary_content_url',
         keptUrl: canonical.url,
         keptSourceType: candidate.sourceType
+      });
+      logger?.info?.('relay external link suppressed', {
+        sourceMessageId: post.messageId || null,
+        rawUrl: existing.rawUrl,
+        canonicalKey: canonical.canonicalKey,
+        sourceType: existing.sourceType,
+        reason: 'selected_primary_content_url'
       });
     }
     byCanonicalKey.set(canonical.canonicalKey, {
@@ -411,24 +446,37 @@ function extractRelayLinkButtons(post, logger = null) {
 
   const deduped = Array.from(byCanonicalKey.values())
     .sort((left, right) => left.priority - right.priority);
+  const userAuthoredCount = deduped.filter((entry) => isUserAuthoredRelayLinkSource(entry.sourceType)).length;
+  const externalButtonLimit = userAuthoredCount > 1 ? MAX_RELAY_LINK_BUTTONS : 1;
 
   logger?.info?.('relay link buttons extracted', {
     sourceMessageId: post.messageId || null,
     candidateCount: candidates.length,
     externalUrlCount: deduped.length,
-    urls: deduped.slice(0, MAX_RELAY_LINK_BUTTONS).map((entry) => entry.url)
+    externalButtonLimit,
+    userAuthoredCount,
+    urls: deduped.slice(0, externalButtonLimit).map((entry) => entry.url)
   });
 
-  if (deduped.length > MAX_RELAY_LINK_BUTTONS) {
+  if (deduped.length > externalButtonLimit) {
     logger?.info?.('relay link buttons truncated', {
       sourceMessageId: post.messageId || null,
       originalCount: deduped.length,
-      limit: MAX_RELAY_LINK_BUTTONS
+      limit: externalButtonLimit
     });
+    for (const entry of deduped.slice(externalButtonLimit)) {
+      logger?.info?.('relay external link suppressed', {
+        sourceMessageId: post.messageId || null,
+        rawUrl: entry.rawUrl,
+        canonicalKey: entry.canonicalKey,
+        sourceType: entry.sourceType,
+        reason: isUserAuthoredRelayLinkSource(entry.sourceType) ? 'over_limit' : 'preview_metadata'
+      });
+    }
   }
 
   const usedLabels = new Set();
-  const buttons = deduped.slice(0, MAX_RELAY_LINK_BUTTONS).map((entry, index) => {
+  const buttons = deduped.slice(0, externalButtonLimit).map((entry, index) => {
     const label = labelRelayLinkButton(entry.url, index, usedLabels);
     usedLabels.add(label);
     logger?.info?.('relay link button added', {
@@ -438,6 +486,15 @@ function extractRelayLinkButtons(post, logger = null) {
       canonicalKey: entry.canonicalKey,
       sourceType: entry.sourceType,
       kept: true
+    });
+    logger?.info?.('relay external link representative selected', {
+      sourceMessageId: post.messageId || null,
+      label,
+      url: entry.url,
+      canonicalKey: entry.canonicalKey,
+      sourceType: entry.sourceType,
+      representativeIndex: index,
+      externalButtonLimit
     });
     if (isYouTubeRelayUrl(entry.url)) {
       logger?.info?.('youtube fallback link button used', {

@@ -241,6 +241,22 @@ function runMigrations(database) {
     CREATE INDEX IF NOT EXISTS idx_intro_dm_queue_guild_prompt
       ON intro_dm_queue (guild_id, prompt_type);
 
+    CREATE TABLE IF NOT EXISTS intro_vc_reminder_state (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      reminder_count INTEGER NOT NULL DEFAULT 0,
+      first_sent_at TEXT,
+      last_sent_at TEXT,
+      last_voice_join_at TEXT,
+      last_channel_id TEXT,
+      last_dm_message_id TEXT,
+      last_error TEXT,
+      completed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id)
+    );
+
     CREATE TABLE IF NOT EXISTS intro_profiles (
       guild_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
