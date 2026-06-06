@@ -1,6 +1,20 @@
 module.exports = {
   async execute(interaction) {
     if (!interaction.isChatInputCommand()) {
+      const { handleVcSummaryInteraction } = require('../modules/vcSessionSummary');
+      try {
+        const handledVcSummary = await handleVcSummaryInteraction(interaction);
+        if (handledVcSummary) {
+          return;
+        }
+      } catch (error) {
+        interaction.client.logger.error('VC summary component interaction failed', {
+          interactionId: interaction.id,
+          customId: interaction.customId || null,
+          error: error.message
+        });
+      }
+
       const { handleQuestionRolePromptInteraction } = require('../modules/timelineRelay');
       try {
         const handledQuestionRolePrompt = await handleQuestionRolePromptInteraction(interaction);

@@ -42,6 +42,15 @@
       "YOUR_VOICE_CHANNEL_ID": "作業"
     }
   },
+  "voiceSessionSummary": {
+    "enabled": true,
+    "minHumansToStart": 2,
+    "soloGraceMinutes": 90,
+    "minSessionActiveMinutes": 5,
+    "summaryLookbackHours": 24,
+    "maxEventsToShow": 10,
+    "reconcileIntervalMinutes": 5
+  },
   "mediaRelay": {
     "maxReuploadBytes": 25000000,
     "tempDir": "./tmp/relay-media"

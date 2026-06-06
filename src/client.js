@@ -53,6 +53,10 @@ function createBotClient({ appConfig, database, logger }) {
   client.introDmQueueProcessing = false;
   client.introDmQueueInterval = null;
   client.introVcReminderLocks = new Map();
+  client.voiceSessionSummaryQueues = new Map();
+  client.voiceSessionSummaryReconcileInterval = null;
+  client.vcSummarySelectionState = new Map();
+  client.vcSummarySelectionTimers = new Map();
   client.voiceProfileReconcileInterval = null;
   client.voiceProfileUpdateQueues = new Map();
 

@@ -496,6 +496,310 @@ function createDatabase(databasePath) {
       DELETE FROM vc_profile_color_sessions
       WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
     `),
+    getOpenVcVoiceSession: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        session_id AS sessionId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        status,
+        started_at AS startedAt,
+        ended_at AS endedAt,
+        first_two_plus_at AS firstTwoPlusAt,
+        last_two_plus_at AS lastTwoPlusAt,
+        solo_since AS soloSince,
+        last_active_at AS lastActiveAt,
+        max_human_count AS maxHumanCount,
+        peak_started_at AS peakStartedAt,
+        peak_ended_at AS peakEndedAt,
+        peak_member_ids_json AS peakMemberIdsJson,
+        all_participant_ids_json AS allParticipantIdsJson,
+        first_join_user_id AS firstJoinUserId,
+        first_join_at AS firstJoinAt,
+        last_leave_user_id AS lastLeaveUserId,
+        last_leave_at AS lastLeaveAt,
+        main_voice_channel_id AS mainVoiceChannelId,
+        voice_channel_ids_json AS voiceChannelIdsJson,
+        two_plus_total_seconds AS twoPlusTotalSeconds,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_voice_sessions
+      WHERE guild_id = ?
+        AND category_id = ?
+        AND profile_channel_id = ?
+        AND status IN ('active', 'solo_grace')
+      ORDER BY datetime(created_at) DESC
+      LIMIT 1
+    `),
+    getVcVoiceSession: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        session_id AS sessionId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        status,
+        started_at AS startedAt,
+        ended_at AS endedAt,
+        first_two_plus_at AS firstTwoPlusAt,
+        last_two_plus_at AS lastTwoPlusAt,
+        solo_since AS soloSince,
+        last_active_at AS lastActiveAt,
+        max_human_count AS maxHumanCount,
+        peak_started_at AS peakStartedAt,
+        peak_ended_at AS peakEndedAt,
+        peak_member_ids_json AS peakMemberIdsJson,
+        all_participant_ids_json AS allParticipantIdsJson,
+        first_join_user_id AS firstJoinUserId,
+        first_join_at AS firstJoinAt,
+        last_leave_user_id AS lastLeaveUserId,
+        last_leave_at AS lastLeaveAt,
+        main_voice_channel_id AS mainVoiceChannelId,
+        voice_channel_ids_json AS voiceChannelIdsJson,
+        two_plus_total_seconds AS twoPlusTotalSeconds,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_voice_sessions
+      WHERE guild_id = ? AND session_id = ?
+      LIMIT 1
+    `),
+    upsertVcVoiceSession: sqlite.prepare(`
+      INSERT INTO vc_voice_sessions (
+        guild_id,
+        session_id,
+        category_id,
+        profile_channel_id,
+        status,
+        started_at,
+        ended_at,
+        first_two_plus_at,
+        last_two_plus_at,
+        solo_since,
+        last_active_at,
+        max_human_count,
+        peak_started_at,
+        peak_ended_at,
+        peak_member_ids_json,
+        all_participant_ids_json,
+        first_join_user_id,
+        first_join_at,
+        last_leave_user_id,
+        last_leave_at,
+        main_voice_channel_id,
+        voice_channel_ids_json,
+        two_plus_total_seconds,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, session_id) DO UPDATE SET
+        category_id = excluded.category_id,
+        profile_channel_id = excluded.profile_channel_id,
+        status = excluded.status,
+        started_at = excluded.started_at,
+        ended_at = excluded.ended_at,
+        first_two_plus_at = excluded.first_two_plus_at,
+        last_two_plus_at = excluded.last_two_plus_at,
+        solo_since = excluded.solo_since,
+        last_active_at = excluded.last_active_at,
+        max_human_count = excluded.max_human_count,
+        peak_started_at = excluded.peak_started_at,
+        peak_ended_at = excluded.peak_ended_at,
+        peak_member_ids_json = excluded.peak_member_ids_json,
+        all_participant_ids_json = excluded.all_participant_ids_json,
+        first_join_user_id = excluded.first_join_user_id,
+        first_join_at = excluded.first_join_at,
+        last_leave_user_id = excluded.last_leave_user_id,
+        last_leave_at = excluded.last_leave_at,
+        main_voice_channel_id = excluded.main_voice_channel_id,
+        voice_channel_ids_json = excluded.voice_channel_ids_json,
+        two_plus_total_seconds = excluded.two_plus_total_seconds,
+        updated_at = excluded.updated_at
+    `),
+    listClosedVcVoiceSessionsPeak: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        session_id AS sessionId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        status,
+        started_at AS startedAt,
+        ended_at AS endedAt,
+        first_two_plus_at AS firstTwoPlusAt,
+        last_two_plus_at AS lastTwoPlusAt,
+        solo_since AS soloSince,
+        last_active_at AS lastActiveAt,
+        max_human_count AS maxHumanCount,
+        peak_started_at AS peakStartedAt,
+        peak_ended_at AS peakEndedAt,
+        peak_member_ids_json AS peakMemberIdsJson,
+        all_participant_ids_json AS allParticipantIdsJson,
+        first_join_user_id AS firstJoinUserId,
+        first_join_at AS firstJoinAt,
+        last_leave_user_id AS lastLeaveUserId,
+        last_leave_at AS lastLeaveAt,
+        main_voice_channel_id AS mainVoiceChannelId,
+        voice_channel_ids_json AS voiceChannelIdsJson,
+        two_plus_total_seconds AS twoPlusTotalSeconds,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_voice_sessions
+      WHERE guild_id = ?
+        AND status = 'closed'
+        AND datetime(ended_at) >= datetime(?)
+        AND (? IS NULL OR category_id = ?)
+      ORDER BY max_human_count DESC, datetime(ended_at) DESC
+      LIMIT ?
+    `),
+    listClosedVcVoiceSessionsLatest: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        session_id AS sessionId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        status,
+        started_at AS startedAt,
+        ended_at AS endedAt,
+        first_two_plus_at AS firstTwoPlusAt,
+        last_two_plus_at AS lastTwoPlusAt,
+        solo_since AS soloSince,
+        last_active_at AS lastActiveAt,
+        max_human_count AS maxHumanCount,
+        peak_started_at AS peakStartedAt,
+        peak_ended_at AS peakEndedAt,
+        peak_member_ids_json AS peakMemberIdsJson,
+        all_participant_ids_json AS allParticipantIdsJson,
+        first_join_user_id AS firstJoinUserId,
+        first_join_at AS firstJoinAt,
+        last_leave_user_id AS lastLeaveUserId,
+        last_leave_at AS lastLeaveAt,
+        main_voice_channel_id AS mainVoiceChannelId,
+        voice_channel_ids_json AS voiceChannelIdsJson,
+        two_plus_total_seconds AS twoPlusTotalSeconds,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_voice_sessions
+      WHERE guild_id = ?
+        AND status = 'closed'
+        AND datetime(ended_at) >= datetime(?)
+        AND (? IS NULL OR category_id = ?)
+      ORDER BY datetime(ended_at) DESC, max_human_count DESC
+      LIMIT ?
+    `),
+    listOpenVcVoiceSessions: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        session_id AS sessionId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        status,
+        started_at AS startedAt,
+        ended_at AS endedAt,
+        first_two_plus_at AS firstTwoPlusAt,
+        last_two_plus_at AS lastTwoPlusAt,
+        solo_since AS soloSince,
+        last_active_at AS lastActiveAt,
+        max_human_count AS maxHumanCount,
+        peak_started_at AS peakStartedAt,
+        peak_ended_at AS peakEndedAt,
+        peak_member_ids_json AS peakMemberIdsJson,
+        all_participant_ids_json AS allParticipantIdsJson,
+        first_join_user_id AS firstJoinUserId,
+        first_join_at AS firstJoinAt,
+        last_leave_user_id AS lastLeaveUserId,
+        last_leave_at AS lastLeaveAt,
+        main_voice_channel_id AS mainVoiceChannelId,
+        voice_channel_ids_json AS voiceChannelIdsJson,
+        two_plus_total_seconds AS twoPlusTotalSeconds,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_voice_sessions
+      WHERE guild_id = ?
+        AND status IN ('active', 'solo_grace')
+      ORDER BY datetime(created_at) ASC
+    `),
+    listVcVoiceSessionMembers: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        session_id AS sessionId,
+        user_id AS userId,
+        display_name_snapshot AS displayNameSnapshot,
+        avatar_url_snapshot AS avatarUrlSnapshot,
+        first_joined_at AS firstJoinedAt,
+        last_left_at AS lastLeftAt,
+        total_present_seconds AS totalPresentSeconds,
+        was_present_at_peak AS wasPresentAtPeak,
+        joined_while_session_active AS joinedWhileSessionActive,
+        present_since AS presentSince,
+        is_present AS isPresent,
+        current_voice_channel_id AS currentVoiceChannelId,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_voice_session_members
+      WHERE guild_id = ? AND session_id = ?
+      ORDER BY datetime(COALESCE(first_joined_at, created_at)) ASC, user_id ASC
+    `),
+    upsertVcVoiceSessionMember: sqlite.prepare(`
+      INSERT INTO vc_voice_session_members (
+        guild_id,
+        session_id,
+        user_id,
+        display_name_snapshot,
+        avatar_url_snapshot,
+        first_joined_at,
+        last_left_at,
+        total_present_seconds,
+        was_present_at_peak,
+        joined_while_session_active,
+        present_since,
+        is_present,
+        current_voice_channel_id,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, session_id, user_id) DO UPDATE SET
+        display_name_snapshot = excluded.display_name_snapshot,
+        avatar_url_snapshot = excluded.avatar_url_snapshot,
+        first_joined_at = COALESCE(vc_voice_session_members.first_joined_at, excluded.first_joined_at),
+        last_left_at = excluded.last_left_at,
+        total_present_seconds = excluded.total_present_seconds,
+        was_present_at_peak = excluded.was_present_at_peak,
+        joined_while_session_active = MAX(vc_voice_session_members.joined_while_session_active, excluded.joined_while_session_active),
+        present_since = excluded.present_since,
+        is_present = excluded.is_present,
+        current_voice_channel_id = excluded.current_voice_channel_id,
+        updated_at = excluded.updated_at
+    `),
+    insertVcVoiceSessionEvent: sqlite.prepare(`
+      INSERT INTO vc_voice_session_events (
+        guild_id,
+        session_id,
+        event_type,
+        user_id,
+        from_channel_id,
+        to_channel_id,
+        occurred_at,
+        human_count_after,
+        member_ids_after_json,
+        metadata_json
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `),
+    listVcVoiceSessionEvents: sqlite.prepare(`
+      SELECT
+        event_id AS eventId,
+        guild_id AS guildId,
+        session_id AS sessionId,
+        event_type AS eventType,
+        user_id AS userId,
+        from_channel_id AS fromChannelId,
+        to_channel_id AS toChannelId,
+        occurred_at AS occurredAt,
+        human_count_after AS humanCountAfter,
+        member_ids_after_json AS memberIdsAfterJson,
+        metadata_json AS metadataJson
+      FROM vc_voice_session_events
+      WHERE guild_id = ? AND session_id = ?
+      ORDER BY datetime(occurred_at) DESC, event_id DESC
+      LIMIT ?
+    `),
     listLegacyVcProfileMessagesByCategory: sqlite.prepare(`
       SELECT
         category_id AS categoryId,
@@ -2835,6 +3139,93 @@ function createDatabase(databasePath) {
       },
       deleteLegacyProfileMessagesByCategory(categoryId) {
         statements.deleteLegacyVcProfileMessagesByCategory.run(categoryId);
+      }
+    },
+    vcVoiceSessions: {
+      getOpen({ guildId, categoryId, profileChannelId }) {
+        return statements.getOpenVcVoiceSession.get(guildId, categoryId, profileChannelId) || null;
+      },
+      get({ guildId, sessionId }) {
+        return statements.getVcVoiceSession.get(guildId, sessionId) || null;
+      },
+      upsert(session) {
+        const now = new Date().toISOString();
+        statements.upsertVcVoiceSession.run(
+          session.guildId,
+          session.sessionId,
+          session.categoryId,
+          session.profileChannelId || null,
+          session.status,
+          session.startedAt,
+          session.endedAt || null,
+          session.firstTwoPlusAt || null,
+          session.lastTwoPlusAt || null,
+          session.soloSince || null,
+          session.lastActiveAt || null,
+          Number(session.maxHumanCount || 0),
+          session.peakStartedAt || null,
+          session.peakEndedAt || null,
+          session.peakMemberIdsJson || '[]',
+          session.allParticipantIdsJson || '[]',
+          session.firstJoinUserId || null,
+          session.firstJoinAt || null,
+          session.lastLeaveUserId || null,
+          session.lastLeaveAt || null,
+          session.mainVoiceChannelId || null,
+          session.voiceChannelIdsJson || '[]',
+          Number(session.twoPlusTotalSeconds || 0),
+          session.createdAt || now,
+          session.updatedAt || now
+        );
+      },
+      listOpen(guildId) {
+        return statements.listOpenVcVoiceSessions.all(guildId);
+      },
+      listClosedForSummary({ guildId, sinceIso, categoryId = null, mode = 'peak', limit = 1 }) {
+        const statement = mode === 'latest'
+          ? statements.listClosedVcVoiceSessionsLatest
+          : statements.listClosedVcVoiceSessionsPeak;
+        return statement.all(guildId, sinceIso, categoryId || null, categoryId || null, Number(limit || 1));
+      },
+      listMembers(guildId, sessionId) {
+        return statements.listVcVoiceSessionMembers.all(guildId, sessionId);
+      },
+      upsertMember(member) {
+        const now = new Date().toISOString();
+        statements.upsertVcVoiceSessionMember.run(
+          member.guildId,
+          member.sessionId,
+          member.userId,
+          member.displayNameSnapshot || null,
+          member.avatarUrlSnapshot || null,
+          member.firstJoinedAt || null,
+          member.lastLeftAt || null,
+          Number(member.totalPresentSeconds || 0),
+          member.wasPresentAtPeak ? 1 : 0,
+          member.joinedWhileSessionActive ? 1 : 0,
+          member.presentSince || null,
+          member.isPresent ? 1 : 0,
+          member.currentVoiceChannelId || null,
+          member.createdAt || now,
+          member.updatedAt || now
+        );
+      },
+      insertEvent(event) {
+        return statements.insertVcVoiceSessionEvent.run(
+          event.guildId,
+          event.sessionId,
+          event.eventType,
+          event.userId || null,
+          event.fromChannelId || null,
+          event.toChannelId || null,
+          event.occurredAt || new Date().toISOString(),
+          event.humanCountAfter == null ? null : Number(event.humanCountAfter),
+          event.memberIdsAfterJson || '[]',
+          event.metadataJson || '{}'
+        ).lastInsertRowid;
+      },
+      listEvents(guildId, sessionId, limit = 10) {
+        return statements.listVcVoiceSessionEvents.all(guildId, sessionId, Number(limit || 10));
       }
     },
     guides: {

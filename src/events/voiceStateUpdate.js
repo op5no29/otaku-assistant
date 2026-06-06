@@ -1,4 +1,5 @@
 const { handleVoiceStateUpdate } = require('../modules/vcProfile');
+const { handleVoiceSessionStateUpdate } = require('../modules/vcSessionSummary');
 const { updateGuildMemberVcJoined, upsertGuildMember } = require('../modules/guildMembers');
 const { maybeSendVcNoIntroDm } = require('../modules/introDm');
 
@@ -8,6 +9,17 @@ module.exports = {
       await handleVoiceStateUpdate(oldState, newState);
     } catch (error) {
       newState.client.logger.error('Failed to handle voiceStateUpdate', {
+        userId: newState.id,
+        oldChannelId: oldState.channelId,
+        newChannelId: newState.channelId,
+        error: error.message
+      });
+    }
+
+    try {
+      await handleVoiceSessionStateUpdate(oldState, newState);
+    } catch (error) {
+      newState.client.logger.error('Failed to handle VC session summary state', {
         userId: newState.id,
         oldChannelId: oldState.channelId,
         newChannelId: newState.channelId,

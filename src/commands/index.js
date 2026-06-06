@@ -7,6 +7,7 @@ const welcomeCommand = require('./welcome');
 const introCommand = require('./intro');
 const animeCommand = require('./anime');
 const rolePanelCommand = require('./rolePanel');
+const vcSummaryCommand = require('./vcSummary');
 
 const list = [
   resolveCommand,
@@ -17,7 +18,8 @@ const list = [
   welcomeCommand,
   introCommand,
   animeCommand,
-  rolePanelCommand
+  rolePanelCommand,
+  vcSummaryCommand
 ];
 
 module.exports = {

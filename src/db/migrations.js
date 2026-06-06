@@ -124,6 +124,97 @@ function runMigrations(database) {
       PRIMARY KEY (guild_id, category_id, profile_channel_id)
     );
 
+    CREATE TABLE IF NOT EXISTS vc_voice_sessions (
+      guild_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      profile_channel_id TEXT,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      first_two_plus_at TEXT,
+      last_two_plus_at TEXT,
+      solo_since TEXT,
+      last_active_at TEXT,
+      max_human_count INTEGER NOT NULL DEFAULT 0,
+      peak_started_at TEXT,
+      peak_ended_at TEXT,
+      peak_member_ids_json TEXT,
+      all_participant_ids_json TEXT,
+      first_join_user_id TEXT,
+      first_join_at TEXT,
+      last_leave_user_id TEXT,
+      last_leave_at TEXT,
+      main_voice_channel_id TEXT,
+      voice_channel_ids_json TEXT,
+      two_plus_total_seconds INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, session_id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vc_voice_sessions_one_open_category
+      ON vc_voice_sessions (guild_id, category_id, profile_channel_id)
+      WHERE status IN ('active', 'solo_grace');
+
+    CREATE INDEX IF NOT EXISTS idx_vc_voice_sessions_summary
+      ON vc_voice_sessions (guild_id, status, ended_at, max_human_count);
+
+    CREATE TABLE IF NOT EXISTS vc_voice_session_members (
+      guild_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      display_name_snapshot TEXT,
+      avatar_url_snapshot TEXT,
+      first_joined_at TEXT,
+      last_left_at TEXT,
+      total_present_seconds INTEGER DEFAULT 0,
+      was_present_at_peak INTEGER DEFAULT 0,
+      joined_while_session_active INTEGER DEFAULT 0,
+      present_since TEXT,
+      is_present INTEGER NOT NULL DEFAULT 0,
+      current_voice_channel_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, session_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS vc_voice_session_events (
+      event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      user_id TEXT,
+      from_channel_id TEXT,
+      to_channel_id TEXT,
+      occurred_at TEXT NOT NULL,
+      human_count_after INTEGER,
+      member_ids_after_json TEXT,
+      metadata_json TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_vc_voice_session_events_session
+      ON vc_voice_session_events (guild_id, session_id, occurred_at);
+
+    CREATE TABLE IF NOT EXISTS vc_voice_session_summary_messages (
+      guild_id TEXT NOT NULL,
+      session_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      profile_channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, session_id, profile_channel_id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vc_voice_session_summary_messages_message
+      ON vc_voice_session_summary_messages (message_id);
+
+    CREATE INDEX IF NOT EXISTS idx_vc_voice_session_summary_messages_active_category
+      ON vc_voice_session_summary_messages (guild_id, category_id, profile_channel_id, status, expires_at);
+
     CREATE TABLE IF NOT EXISTS relayed_message_targets (
       source_message_id TEXT NOT NULL,
       destination_channel_id TEXT NOT NULL,

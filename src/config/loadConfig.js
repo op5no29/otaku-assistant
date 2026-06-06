@@ -212,6 +212,30 @@ function ensureIntroVcReminderConfig(value, introDmConfig = {}, fallbackLogChann
   };
 }
 
+function ensureVoiceSessionSummaryConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      enabled: true,
+      minHumansToStart: 2,
+      soloGraceMinutes: 90,
+      minSessionActiveMinutes: 5,
+      summaryLookbackHours: 24,
+      maxEventsToShow: 10,
+      reconcileIntervalMinutes: 5
+    };
+  }
+
+  return {
+    enabled: value.enabled !== false,
+    minHumansToStart: Math.max(2, Number(value.minHumansToStart ?? 2)),
+    soloGraceMinutes: Math.max(1, Number(value.soloGraceMinutes ?? 90)),
+    minSessionActiveMinutes: Math.max(0, Number(value.minSessionActiveMinutes ?? 5)),
+    summaryLookbackHours: Math.max(1, Number(value.summaryLookbackHours ?? 24)),
+    maxEventsToShow: Math.max(0, Number(value.maxEventsToShow ?? 10)),
+    reconcileIntervalMinutes: Math.max(1, Number(value.reconcileIntervalMinutes ?? 5))
+  };
+}
+
 function ensureIntroAddendumsConfig(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
@@ -447,6 +471,7 @@ function loadConfig(configPath) {
       channelAccentColors: ensureAccentColorMap(parsed.voiceProfile?.channelAccentColors, 'voiceProfile.channelAccentColors'),
       channelStatusLabels: ensureStringMap(parsed.voiceProfile?.channelStatusLabels || parsed.voiceProfile?.statusText, 'voiceProfile.channelStatusLabels')
     },
+    voiceSessionSummary: ensureVoiceSessionSummaryConfig(parsed.voiceSessionSummary),
     mediaRelay: {
       maxReuploadBytes: Number(parsed.mediaRelay?.maxReuploadBytes ?? 25_000_000),
       tempDir: String(parsed.mediaRelay?.tempDir || './tmp/relay-media')
