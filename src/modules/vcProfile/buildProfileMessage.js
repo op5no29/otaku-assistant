@@ -69,13 +69,9 @@ function buildProfileMessage({
   const statusLine = statusText?.trim()
     ? `**ステータス**\n${statusText.trim()}\n\n`
     : '';
-  const voiceChannelLine = voiceChannelName?.trim()
-    ? `**通話チャンネル**\n${voiceChannelName.trim()}\n\n`
-    : '';
-
   container.addTextDisplayComponents(
     new TextDisplayBuilder().setContent(`## ${title}`),
-    new TextDisplayBuilder().setContent(`${voiceChannelLine}${statusLine}**現在の人数**\n${countLabel}`)
+    new TextDisplayBuilder().setContent(`${statusLine}**現在の人数**\n${countLabel}`)
   );
 
   for (const member of members) {

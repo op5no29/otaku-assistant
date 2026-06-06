@@ -1144,7 +1144,6 @@ function isVcProfileCardMessage(client, message, mapping) {
   return (
     text.includes(`## ${mapping.name} /`) ||
     (
-      text.includes('**通話チャンネル**') &&
       text.includes('**現在の人数**')
     ) ||
     (
