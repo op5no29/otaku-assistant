@@ -57,6 +57,7 @@ function createBotClient({ appConfig, database, logger }) {
   client.voiceSessionSummaryReconcileInterval = null;
   client.vcSummarySelectionState = new Map();
   client.vcSummarySelectionTimers = new Map();
+  client.vcSessionEndCardTimers = new Map();
   client.voiceProfileReconcileInterval = null;
   client.voiceProfileUpdateQueues = new Map();
 

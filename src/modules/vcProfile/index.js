@@ -3,6 +3,7 @@ const { Routes } = require('discord-api-types/v10');
 const { buildProfileMessage } = require('./buildProfileMessage');
 const { findLatestIntroMessage } = require('./findLatestIntroMessage');
 const { parseAccentColor } = require('../../utils/accentColors');
+const { deleteActiveVoiceSessionEndCardsForCategory } = require('../vcSessionSummary');
 
 const DISCORD_COMPONENT_LIMIT = 40;
 const DEFAULT_MEMBERS_PER_PAGE = 6;
@@ -1586,6 +1587,13 @@ async function syncVoiceProfileCategoryLocked(client, guild, categoryId, mapping
     });
     return;
   }
+
+  await deleteActiveVoiceSessionEndCardsForCategory(client, {
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id,
+    reason: 'new_live_session'
+  });
 
   const accentColor = resolveCategoryAccentColor(client, {
     guildId,

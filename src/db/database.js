@@ -800,6 +800,63 @@ function createDatabase(databasePath) {
       ORDER BY datetime(occurred_at) DESC, event_id DESC
       LIMIT ?
     `),
+    upsertVcVoiceSessionSummaryMessage: sqlite.prepare(`
+      INSERT INTO vc_voice_session_summary_messages (
+        guild_id,
+        session_id,
+        category_id,
+        profile_channel_id,
+        message_id,
+        expires_at,
+        status,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, session_id, profile_channel_id) DO UPDATE SET
+        category_id = excluded.category_id,
+        message_id = excluded.message_id,
+        expires_at = excluded.expires_at,
+        status = excluded.status,
+        updated_at = excluded.updated_at
+    `),
+    listActiveVcVoiceSessionSummaryMessages: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        session_id AS sessionId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        message_id AS messageId,
+        expires_at AS expiresAt,
+        status,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_voice_session_summary_messages
+      WHERE status = 'active'
+      ORDER BY datetime(expires_at) ASC
+    `),
+    listActiveVcVoiceSessionSummaryMessagesForCategory: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        session_id AS sessionId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        message_id AS messageId,
+        expires_at AS expiresAt,
+        status,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_voice_session_summary_messages
+      WHERE guild_id = ?
+        AND category_id = ?
+        AND profile_channel_id = ?
+        AND status = 'active'
+      ORDER BY datetime(created_at) DESC
+    `),
+    updateVcVoiceSessionSummaryMessageStatus: sqlite.prepare(`
+      UPDATE vc_voice_session_summary_messages
+      SET status = ?, updated_at = ?
+      WHERE guild_id = ? AND session_id = ? AND profile_channel_id = ?
+    `),
     listLegacyVcProfileMessagesByCategory: sqlite.prepare(`
       SELECT
         category_id AS categoryId,
@@ -3226,6 +3283,39 @@ function createDatabase(databasePath) {
       },
       listEvents(guildId, sessionId, limit = 10) {
         return statements.listVcVoiceSessionEvents.all(guildId, sessionId, Number(limit || 10));
+      },
+      upsertSummaryMessage(record) {
+        const now = new Date().toISOString();
+        statements.upsertVcVoiceSessionSummaryMessage.run(
+          record.guildId,
+          record.sessionId,
+          record.categoryId,
+          record.profileChannelId,
+          record.messageId,
+          record.expiresAt,
+          record.status || 'active',
+          record.createdAt || now,
+          record.updatedAt || now
+        );
+      },
+      listActiveSummaryMessages() {
+        return statements.listActiveVcVoiceSessionSummaryMessages.all();
+      },
+      listActiveSummaryMessagesForCategory({ guildId, categoryId, profileChannelId }) {
+        return statements.listActiveVcVoiceSessionSummaryMessagesForCategory.all(
+          guildId,
+          categoryId,
+          profileChannelId
+        );
+      },
+      updateSummaryMessageStatus({ guildId, sessionId, profileChannelId, status }) {
+        return statements.updateVcVoiceSessionSummaryMessageStatus.run(
+          status,
+          new Date().toISOString(),
+          guildId,
+          sessionId,
+          profileChannelId
+        ).changes;
       }
     },
     guides: {

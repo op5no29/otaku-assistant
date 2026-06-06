@@ -11,7 +11,11 @@ const { runAnimeOrphanScan } = require('../modules/anime');
 const { getAnnictAccessToken } = require('../modules/anime/annictClient');
 const { startQuestionRolePromptTimeouts } = require('../modules/timelineRelay');
 const { backfillIntroAddendums } = require('../modules/introProfiles');
-const { reconcileVoiceSessions, startVoiceSessionReconciliation } = require('../modules/vcSessionSummary');
+const {
+  cleanupVoiceSessionEndSummaryCards,
+  reconcileVoiceSessions,
+  startVoiceSessionReconciliation
+} = require('../modules/vcSessionSummary');
 
 module.exports = {
   async execute(client) {
@@ -26,6 +30,11 @@ module.exports = {
     await rebuildVoiceProfileState(client, { reason: 'ready_resync' });
     await reconcileVoiceSessions(client, { reason: 'ready_resync' }).catch((error) => {
       client.logger.error('vc session ready reconciliation failed', {
+        error: error.message
+      });
+    });
+    await cleanupVoiceSessionEndSummaryCards(client, { reason: 'ready_resync' }).catch((error) => {
+      client.logger.error('vc session end summary ready cleanup failed', {
         error: error.message
       });
     });

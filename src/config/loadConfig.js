@@ -213,6 +213,18 @@ function ensureIntroVcReminderConfig(value, introDmConfig = {}, fallbackLogChann
 }
 
 function ensureVoiceSessionSummaryConfig(value) {
+  const defaultEndCard = {
+    enabled: true,
+    ttlMinutes: 30,
+    messages: {
+      default: '通話チャンネルのご利用ありがとうございました。またお気軽にどうぞ。',
+      work: '今日の作業もお疲れ様でした。',
+      longWork: '長時間の作業、お疲れ様でした。',
+      music: '作業、お疲れ様でした。またお気軽にどうぞ。',
+      chat: 'お疲れ様でした。またいつでもどうぞ。'
+    }
+  };
+
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
       enabled: true,
@@ -221,9 +233,17 @@ function ensureVoiceSessionSummaryConfig(value) {
       minSessionActiveMinutes: 5,
       summaryLookbackHours: 24,
       maxEventsToShow: 10,
-      reconcileIntervalMinutes: 5
+      reconcileIntervalMinutes: 5,
+      endCard: defaultEndCard
     };
   }
+
+  const endCardValue = value.endCard && typeof value.endCard === 'object' && !Array.isArray(value.endCard)
+    ? value.endCard
+    : {};
+  const endCardMessagesValue = endCardValue.messages && typeof endCardValue.messages === 'object' && !Array.isArray(endCardValue.messages)
+    ? endCardValue.messages
+    : {};
 
   return {
     enabled: value.enabled !== false,
@@ -232,7 +252,19 @@ function ensureVoiceSessionSummaryConfig(value) {
     minSessionActiveMinutes: Math.max(0, Number(value.minSessionActiveMinutes ?? 5)),
     summaryLookbackHours: Math.max(1, Number(value.summaryLookbackHours ?? 24)),
     maxEventsToShow: Math.max(0, Number(value.maxEventsToShow ?? 10)),
-    reconcileIntervalMinutes: Math.max(1, Number(value.reconcileIntervalMinutes ?? 5))
+    reconcileIntervalMinutes: Math.max(1, Number(value.reconcileIntervalMinutes ?? 5)),
+    endCard: {
+      enabled: endCardValue.enabled !== false,
+      ttlMinutes: Math.max(1, Number(endCardValue.ttlMinutes ?? defaultEndCard.ttlMinutes)),
+      messages: {
+        ...defaultEndCard.messages,
+        ...Object.fromEntries(
+          Object.entries(endCardMessagesValue)
+            .map(([key, message]) => [String(key), String(message || '').trim()])
+            .filter(([, message]) => message.length > 0)
+        )
+      }
+    }
   };
 }
 
