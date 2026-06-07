@@ -24,6 +24,7 @@ const SESSION_STATUSES = {
 const MAX_GRAPH_LINES = 7;
 const MAX_HISTORY_SESSIONS = 5;
 const MAX_SELECT_SESSION_OPTIONS = 25;
+const MAX_END_SUMMARY_RESTORE_CANDIDATES = 100;
 const VC_SUMMARY_SELECT_PREFIX = 'vc-summary:select:';
 const VC_SUMMARY_DETAIL_PREFIX = 'vc-summary:detail:';
 const VC_SUMMARY_SELECT_TTL_MS = 10 * 60 * 1000;
@@ -45,10 +46,17 @@ function getConfig(client) {
       restoreLatestOnReady: true,
       messages: {
         default: '通話チャンネルのご利用ありがとうございました。またお気軽にどうぞ。',
-        work: '今日の作業もお疲れ様でした。',
+        work: '集中作業、お疲れ様でした。',
+        workShort: '作業おつかれさまでした。',
+        workMedium: '集中作業、お疲れ様でした。',
+        workLong: '長時間の作業、お疲れ様でした。',
+        workVeryLong: 'かなり長時間の作業、本当にお疲れ様でした。',
+        workUltraLong: 'ものすごい長時間の作業、本当にお疲れ様でした。しっかり休んでください。',
         longWork: '長時間の作業、お疲れ様でした。',
-        music: '作業、お疲れ様でした。またお気軽にどうぞ。',
-        chat: 'お疲れ様でした。またいつでもどうぞ。'
+        music: '音楽作業、お疲れ様でした。',
+        longMusic: '長時間の音楽作業、本当にお疲れ様でした。',
+        chat: '通話お疲れ様でした。また気軽に遊びに来てください。',
+        longChat: '長時間の通話、お疲れ様でした。またゆっくり休んでください。'
       }
     }
   };
@@ -64,10 +72,17 @@ function getEndCardConfig(client) {
     restoreLatestOnReady: endCard.restoreLatestOnReady !== false,
     messages: {
       default: '通話チャンネルのご利用ありがとうございました。またお気軽にどうぞ。',
-      work: '今日の作業もお疲れ様でした。',
+      work: '集中作業、お疲れ様でした。',
+      workShort: '作業おつかれさまでした。',
+      workMedium: '集中作業、お疲れ様でした。',
+      workLong: '長時間の作業、お疲れ様でした。',
+      workVeryLong: 'かなり長時間の作業、本当にお疲れ様でした。',
+      workUltraLong: 'ものすごい長時間の作業、本当にお疲れ様でした。しっかり休んでください。',
       longWork: '長時間の作業、お疲れ様でした。',
-      music: '作業、お疲れ様でした。またお気軽にどうぞ。',
-      chat: 'お疲れ様でした。またいつでもどうぞ。',
+      music: '音楽作業、お疲れ様でした。',
+      longMusic: '長時間の音楽作業、本当にお疲れ様でした。',
+      chat: '通話お疲れ様でした。また気軽に遊びに来てください。',
+      longChat: '長時間の通話、お疲れ様でした。またゆっくり休んでください。',
       ...(endCard.messages || {})
     }
   };
@@ -118,7 +133,7 @@ function isReadyReconcileReason(reason) {
 function isOpenSessionUniqueConflict(error) {
   const message = String(error?.message || '');
   return (error?.code === 'SQLITE_CONSTRAINT_UNIQUE' || error?.code === 'SQLITE_CONSTRAINT') &&
-    /UNIQUE constraint failed: vc_voice_sessions\.guild_id, vc_voice_sessions\.category_id, vc_voice_sessions\.profile_channel_id/i.test(message);
+    /UNIQUE constraint failed: vc_voice_sessions\.guild_id, vc_voice_sessions\.category_id, vc_voice_sessions\.profile_channel_id(?:, vc_voice_sessions\.main_voice_channel_id)?/i.test(message);
 }
 
 function getVoiceSessionQueues(client) {
@@ -254,6 +269,30 @@ async function collectCategorySnapshot(client, guild, categoryId, mapping) {
   const mainVoiceChannelId = [...channelCounts.entries()]
     .sort((left, right) => right[1] - left[1] || String(left[0]).localeCompare(String(right[0])))
     [0]?.[0] || activeVoiceChannelIds[0] || null;
+  const channelOrder = new Map(voiceChannels.map((channel, index) => [String(channel.id), index]));
+  const channelSnapshots = activeVoiceChannelIds
+    .map((voiceChannelId) => {
+      const channelMembers = members.filter((member) => String(member.voiceChannelId) === String(voiceChannelId));
+      const voiceChannel = channelById.get(String(voiceChannelId));
+      return {
+        members: channelMembers,
+        memberIds: channelMembers.map((member) => member.userId),
+        humanCount: channelMembers.length,
+        activeVoiceChannelIds: [String(voiceChannelId)],
+        voiceChannelIds: [String(voiceChannelId)],
+        mainVoiceChannelId: String(voiceChannelId),
+        voiceChannelName: voiceChannel?.name || channelMembers[0]?.voiceChannelName || ''
+      };
+    })
+    .sort((left, right) => {
+      const leftOrder = channelOrder.has(left.mainVoiceChannelId) ? channelOrder.get(left.mainVoiceChannelId) : Number.MAX_SAFE_INTEGER;
+      const rightOrder = channelOrder.has(right.mainVoiceChannelId) ? channelOrder.get(right.mainVoiceChannelId) : Number.MAX_SAFE_INTEGER;
+      if (leftOrder !== rightOrder) {
+        return leftOrder - rightOrder;
+      }
+      return String(left.voiceChannelName || '').localeCompare(String(right.voiceChannelName || ''), 'ja') ||
+        String(left.mainVoiceChannelId || '').localeCompare(String(right.mainVoiceChannelId || ''));
+    });
 
   client.logger.info('vc session category snapshot collected', {
     guildId: guild.id,
@@ -262,6 +301,12 @@ async function collectCategorySnapshot(client, guild, categoryId, mapping) {
     humanCount: members.length,
     memberIds: members.map((member) => member.userId),
     activeVoiceChannelIds,
+    channelSnapshots: channelSnapshots.map((channelSnapshot) => ({
+      voiceChannelId: channelSnapshot.mainVoiceChannelId,
+      voiceChannelName: channelSnapshot.voiceChannelName,
+      humanCount: channelSnapshot.humanCount,
+      memberIds: channelSnapshot.memberIds
+    })),
     excludedBotIds,
     excludedMissingMemberIds
   });
@@ -272,7 +317,8 @@ async function collectCategorySnapshot(client, guild, categoryId, mapping) {
     humanCount: members.length,
     activeVoiceChannelIds,
     voiceChannelIds,
-    mainVoiceChannelId
+    mainVoiceChannelId,
+    channelSnapshots
   };
 }
 
@@ -482,14 +528,31 @@ function formatCompactMentionList(userIds, maxCount = 15) {
 function selectEndCardMessage({ categoryName, mainVoiceChannelName, durationSeconds, messages }) {
   const categoryText = String(categoryName || '');
   const channelText = String(mainVoiceChannelName || '');
+  const duration = Number(durationSeconds || 0);
   if (/音楽/.test(channelText)) {
-    return messages.music;
+    return duration >= 2 * 60 * 60
+      ? messages.longMusic || messages.music
+      : messages.music;
   }
   if (/通話2|作業/i.test(categoryText) || /作業/i.test(channelText)) {
-    return durationSeconds >= 2 * 60 * 60 ? messages.longWork : messages.work;
+    if (duration >= 10 * 60 * 60) {
+      return messages.workUltraLong || messages.workVeryLong || messages.longWork || messages.work;
+    }
+    if (duration >= 5 * 60 * 60) {
+      return messages.workVeryLong || messages.longWork || messages.work;
+    }
+    if (duration >= 2 * 60 * 60) {
+      return messages.workLong || messages.longWork || messages.work;
+    }
+    if (duration >= 30 * 60) {
+      return messages.workMedium || messages.work;
+    }
+    return messages.workShort || messages.work;
   }
   if (/通話1|雑談/i.test(categoryText) || /雑談/i.test(channelText)) {
-    return messages.chat;
+    return duration >= 2 * 60 * 60
+      ? messages.longChat || messages.chat
+      : messages.chat;
   }
   return messages.default;
 }
@@ -669,6 +732,7 @@ async function deleteActiveVoiceSessionEndCardsForCategory(client, {
   guildId,
   categoryId,
   profileChannelId,
+  mainVoiceChannelId = null,
   reason = 'category_replaced'
 }) {
   const records = client.db.vcVoiceSessions.listActiveSummaryMessagesForCategory({
@@ -678,6 +742,15 @@ async function deleteActiveVoiceSessionEndCardsForCategory(client, {
   });
   let deletedCount = 0;
   for (const record of records) {
+    if (mainVoiceChannelId) {
+      const recordSession = client.db.vcVoiceSessions.get({
+        guildId: record.guildId,
+        sessionId: record.sessionId
+      });
+      if (String(recordSession?.mainVoiceChannelId || '') !== String(mainVoiceChannelId)) {
+        continue;
+      }
+    }
     const deleted = await deleteVoiceSessionEndCardRecord(client, record, {
       status: 'deleted',
       reason
@@ -690,6 +763,7 @@ async function deleteActiveVoiceSessionEndCardsForCategory(client, {
           sessionId: record.sessionId,
           categoryId,
           profileChannelId,
+          mainVoiceChannelId: mainVoiceChannelId || null,
           messageId: record.messageId
         });
         appendOperationLog(client, {
@@ -698,14 +772,16 @@ async function deleteActiveVoiceSessionEndCardsForCategory(client, {
           title: 'VC end summary replaced by live card',
           body: [
             `category: \`${categoryId}\``,
+            mainVoiceChannelId ? `voiceChannel: \`${mainVoiceChannelId}\`` : null,
             `session: \`${record.sessionId}\``,
             `message: \`${record.messageId}\``
-          ].join('\n'),
+          ].filter(Boolean).join('\n'),
           metadata: {
             guildId,
             sessionId: record.sessionId,
             categoryId,
             profileChannelId,
+            mainVoiceChannelId: mainVoiceChannelId || null,
             messageId: record.messageId
           }
         });
@@ -808,6 +884,7 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
     guildId: session.guildId,
     categoryId: session.categoryId,
     profileChannelId,
+    mainVoiceChannelId: session.mainVoiceChannelId || null,
     reason: 'new_end_summary'
   });
 
@@ -897,7 +974,7 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
 async function restoreLatestVoiceSessionEndSummaryCards(client, { reason = 'ready_cleanup' } = {}) {
   const endCardConfig = getEndCardConfig(client);
   if (!endCardConfig.enabled || !endCardConfig.restoreLatestOnReady) {
-    client.logger.info('vc session end summary latest restore skipped disabled', {
+    client.logger.info('vc end summary restore skipped disabled', {
       reason,
       enabled: endCardConfig.enabled,
       restoreLatestOnReady: endCardConfig.restoreLatestOnReady
@@ -929,16 +1006,16 @@ async function restoreLatestVoiceSessionEndSummaryCards(client, { reason = 'read
       categoryId,
       profileChannelId
     });
-    if (activeRecords.length > 0) {
-      skippedCount += 1;
-      client.logger.info('vc session end summary latest restore skipped active card exists', {
-        guildId: guild.id,
-        categoryId,
-        profileChannelId,
-        activeCount: activeRecords.length,
-        reason
+    const activeSummaryVoiceChannelIds = new Set();
+    for (const activeRecord of activeRecords) {
+      const activeSession = client.db.vcVoiceSessions.get({
+        guildId: activeRecord.guildId,
+        sessionId: activeRecord.sessionId
       });
-      continue;
+      const activeVoiceChannelId = getSessionScopeVoiceChannelId(activeSession || activeRecord);
+      if (activeVoiceChannelId) {
+        activeSummaryVoiceChannelIds.add(activeVoiceChannelId);
+      }
     }
 
     const snapshot = await collectCategorySnapshot(client, guild, categoryId, mapping).catch((error) => {
@@ -955,29 +1032,35 @@ async function restoreLatestVoiceSessionEndSummaryCards(client, { reason = 'read
     if (!snapshot) {
       continue;
     }
-    if (snapshot.humanCount >= minHumansToStart) {
+    const activeLiveChannel = snapshot.channelSnapshots?.find((channelSnapshot) =>
+      Number(channelSnapshot.humanCount || 0) > 0
+    );
+    if (activeLiveChannel) {
       skippedCount += 1;
-      client.logger.info('vc session end summary latest restore skipped live session active', {
+      client.logger.info('vc end summary restore skipped active_live_session', {
         guildId: guild.id,
         categoryId,
         profileChannelId,
-        humanCount: snapshot.humanCount,
+        voiceChannelId: activeLiveChannel.mainVoiceChannelId || null,
+        voiceChannelName: activeLiveChannel.voiceChannelName || null,
+        humanCount: activeLiveChannel.humanCount,
         minHumansToStart,
         reason
       });
       continue;
     }
 
-    const [latestSession] = client.db.vcVoiceSessions.listClosedForSummary({
+    const closedSessions = client.db.vcVoiceSessions.listClosedForSummary({
       guildId: guild.id,
       sinceIso: '1970-01-01T00:00:00.000Z',
       categoryId,
       mode: 'latest',
-      limit: 1
+      limit: MAX_END_SUMMARY_RESTORE_CANDIDATES
     });
-    if (!latestSession) {
+    const latestSessions = selectLatestClosedSessionsByVoiceChannel(closedSessions);
+    if (!latestSessions.length) {
       skippedCount += 1;
-      client.logger.info('vc session end summary latest restore skipped no closed session', {
+      client.logger.info('vc end summary restore skipped no_closed_session', {
         guildId: guild.id,
         categoryId,
         profileChannelId,
@@ -986,30 +1069,50 @@ async function restoreLatestVoiceSessionEndSummaryCards(client, { reason = 'read
       continue;
     }
 
-    const message = await postVoiceSessionEndSummaryCard(client, latestSession, {
-      reason: `${reason}_restore_latest`
-    }).catch((error) => {
-      errorCount += 1;
-      client.logger.warn('vc session end summary latest restore failed', {
-        guildId: guild.id,
-        categoryId,
-        profileChannelId,
-        sessionId: latestSession.sessionId,
-        reason,
-        error: error.message
+    for (const latestSession of latestSessions) {
+      const voiceChannelId = getSessionScopeVoiceChannelId(latestSession);
+      if (voiceChannelId && activeSummaryVoiceChannelIds.has(voiceChannelId)) {
+        skippedCount += 1;
+        client.logger.info('vc end summary restore skipped active_summary_exists', {
+          guildId: guild.id,
+          categoryId,
+          profileChannelId,
+          sessionId: latestSession.sessionId,
+          mainVoiceChannelId: voiceChannelId,
+          activeCount: activeRecords.length,
+          reason
+        });
+        continue;
+      }
+
+      const message = await postVoiceSessionEndSummaryCard(client, latestSession, {
+        reason: `${reason}_restore_latest`
+      }).catch((error) => {
+        errorCount += 1;
+        client.logger.warn('vc session end summary latest restore failed', {
+          guildId: guild.id,
+          categoryId,
+          profileChannelId,
+          sessionId: latestSession.sessionId,
+          mainVoiceChannelId: voiceChannelId || null,
+          reason,
+          error: error.message
+        });
+        return null;
       });
-      return null;
-    });
-    if (message) {
-      restoredCount += 1;
-      client.logger.info('vc session end summary latest restored on ready', {
-        guildId: guild.id,
-        categoryId,
-        profileChannelId,
-        sessionId: latestSession.sessionId,
-        messageId: message.id,
-        reason
-      });
+      if (message) {
+        restoredCount += 1;
+        activeSummaryVoiceChannelIds.add(voiceChannelId);
+        client.logger.info('vc end summary restored latest closed session', {
+          guildId: guild.id,
+          categoryId,
+          profileChannelId,
+          sessionId: latestSession.sessionId,
+          mainVoiceChannelId: voiceChannelId || null,
+          messageId: message.id,
+          reason
+        });
+      }
     }
   }
 
@@ -1185,10 +1288,11 @@ function createSessionFromSnapshot(client, {
       throw error;
     }
 
-    const existingSession = getSessionWithJson(client.db.vcVoiceSessions.getOpen({
+    const existingSession = getSessionWithJson(client.db.vcVoiceSessions.getOpenForChannel({
       guildId,
       categoryId,
-      profileChannelId
+      profileChannelId,
+      mainVoiceChannelId: snapshot.mainVoiceChannelId
     }));
     if (!existingSession) {
       throw error;
@@ -1198,6 +1302,7 @@ function createSessionFromSnapshot(client, {
       guildId,
       categoryId,
       profileChannelId,
+      mainVoiceChannelId: snapshot.mainVoiceChannelId || null,
       attemptedSessionId: session.sessionId,
       existingSessionId: existingSession.sessionId,
       reason,
@@ -1246,6 +1351,7 @@ function createSessionFromSnapshot(client, {
     guildId,
     categoryId,
     profileChannelId,
+    mainVoiceChannelId: snapshot.mainVoiceChannelId || null,
     sessionId: session.sessionId,
     humanCount: snapshot.humanCount,
     startedAt: session.startedAt,
@@ -1256,6 +1362,7 @@ function createSessionFromSnapshot(client, {
       guildId,
       categoryId,
       profileChannelId,
+      mainVoiceChannelId: snapshot.mainVoiceChannelId || null,
       sessionId: session.sessionId,
       humanCount: snapshot.humanCount,
       startedAt: session.startedAt,
@@ -1389,26 +1496,63 @@ function getSessionWithJson(sessionRow) {
   return normalizeSession(sessionRow);
 }
 
-async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapping, {
+function getSessionScopeVoiceChannelId(sessionRow) {
+  const session = normalizeSession(sessionRow);
+  return String(session?.mainVoiceChannelId || session?.voiceChannelIds?.[0] || session?.sessionId || '').trim();
+}
+
+function selectLatestClosedSessionsByVoiceChannel(sessions) {
+  const latestByChannelId = new Map();
+  for (const session of sessions.map(normalizeSession).filter(Boolean)) {
+    const voiceChannelId = getSessionScopeVoiceChannelId(session);
+    if (!voiceChannelId || latestByChannelId.has(voiceChannelId)) {
+      continue;
+    }
+    latestByChannelId.set(voiceChannelId, session);
+  }
+  return [...latestByChannelId.values()].sort((left, right) =>
+    new Date(right.endedAt || 0).getTime() - new Date(left.endedAt || 0).getTime()
+  );
+}
+
+function createEmptySnapshotForOpenSession(session) {
+  const voiceChannelIds = parseJsonArray(session.voiceChannelIdsJson);
+  const mainVoiceChannelId = session.mainVoiceChannelId || voiceChannelIds[0] || null;
+  return {
+    members: [],
+    memberIds: [],
+    humanCount: 0,
+    activeVoiceChannelIds: [],
+    voiceChannelIds: mainVoiceChannelId ? [String(mainVoiceChannelId)] : voiceChannelIds,
+    mainVoiceChannelId,
+    voiceChannelName: ''
+  };
+}
+
+async function processVoiceSessionSnapshotLocked(client, guild, categoryId, mapping, {
+  snapshot,
+  openSession = null,
   reason = 'voice_state_update',
-  nowIso = new Date().toISOString()
+  nowIso = new Date().toISOString(),
+  config = getConfig(client)
 } = {}) {
-  const config = getConfig(client);
   if (!config.enabled) {
     return null;
   }
 
   const guildId = guild.id;
-  const snapshot = await collectCategorySnapshot(client, guild, categoryId, mapping);
   const minHumansToStart = Math.max(2, Number(config.minHumansToStart || 2));
   const readyReconcile = isReadyReconcileReason(reason);
-  const openSession = getSessionWithJson(client.db.vcVoiceSessions.getOpen({
-    guildId,
-    categoryId,
-    profileChannelId: mapping.profileChannelId
-  }));
+  const resolvedOpenSession = openSession || (snapshot.mainVoiceChannelId
+    ? getSessionWithJson(client.db.vcVoiceSessions.getOpenForChannel({
+      guildId,
+      categoryId,
+      profileChannelId: mapping.profileChannelId,
+      mainVoiceChannelId: snapshot.mainVoiceChannelId
+    }))
+    : null);
 
-  if (!openSession) {
+  if (!resolvedOpenSession) {
     if (snapshot.humanCount >= minHumansToStart) {
       return createSessionFromSnapshot(client, {
         guildId,
@@ -1422,7 +1566,7 @@ async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapp
     return null;
   }
 
-  const session = openSession;
+  const session = resolvedOpenSession;
   session.allParticipantIds = [...new Set([...session.allParticipantIds, ...snapshot.memberIds])];
   session.voiceChannelIds = [...new Set([...session.voiceChannelIds, ...snapshot.voiceChannelIds])];
   session.mainVoiceChannelId = snapshot.mainVoiceChannelId || session.mainVoiceChannelId || null;
@@ -1432,6 +1576,7 @@ async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapp
       guildId,
       categoryId,
       profileChannelId: mapping.profileChannelId,
+      mainVoiceChannelId: session.mainVoiceChannelId || null,
       sessionId: session.sessionId,
       status: session.status,
       humanCount: snapshot.humanCount,
@@ -1458,6 +1603,7 @@ async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapp
         guildId,
         categoryId,
         profileChannelId: mapping.profileChannelId,
+        mainVoiceChannelId: session.mainVoiceChannelId || null,
         sessionId: session.sessionId,
         soloSince: session.soloSince,
         reason
@@ -1500,6 +1646,7 @@ async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapp
           guildId,
           categoryId,
           profileChannelId: mapping.profileChannelId,
+          mainVoiceChannelId: session.mainVoiceChannelId || null,
           sessionId: session.sessionId,
           humanCount: snapshot.humanCount,
           startedAt: session.startedAt,
@@ -1524,6 +1671,7 @@ async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapp
         guildId,
         categoryId,
         profileChannelId: mapping.profileChannelId,
+        mainVoiceChannelId: session.mainVoiceChannelId || null,
         sessionId: session.sessionId,
         humanCount: snapshot.humanCount,
         startedAt: session.startedAt,
@@ -1568,6 +1716,105 @@ async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapp
   session.updatedAt = nowIso;
   client.db.vcVoiceSessions.upsert(serializeSession(session));
   return session;
+}
+
+async function processVoiceSessionCategoryLocked(client, guild, categoryId, mapping, {
+  reason = 'voice_state_update',
+  nowIso = new Date().toISOString()
+} = {}) {
+  const config = getConfig(client);
+  if (!config.enabled) {
+    return null;
+  }
+
+  const guildId = guild.id;
+  const categorySnapshot = await collectCategorySnapshot(client, guild, categoryId, mapping);
+  const channelSnapshots = categorySnapshot.channelSnapshots?.length
+    ? categorySnapshot.channelSnapshots
+    : [];
+  const openSessions = client.db.vcVoiceSessions.listOpenForCategory({
+    guildId,
+    categoryId,
+    profileChannelId: mapping.profileChannelId
+  }).map(getSessionWithJson).filter(Boolean);
+  const openByMainChannelId = new Map();
+  const legacyOpenSessions = [];
+  for (const session of openSessions) {
+    if (session.mainVoiceChannelId) {
+      openByMainChannelId.set(String(session.mainVoiceChannelId), session);
+    } else {
+      legacyOpenSessions.push(session);
+    }
+  }
+
+  const processedSessionIds = new Set();
+  const results = [];
+
+  for (const snapshot of channelSnapshots) {
+    const channelId = String(snapshot.mainVoiceChannelId || '');
+    let openSession = channelId ? openByMainChannelId.get(channelId) || null : null;
+    if (!openSession && legacyOpenSessions.length === 1 && channelSnapshots.length === 1) {
+      openSession = legacyOpenSessions[0];
+      client.logger.info('vc session legacy open session adopted channel scope', {
+        guildId,
+        categoryId,
+        profileChannelId: mapping.profileChannelId,
+        sessionId: openSession.sessionId,
+        mainVoiceChannelId: channelId || null,
+        reason
+      });
+    }
+    const result = await processVoiceSessionSnapshotLocked(client, guild, categoryId, mapping, {
+      snapshot,
+      openSession,
+      reason,
+      nowIso,
+      config
+    });
+    if (openSession?.sessionId) {
+      processedSessionIds.add(String(openSession.sessionId));
+    }
+    if (result?.sessionId) {
+      processedSessionIds.add(String(result.sessionId));
+      results.push(result);
+    }
+  }
+
+  for (const session of openSessions) {
+    if (processedSessionIds.has(String(session.sessionId))) {
+      continue;
+    }
+    const emptySnapshot = createEmptySnapshotForOpenSession(session);
+    const result = await processVoiceSessionSnapshotLocked(client, guild, categoryId, mapping, {
+      snapshot: emptySnapshot,
+      openSession: session,
+      reason,
+      nowIso,
+      config
+    });
+    if (result?.sessionId) {
+      results.push(result);
+    }
+  }
+
+  client.logger.info('vc session category channel-scope processed', {
+    guildId,
+    categoryId,
+    profileChannelId: mapping.profileChannelId,
+    activeChannelCount: channelSnapshots.length,
+    openSessionCount: openSessions.length,
+    processedSessionCount: processedSessionIds.size,
+    resultCount: results.length,
+    reason,
+    channels: channelSnapshots.map((snapshot) => ({
+      mainVoiceChannelId: snapshot.mainVoiceChannelId,
+      voiceChannelName: snapshot.voiceChannelName,
+      humanCount: snapshot.humanCount,
+      memberIds: snapshot.memberIds
+    }))
+  });
+
+  return results;
 }
 
 async function queueVoiceSessionCategoryUpdate(client, guild, categoryId, {
@@ -1829,7 +2076,11 @@ function sortTimelineEvents(events) {
     if (timeDelta !== 0) {
       return timeDelta;
     }
-    return Number(left.eventId || 0) - Number(right.eventId || 0);
+    const leftEventId = Number(left.eventId || 0);
+    const rightEventId = Number(right.eventId || 0);
+    const leftOrder = Number.isFinite(leftEventId) ? leftEventId : Number.MAX_SAFE_INTEGER;
+    const rightOrder = Number.isFinite(rightEventId) ? rightEventId : Number.MAX_SAFE_INTEGER;
+    return leftOrder - rightOrder;
   });
 }
 
@@ -1937,19 +2188,52 @@ function getTimelineEventLabel(event) {
   return '';
 }
 
-function formatTimelineLines(events, session, { maxLines = MAX_GRAPH_LINES, detailed = false } = {}) {
-  const selected = selectTimelineEventsAcrossRange(events, session, maxLines);
-  const deduped = [];
-  let lastKey = null;
+function getTimelineEventDisplayPriority(event) {
+  if (event.eventType === 'session_close') {
+    return 60;
+  }
+  if (event.eventType === 'peak_update') {
+    return 50;
+  }
+  if (event.eventType === 'session_start') {
+    return 45;
+  }
+  if (event.eventType === 'solo_grace_start') {
+    return 40;
+  }
+  if (event.eventType === 'join') {
+    return 30;
+  }
+  if (event.eventType === 'leave') {
+    return 25;
+  }
+  if (event.eventType === 'move') {
+    return 20;
+  }
+  return 0;
+}
 
-  for (const event of selected) {
-    const key = `${formatTimelineTime(event.occurredAt, session)}:${event.humanCountAfter}:${event.eventType}`;
-    if (key === lastKey) {
+function dedupeTimelineDisplayEvents(events, session) {
+  const deduped = [];
+  for (const event of events) {
+    const displayKey = `${formatTimelineTime(event.occurredAt, session)}:${Math.max(0, Number(event.humanCountAfter || 0))}`;
+    const previous = deduped[deduped.length - 1];
+    if (previous?.displayKey === displayKey) {
+      const currentPriority = getTimelineEventDisplayPriority(event);
+      const previousPriority = getTimelineEventDisplayPriority(previous.event);
+      if (currentPriority >= previousPriority) {
+        deduped[deduped.length - 1] = { displayKey, event };
+      }
       continue;
     }
-    lastKey = key;
-    deduped.push(event);
+    deduped.push({ displayKey, event });
   }
+  return deduped.map((entry) => entry.event);
+}
+
+function formatTimelineLines(events, session, { maxLines = MAX_GRAPH_LINES, detailed = false } = {}) {
+  const selected = selectTimelineEventsAcrossRange(events, session, maxLines);
+  const deduped = dedupeTimelineDisplayEvents(selected, session);
 
   return deduped.map((event) => {
     const count = Math.max(0, Number(event.humanCountAfter || 0));
@@ -2025,7 +2309,7 @@ async function buildVcSummaryPayload(client, guild, sessionRow, {
     Math.max(getConfig(client).maxEventsToShow, 200)
   );
   const categoryName = resolveCategoryName(client, guild, session.categoryId, session);
-  const voiceChannelNames = resolveVoiceChannelNames(guild, session);
+  const voiceChannelName = resolvePrimaryVoiceChannelName(guild, session);
   const allParticipantIds = parseJsonArray(session.allParticipantIdsJson);
   const peakParticipantIds = parseJsonArray(session.peakMemberIdsJson);
   const durationSeconds = getSessionDurationSeconds(session);
@@ -2054,7 +2338,7 @@ async function buildVcSummaryPayload(client, guild, sessionRow, {
       `**通話時間:** ${formatDurationSeconds(durationSeconds)}`,
       `**累計参加人数:** ${allParticipantIds.length}人`,
       `**最大同時接続人数:** ${Number(session.maxHumanCount || 0)}人`,
-      `**主な通話チャンネル:** ${voiceChannelNames}`,
+      `**主な通話チャンネル:** ${voiceChannelName}`,
       activeSeconds > 0 ? `**2人以上で話していた時間:** ${formatDurationSeconds(activeSeconds)}` : null,
       `**ピーク時間:** ${peakTime}`
     ].filter(Boolean).join('\n'))
@@ -2151,7 +2435,7 @@ async function buildVcSummaryDetailPayload(client, guild, sessionRow, {
   const timelineLines = formatTimelineLines(events, session, { maxLines: 18, detailed: true });
   const durationSeconds = getSessionDurationSeconds(session);
   const categoryName = resolveCategoryName(client, guild, session.categoryId, session);
-  const voiceChannelNames = resolveVoiceChannelNames(guild, session);
+  const voiceChannelName = resolvePrimaryVoiceChannelName(guild, session);
 
   const container = new ContainerBuilder().setAccentColor(DEFAULT_ACCENT_COLOR);
   container.addTextDisplayComponents(
@@ -2160,7 +2444,7 @@ async function buildVcSummaryDetailPayload(client, guild, sessionRow, {
       `**日時:** ${formatSessionDateTimeRange(session.startedAt, session.endedAt)}`,
       `**通話時間:** ${formatDurationSeconds(durationSeconds)}`,
       `**カテゴリ:** ${categoryName}`,
-      `**主な通話チャンネル:** ${voiceChannelNames}`
+      `**主な通話チャンネル:** ${voiceChannelName}`
     ].join('\n'))
   );
 

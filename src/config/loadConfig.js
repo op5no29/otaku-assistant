@@ -239,10 +239,17 @@ function ensureVoiceSessionSummaryConfig(value) {
     restoreLatestOnReady: true,
     messages: {
       default: '通話チャンネルのご利用ありがとうございました。またお気軽にどうぞ。',
-      work: '今日の作業もお疲れ様でした。',
+      work: '集中作業、お疲れ様でした。',
+      workShort: '作業おつかれさまでした。',
+      workMedium: '集中作業、お疲れ様でした。',
+      workLong: '長時間の作業、お疲れ様でした。',
+      workVeryLong: 'かなり長時間の作業、本当にお疲れ様でした。',
+      workUltraLong: 'ものすごい長時間の作業、本当にお疲れ様でした。しっかり休んでください。',
       longWork: '長時間の作業、お疲れ様でした。',
-      music: '作業、お疲れ様でした。またお気軽にどうぞ。',
-      chat: 'お疲れ様でした。またいつでもどうぞ。'
+      music: '音楽作業、お疲れ様でした。',
+      longMusic: '長時間の音楽作業、本当にお疲れ様でした。',
+      chat: '通話お疲れ様でした。また気軽に遊びに来てください。',
+      longChat: '長時間の通話、お疲れ様でした。またゆっくり休んでください。'
     }
   };
 

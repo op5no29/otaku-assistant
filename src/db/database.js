@@ -577,6 +577,42 @@ function createDatabase(databasePath) {
       ORDER BY datetime(created_at) DESC
       LIMIT 1
     `),
+    getOpenVcVoiceSessionForChannel: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        session_id AS sessionId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        status,
+        started_at AS startedAt,
+        ended_at AS endedAt,
+        first_two_plus_at AS firstTwoPlusAt,
+        last_two_plus_at AS lastTwoPlusAt,
+        solo_since AS soloSince,
+        last_active_at AS lastActiveAt,
+        max_human_count AS maxHumanCount,
+        peak_started_at AS peakStartedAt,
+        peak_ended_at AS peakEndedAt,
+        peak_member_ids_json AS peakMemberIdsJson,
+        all_participant_ids_json AS allParticipantIdsJson,
+        first_join_user_id AS firstJoinUserId,
+        first_join_at AS firstJoinAt,
+        last_leave_user_id AS lastLeaveUserId,
+        last_leave_at AS lastLeaveAt,
+        main_voice_channel_id AS mainVoiceChannelId,
+        voice_channel_ids_json AS voiceChannelIdsJson,
+        two_plus_total_seconds AS twoPlusTotalSeconds,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_voice_sessions
+      WHERE guild_id = ?
+        AND category_id = ?
+        AND profile_channel_id = ?
+        AND main_voice_channel_id = ?
+        AND status IN ('active', 'solo_grace')
+      ORDER BY datetime(created_at) DESC
+      LIMIT 1
+    `),
     getVcVoiceSession: sqlite.prepare(`
       SELECT
         guild_id AS guildId,
@@ -759,6 +795,40 @@ function createDatabase(databasePath) {
         updated_at AS updatedAt
       FROM vc_voice_sessions
       WHERE guild_id = ?
+        AND status IN ('active', 'solo_grace')
+      ORDER BY datetime(created_at) ASC
+    `),
+    listOpenVcVoiceSessionsForCategory: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        session_id AS sessionId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        status,
+        started_at AS startedAt,
+        ended_at AS endedAt,
+        first_two_plus_at AS firstTwoPlusAt,
+        last_two_plus_at AS lastTwoPlusAt,
+        solo_since AS soloSince,
+        last_active_at AS lastActiveAt,
+        max_human_count AS maxHumanCount,
+        peak_started_at AS peakStartedAt,
+        peak_ended_at AS peakEndedAt,
+        peak_member_ids_json AS peakMemberIdsJson,
+        all_participant_ids_json AS allParticipantIdsJson,
+        first_join_user_id AS firstJoinUserId,
+        first_join_at AS firstJoinAt,
+        last_leave_user_id AS lastLeaveUserId,
+        last_leave_at AS lastLeaveAt,
+        main_voice_channel_id AS mainVoiceChannelId,
+        voice_channel_ids_json AS voiceChannelIdsJson,
+        two_plus_total_seconds AS twoPlusTotalSeconds,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_voice_sessions
+      WHERE guild_id = ?
+        AND category_id = ?
+        AND profile_channel_id = ?
         AND status IN ('active', 'solo_grace')
       ORDER BY datetime(created_at) ASC
     `),
@@ -3277,6 +3347,14 @@ function createDatabase(databasePath) {
       getOpen({ guildId, categoryId, profileChannelId }) {
         return statements.getOpenVcVoiceSession.get(guildId, categoryId, profileChannelId) || null;
       },
+      getOpenForChannel({ guildId, categoryId, profileChannelId, mainVoiceChannelId }) {
+        return statements.getOpenVcVoiceSessionForChannel.get(
+          guildId,
+          categoryId,
+          profileChannelId,
+          mainVoiceChannelId
+        ) || null;
+      },
       get({ guildId, sessionId }) {
         return statements.getVcVoiceSession.get(guildId, sessionId) || null;
       },
@@ -3312,6 +3390,9 @@ function createDatabase(databasePath) {
       },
       listOpen(guildId) {
         return statements.listOpenVcVoiceSessions.all(guildId);
+      },
+      listOpenForCategory({ guildId, categoryId, profileChannelId }) {
+        return statements.listOpenVcVoiceSessionsForCategory.all(guildId, categoryId, profileChannelId);
       },
       listClosedForSummary({ guildId, sinceIso, categoryId = null, mode = 'peak', limit = 1 }) {
         const statement = mode === 'latest'

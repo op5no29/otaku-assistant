@@ -165,9 +165,11 @@ function runMigrations(database) {
       PRIMARY KEY (guild_id, session_id)
     );
 
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_vc_voice_sessions_one_open_category
-      ON vc_voice_sessions (guild_id, category_id, profile_channel_id)
-      WHERE status IN ('active', 'solo_grace');
+    DROP INDEX IF EXISTS idx_vc_voice_sessions_one_open_category;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vc_voice_sessions_one_open_channel
+      ON vc_voice_sessions (guild_id, category_id, profile_channel_id, main_voice_channel_id)
+      WHERE status IN ('active', 'solo_grace') AND main_voice_channel_id IS NOT NULL;
 
     CREATE INDEX IF NOT EXISTS idx_vc_voice_sessions_summary
       ON vc_voice_sessions (guild_id, status, ended_at, max_human_count);
