@@ -1,6 +1,8 @@
 const crypto = require('node:crypto');
 const {
   ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
   ContainerBuilder,
   MessageFlags,
   SeparatorBuilder,
@@ -23,7 +25,9 @@ const MAX_GRAPH_LINES = 7;
 const MAX_HISTORY_SESSIONS = 5;
 const MAX_SELECT_SESSION_OPTIONS = 25;
 const VC_SUMMARY_SELECT_PREFIX = 'vc-summary:select:';
+const VC_SUMMARY_DETAIL_PREFIX = 'vc-summary:detail:';
 const VC_SUMMARY_SELECT_TTL_MS = 10 * 60 * 1000;
+const PERSISTENT_END_CARD_EXPIRES_AT = '9999-12-31T23:59:59.999Z';
 
 function getConfig(client) {
   return client.appConfig.voiceSessionSummary || {
@@ -36,7 +40,9 @@ function getConfig(client) {
     reconcileIntervalMinutes: 5,
     endCard: {
       enabled: true,
-      ttlMinutes: 30,
+      deleteMode: 'on_next_session',
+      ttlMinutes: null,
+      restoreLatestOnReady: true,
       messages: {
         default: '通話チャンネルのご利用ありがとうございました。またお気軽にどうぞ。',
         work: '今日の作業もお疲れ様でした。',
@@ -53,7 +59,9 @@ function getEndCardConfig(client) {
   const endCard = config.endCard || {};
   return {
     enabled: endCard.enabled !== false,
-    ttlMinutes: Math.max(1, Number(endCard.ttlMinutes || 30)),
+    deleteMode: endCard.deleteMode === 'ttl' ? 'ttl' : 'on_next_session',
+    ttlMinutes: endCard.deleteMode === 'ttl' ? Math.max(1, Number(endCard.ttlMinutes || 30)) : null,
+    restoreLatestOnReady: endCard.restoreLatestOnReady !== false,
     messages: {
       default: '通話チャンネルのご利用ありがとうございました。またお気軽にどうぞ。',
       work: '今日の作業もお疲れ様でした。',
@@ -522,6 +530,12 @@ function buildVoiceSessionEndSummaryPayload(client, guild, sessionRow) {
     new TextDisplayBuilder().setContent(`**参加していた人**\n${formatCompactMentionList(participantIds, 15)}`),
     new TextDisplayBuilder().setContent(`${closingMessage}\n詳しく見るには \`/vc-summary\``)
   );
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('次の通話が始まるまで表示されます。')
+  );
 
   return {
     flags: MessageFlags.IsComponentsV2,
@@ -831,7 +845,9 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
     return null;
   }
 
-  const expiresAt = new Date(Date.now() + endCardConfig.ttlMinutes * 60 * 1000).toISOString();
+  const expiresAt = endCardConfig.deleteMode === 'ttl'
+    ? new Date(Date.now() + endCardConfig.ttlMinutes * 60 * 1000).toISOString()
+    : PERSISTENT_END_CARD_EXPIRES_AT;
   const record = {
     guildId: session.guildId,
     sessionId: session.sessionId,
@@ -842,7 +858,9 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
     status: 'active'
   };
   client.db.vcVoiceSessions.upsertSummaryMessage(record);
-  scheduleVoiceSessionEndCardDelete(client, record);
+  if (endCardConfig.deleteMode === 'ttl') {
+    scheduleVoiceSessionEndCardDelete(client, record);
+  }
   client.logger.info('vc session end summary card posted', {
     guildId: session.guildId,
     sessionId: session.sessionId,
@@ -850,6 +868,7 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
     profileChannelId,
     messageId: message.id,
     expiresAt,
+    deleteMode: endCardConfig.deleteMode,
     participantCount: parseJsonArray(session.allParticipantIdsJson).length,
     maxHumanCount: Number(session.maxHumanCount || 0),
     durationSeconds: getSessionDurationSeconds(session)
@@ -875,14 +894,143 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
   return message;
 }
 
+async function restoreLatestVoiceSessionEndSummaryCards(client, { reason = 'ready_cleanup' } = {}) {
+  const endCardConfig = getEndCardConfig(client);
+  if (!endCardConfig.enabled || !endCardConfig.restoreLatestOnReady) {
+    client.logger.info('vc session end summary latest restore skipped disabled', {
+      reason,
+      enabled: endCardConfig.enabled,
+      restoreLatestOnReady: endCardConfig.restoreLatestOnReady
+    });
+    return { restoredCount: 0, skippedCount: 0, errorCount: 0 };
+  }
+  if (!client.voiceProfileCategoryMap?.size) {
+    return { restoredCount: 0, skippedCount: 0, errorCount: 0 };
+  }
+
+  const guild = await client.guilds.fetch(process.env.GUILD_ID).catch(() => null);
+  if (!guild) {
+    client.logger.warn('vc session end summary latest restore skipped guild missing', { reason });
+    return { restoredCount: 0, skippedCount: 0, errorCount: 1 };
+  }
+  if (typeof guild.channels?.fetch === 'function') {
+    await guild.channels.fetch().catch(() => null);
+  }
+
+  const minHumansToStart = Math.max(2, Number(getConfig(client).minHumansToStart || 2));
+  let restoredCount = 0;
+  let skippedCount = 0;
+  let errorCount = 0;
+
+  for (const [categoryId, mapping] of client.voiceProfileCategoryMap) {
+    const profileChannelId = mapping.profileChannelId;
+    const activeRecords = client.db.vcVoiceSessions.listActiveSummaryMessagesForCategory({
+      guildId: guild.id,
+      categoryId,
+      profileChannelId
+    });
+    if (activeRecords.length > 0) {
+      skippedCount += 1;
+      client.logger.info('vc session end summary latest restore skipped active card exists', {
+        guildId: guild.id,
+        categoryId,
+        profileChannelId,
+        activeCount: activeRecords.length,
+        reason
+      });
+      continue;
+    }
+
+    const snapshot = await collectCategorySnapshot(client, guild, categoryId, mapping).catch((error) => {
+      errorCount += 1;
+      client.logger.warn('vc session end summary latest restore skipped snapshot failed', {
+        guildId: guild.id,
+        categoryId,
+        profileChannelId,
+        reason,
+        error: error.message
+      });
+      return null;
+    });
+    if (!snapshot) {
+      continue;
+    }
+    if (snapshot.humanCount >= minHumansToStart) {
+      skippedCount += 1;
+      client.logger.info('vc session end summary latest restore skipped live session active', {
+        guildId: guild.id,
+        categoryId,
+        profileChannelId,
+        humanCount: snapshot.humanCount,
+        minHumansToStart,
+        reason
+      });
+      continue;
+    }
+
+    const [latestSession] = client.db.vcVoiceSessions.listClosedForSummary({
+      guildId: guild.id,
+      sinceIso: '1970-01-01T00:00:00.000Z',
+      categoryId,
+      mode: 'latest',
+      limit: 1
+    });
+    if (!latestSession) {
+      skippedCount += 1;
+      client.logger.info('vc session end summary latest restore skipped no closed session', {
+        guildId: guild.id,
+        categoryId,
+        profileChannelId,
+        reason
+      });
+      continue;
+    }
+
+    const message = await postVoiceSessionEndSummaryCard(client, latestSession, {
+      reason: `${reason}_restore_latest`
+    }).catch((error) => {
+      errorCount += 1;
+      client.logger.warn('vc session end summary latest restore failed', {
+        guildId: guild.id,
+        categoryId,
+        profileChannelId,
+        sessionId: latestSession.sessionId,
+        reason,
+        error: error.message
+      });
+      return null;
+    });
+    if (message) {
+      restoredCount += 1;
+      client.logger.info('vc session end summary latest restored on ready', {
+        guildId: guild.id,
+        categoryId,
+        profileChannelId,
+        sessionId: latestSession.sessionId,
+        messageId: message.id,
+        reason
+      });
+    }
+  }
+
+  return { restoredCount, skippedCount, errorCount };
+}
+
 async function cleanupVoiceSessionEndSummaryCards(client, { reason = 'ready_cleanup' } = {}) {
+  const endCardConfig = getEndCardConfig(client);
   const records = client.db.vcVoiceSessions.listActiveSummaryMessages();
   let deletedCount = 0;
+  let missingCount = 0;
   let scheduledCount = 0;
+  let keptCount = 0;
   let errorCount = 0;
 
   for (const record of records) {
-    if (new Date(record.expiresAt).getTime() <= Date.now()) {
+    if (
+      endCardConfig.deleteMode === 'ttl' &&
+      record.expiresAt &&
+      new Date(record.expiresAt).getTime() <= Date.now()
+    ) {
       const deleted = await deleteVoiceSessionEndCardRecord(client, record, {
         status: 'expired',
         reason
@@ -894,18 +1042,69 @@ async function cleanupVoiceSessionEndSummaryCards(client, { reason = 'ready_clea
       }
       continue;
     }
-    scheduleVoiceSessionEndCardDelete(client, record);
-    scheduledCount += 1;
+
+    clearEndCardTimer(client, record);
+    const channel = await client.channels.fetch(record.profileChannelId).catch(() => null);
+    const message = channel?.isTextBased?.()
+      ? await channel.messages.fetch(record.messageId).catch(() => null)
+      : null;
+    if (!message) {
+      client.db.vcVoiceSessions.updateSummaryMessageStatus({
+        guildId: record.guildId,
+        sessionId: record.sessionId,
+        profileChannelId: record.profileChannelId,
+        status: 'failed'
+      });
+      missingCount += 1;
+      client.logger.warn('vc session end summary card cleanup on ready missing message', {
+        guildId: record.guildId,
+        sessionId: record.sessionId,
+        categoryId: record.categoryId,
+        profileChannelId: record.profileChannelId,
+        messageId: record.messageId,
+        reason
+      });
+      continue;
+    }
+
+    if (endCardConfig.deleteMode === 'ttl') {
+      scheduleVoiceSessionEndCardDelete(client, record);
+      scheduledCount += 1;
+    } else {
+      keptCount += 1;
+    }
   }
+
+  const restored = await restoreLatestVoiceSessionEndSummaryCards(client, { reason }).catch((error) => {
+    errorCount += 1;
+    client.logger.warn('vc session end summary latest restore failed', {
+      reason,
+      error: error.message
+    });
+    return { restoredCount: 0, skippedCount: 0, errorCount: 1 };
+  });
 
   client.logger.info('vc session end summary card cleanup on ready', {
     reason,
     activeCount: records.length,
     deletedCount,
+    missingCount,
     scheduledCount,
+    keptCount,
+    restoredCount: restored?.restoredCount || 0,
+    restoreSkippedCount: restored?.skippedCount || 0,
     errorCount
   });
-  return { activeCount: records.length, deletedCount, scheduledCount, errorCount };
+  return {
+    activeCount: records.length,
+    deletedCount,
+    missingCount,
+    scheduledCount,
+    keptCount,
+    restoredCount: restored?.restoredCount || 0,
+    restoreSkippedCount: restored?.skippedCount || 0,
+    errorCount
+  };
 }
 
 function updateExistingOpenSessionFromSnapshot(client, session, snapshot, {
@@ -1608,28 +1807,6 @@ function formatDurationSeconds(seconds) {
   return `${minutes}分`;
 }
 
-function getCloseReasonLabel(reason) {
-  if (reason === 'empty' || reason === 'restart_reconcile_empty') {
-    return '全員退出';
-  }
-  if (reason === 'solo_grace_expired') {
-    return '1人の状態が続いたため終了';
-  }
-  if (reason === 'too_short') {
-    return '短時間のため集計対象外';
-  }
-  return reason || '記録なし';
-}
-
-function getSessionCloseReason(client, session) {
-  const events = client.db.vcVoiceSessions.listEvents(session.guildId, session.sessionId, 20);
-  const closeEvent = events.find((event) => event.eventType === 'session_close' || event.eventType === 'session_ignore');
-  if (!closeEvent) {
-    return null;
-  }
-  return parseEventMetadata(closeEvent).reason || null;
-}
-
 function getSessionDurationSeconds(session) {
   return secondsBetween(session.startedAt, session.endedAt || new Date().toISOString());
 }
@@ -1646,18 +1823,127 @@ function formatMentionList(userIds, membersById, maxCount = 24) {
   return visible.join(' / ') || '記録なし';
 }
 
-function buildCountGraphLines(events, session) {
+function sortTimelineEvents(events) {
+  return [...events].sort((left, right) => {
+    const timeDelta = new Date(left.occurredAt).getTime() - new Date(right.occurredAt).getTime();
+    if (timeDelta !== 0) {
+      return timeDelta;
+    }
+    return Number(left.eventId || 0) - Number(right.eventId || 0);
+  });
+}
+
+function buildTimelineEventCandidates(events, session) {
   const relevant = [...events]
-    .reverse()
     .filter((event) => (
       event.humanCountAfter != null &&
       ['session_start', 'join', 'leave', 'move', 'peak_update', 'solo_grace_start', 'session_close'].includes(event.eventType)
     ));
+  const sorted = sortTimelineEvents(relevant);
+  const firstCount = Number(sorted[0]?.humanCountAfter ?? Math.max(2, Math.min(Number(session.maxHumanCount || 2), 2)));
+  const candidates = [
+    {
+      eventId: 'synthetic_start',
+      eventType: 'session_start',
+      occurredAt: session.startedAt,
+      humanCountAfter: firstCount
+    },
+    ...sorted
+  ];
+  if (session.endedAt) {
+    candidates.push({
+      eventId: 'synthetic_end',
+      eventType: 'session_close',
+      occurredAt: session.endedAt,
+      humanCountAfter: 0
+    });
+  }
+  return sortTimelineEvents(candidates)
+    .filter((event) => event.occurredAt && Number.isFinite(new Date(event.occurredAt).getTime()));
+}
+
+function selectTimelineEventsAcrossRange(events, session, maxLines) {
+  const candidates = buildTimelineEventCandidates(events, session);
+  if (candidates.length <= maxLines) {
+    return candidates;
+  }
+
+  const startMs = new Date(session.startedAt || candidates[0].occurredAt).getTime();
+  const endMs = new Date(session.endedAt || candidates[candidates.length - 1].occurredAt).getTime();
+  const selected = new Map();
+  const addEvent = (event) => {
+    if (!event) {
+      return;
+    }
+    const key = `${event.eventId || event.eventType}:${event.occurredAt}:${event.humanCountAfter}`;
+    selected.set(key, event);
+  };
+
+  addEvent(candidates[0]);
+  addEvent(candidates[candidates.length - 1]);
+  addEvent(candidates.find((event) => Number(event.humanCountAfter || 0) === Number(session.maxHumanCount || 0)));
+
+  const bucketCount = Math.max(2, maxLines - selected.size);
+  for (let index = 0; index < bucketCount; index += 1) {
+    const ratio = bucketCount === 1 ? 0 : index / (bucketCount - 1);
+    const targetMs = startMs + ((endMs - startMs) * ratio);
+    const nearest = candidates
+      .filter((event) => ![...selected.values()].some((selectedEvent) => selectedEvent === event))
+      .sort((left, right) =>
+        Math.abs(new Date(left.occurredAt).getTime() - targetMs) -
+        Math.abs(new Date(right.occurredAt).getTime() - targetMs)
+      )[0];
+    addEvent(nearest);
+  }
+
+  return sortTimelineEvents([...selected.values()])
+    .slice(0, maxLines);
+}
+
+function formatTimelineTime(iso, session) {
+  const start = getJstDateTimeParts(session.startedAt);
+  const current = getJstDateTimeParts(iso);
+  if (!current) {
+    return formatClock(iso);
+  }
+  if (!start || start.year !== current.year || start.month !== current.month || start.day !== current.day) {
+    return `${Number(current.month)}月${Number(current.day)}日 ${current.hour}:${current.minute}`;
+  }
+  return `${current.hour}:${current.minute}`;
+}
+
+function getTimelineEventLabel(event) {
+  if (event.eventType === 'session_start') {
+    return '開始';
+  }
+  if (event.eventType === 'session_close') {
+    return '終了';
+  }
+  if (event.eventType === 'peak_update') {
+    return 'ピーク';
+  }
+  if (event.eventType === 'solo_grace_start') {
+    return '1人';
+  }
+  if (event.eventType === 'join') {
+    return '参加';
+  }
+  if (event.eventType === 'leave') {
+    return '退出';
+  }
+  if (event.eventType === 'move') {
+    return '移動';
+  }
+  return '';
+}
+
+function formatTimelineLines(events, session, { maxLines = MAX_GRAPH_LINES, detailed = false } = {}) {
+  const selected = selectTimelineEventsAcrossRange(events, session, maxLines);
   const deduped = [];
   let lastKey = null;
 
-  for (const event of relevant) {
-    const key = `${formatClock(event.occurredAt)}:${event.humanCountAfter}`;
+  for (const event of selected) {
+    const key = `${formatTimelineTime(event.occurredAt, session)}:${event.humanCountAfter}:${event.eventType}`;
     if (key === lastKey) {
       continue;
     }
@@ -1665,28 +1951,11 @@ function buildCountGraphLines(events, session) {
     deduped.push(event);
   }
 
-  const peakEvent = relevant.find((event) => Number(event.humanCountAfter) === Number(session.maxHumanCount || 0));
-  const selected = [];
-  if (deduped[0]) {
-    selected.push(deduped[0]);
-  }
-  if (peakEvent && !selected.some((event) => event.eventId === peakEvent.eventId)) {
-    selected.push(peakEvent);
-  }
-  for (const event of deduped) {
-    if (selected.length >= MAX_GRAPH_LINES) {
-      break;
-    }
-    if (!selected.some((entry) => entry.eventId === event.eventId)) {
-      selected.push(event);
-    }
-  }
-
-  selected.sort((left, right) => new Date(left.occurredAt).getTime() - new Date(right.occurredAt).getTime());
-  return selected.map((event) => {
+  return deduped.map((event) => {
     const count = Math.max(0, Number(event.humanCountAfter || 0));
-    const bar = '█'.repeat(Math.max(1, Math.min(count, 10)));
-    return `${formatClock(event.occurredAt)}  ${bar} ${count}`;
+    const bar = count > 0 ? '█'.repeat(Math.max(1, Math.min(count, 10))) : '・';
+    const label = detailed ? ` ${getTimelineEventLabel(event)}` : '';
+    return `${formatTimelineTime(event.occurredAt, session)}  ${bar} ${count}人${label}`.trim();
   });
 }
 
@@ -1717,14 +1986,6 @@ function resolvePrimaryVoiceChannelName(guild, session) {
   return resolveVoiceChannelNames(guild, session);
 }
 
-function parseEventMetadata(event) {
-  try {
-    return JSON.parse(event.metadataJson || '{}');
-  } catch {
-    return {};
-  }
-}
-
 function formatEventLine(event) {
   const time = formatClock(event.occurredAt);
   const user = event.userId ? `<@${event.userId}>` : null;
@@ -1744,8 +2005,7 @@ function formatEventLine(event) {
     return `${time} 1人になったため猶予中`;
   }
   if (event.eventType === 'session_close') {
-    const metadata = parseEventMetadata(event);
-    return `${time} 終了（${metadata.reason || 'closed'}）`;
+    return `${time} 終了`;
   }
   return `${time} ${event.eventType}`;
 }
@@ -1762,7 +2022,7 @@ async function buildVcSummaryPayload(client, guild, sessionRow, {
   const events = client.db.vcVoiceSessions.listEvents(
     session.guildId,
     session.sessionId,
-    Math.max(getConfig(client).maxEventsToShow, 20)
+    Math.max(getConfig(client).maxEventsToShow, 200)
   );
   const categoryName = resolveCategoryName(client, guild, session.categoryId, session);
   const voiceChannelNames = resolveVoiceChannelNames(guild, session);
@@ -1770,8 +2030,7 @@ async function buildVcSummaryPayload(client, guild, sessionRow, {
   const peakParticipantIds = parseJsonArray(session.peakMemberIdsJson);
   const durationSeconds = getSessionDurationSeconds(session);
   const activeSeconds = Number(session.twoPlusTotalSeconds || 0);
-  const closeReason = getSessionCloseReason(client, session);
-  const graphLines = buildCountGraphLines(events, session);
+  const graphLines = formatTimelineLines(events, session, { maxLines: MAX_GRAPH_LINES, detailed: false });
   const peakTime = session.peakStartedAt
     ? session.peakEndedAt
       ? formatSessionDateTimeRange(session.peakStartedAt, session.peakEndedAt)
@@ -1807,9 +2066,7 @@ async function buildVcSummaryPayload(client, guild, sessionRow, {
   container.addTextDisplayComponents(
     new TextDisplayBuilder().setContent([
       `**最初にいた人**\n${session.firstJoinUserId ? `<@${session.firstJoinUserId}>（${formatClock(session.firstJoinAt)}）` : '記録なし'}`,
-      `**最後に抜けた人**\n${session.lastLeaveUserId ? `<@${session.lastLeaveUserId}>（${formatClock(session.lastLeaveAt)}）` : '記録なし'}`,
-      `**会話開始**\n${formatClock(session.firstTwoPlusAt || session.startedAt)}`,
-      `**終了理由**\n${getCloseReasonLabel(closeReason)}`
+      `**最後に抜けた人**\n${session.lastLeaveUserId ? `<@${session.lastLeaveUserId}>（${formatClock(session.lastLeaveAt)}）` : '記録なし'}`
     ].join('\n\n'))
   );
 
@@ -1843,6 +2100,24 @@ async function buildVcSummaryPayload(client, guild, sessionRow, {
     new TextDisplayBuilder().setContent(`集計対象: 直近${lookbackHours || getConfig(client).summaryLookbackHours}時間 / mode: ${mode}${commandUserId ? `\n実行者: <@${commandUserId}>` : ''}`)
   );
 
+  if (commandUserId) {
+    const detailToken = createVcSummaryDetailState(client, {
+      guildId: session.guildId,
+      commandUserId,
+      sessionId: session.sessionId,
+      mode,
+      lookbackHours
+    });
+    container.addActionRowComponents(
+      new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`${VC_SUMMARY_DETAIL_PREFIX}${detailToken}`)
+          .setLabel('人数推移を見る')
+          .setStyle(ButtonStyle.Secondary)
+      )
+    );
+  }
+
   client.logger.info('vc summary card built', {
     guildId: session.guildId,
     sessionId: session.sessionId,
@@ -1853,6 +2128,71 @@ async function buildVcSummaryPayload(client, guild, sessionRow, {
     includeEvents,
     mode,
     lookbackHours
+  });
+
+  return {
+    flags: MessageFlags.IsComponentsV2,
+    components: [container],
+    allowedMentions: {
+      parse: [],
+      users: [],
+      roles: []
+    }
+  };
+}
+
+async function buildVcSummaryDetailPayload(client, guild, sessionRow, {
+  commandUserId = null,
+  mode = 'peak',
+  lookbackHours = null
+} = {}) {
+  const session = normalizeSession(sessionRow);
+  const events = client.db.vcVoiceSessions.listEvents(session.guildId, session.sessionId, 500);
+  const timelineLines = formatTimelineLines(events, session, { maxLines: 18, detailed: true });
+  const durationSeconds = getSessionDurationSeconds(session);
+  const categoryName = resolveCategoryName(client, guild, session.categoryId, session);
+  const voiceChannelNames = resolveVoiceChannelNames(guild, session);
+
+  const container = new ContainerBuilder().setAccentColor(DEFAULT_ACCENT_COLOR);
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent('## 通話の人数推移'),
+    new TextDisplayBuilder().setContent([
+      `**日時:** ${formatSessionDateTimeRange(session.startedAt, session.endedAt)}`,
+      `**通話時間:** ${formatDurationSeconds(durationSeconds)}`,
+      `**カテゴリ:** ${categoryName}`,
+      `**主な通話チャンネル:** ${voiceChannelNames}`
+    ].join('\n'))
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent([
+      '**人数の推移（詳細）**',
+      timelineLines.length ? timelineLines.join('\n') : '記録なし'
+    ].join('\n'))
+  );
+
+  container.addSeparatorComponents(
+    new SeparatorBuilder().setSpacing(SeparatorSpacingSize.Small).setDivider(true)
+  );
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent([
+      '長い通話でも開始・ピーク・中盤・終盤が見えるよう、全体の時間範囲から代表点を抽出しています。',
+      `集計対象: 直近${lookbackHours || getConfig(client).summaryLookbackHours}時間 / mode: ${mode}${commandUserId ? `\n実行者: <@${commandUserId}>` : ''}`
+    ].join('\n'))
+  );
+
+  client.logger.info('vc summary detail card built', {
+    guildId: session.guildId,
+    sessionId: session.sessionId,
+    categoryId: session.categoryId,
+    eventCount: events.length,
+    timelineLineCount: timelineLines.length,
+    mode,
+    lookbackHours,
+    commandUserId
   });
 
   return {
@@ -1975,6 +2315,23 @@ function createVcSummarySelectionState(client, state) {
     mode: state.mode,
     lookbackHours: state.lookbackHours,
     categoryId: state.categoryId || null,
+    token
+  });
+  return token;
+}
+
+function createVcSummaryDetailState(client, state) {
+  const token = createVcSummarySelectionState(client, {
+    ...state,
+    kind: 'detail',
+    candidateSessionIds: [String(state.sessionId || '')].filter(Boolean)
+  });
+  client.logger.info('vc summary detail state created', {
+    guildId: state.guildId,
+    commandUserId: state.commandUserId,
+    sessionId: state.sessionId,
+    mode: state.mode,
+    lookbackHours: state.lookbackHours,
     token
   });
   return token;
@@ -2215,10 +2572,13 @@ async function buildLatestVcSummaryResponse(client, {
 }
 
 async function handleVcSummaryInteraction(interaction) {
-  if (!interaction.isStringSelectMenu?.()) {
+  if (!interaction.isStringSelectMenu?.() && !interaction.isButton?.()) {
     return false;
   }
   const customId = String(interaction.customId || '');
+  if (customId.startsWith(VC_SUMMARY_DETAIL_PREFIX)) {
+    return await handleVcSummaryDetailInteraction(interaction);
+  }
   if (!customId.startsWith(VC_SUMMARY_SELECT_PREFIX)) {
     return false;
   }
@@ -2333,6 +2693,91 @@ async function handleVcSummaryInteraction(interaction) {
     mode: state.mode,
     lookbackHours: state.lookbackHours,
     categoryId: session.categoryId || state.categoryId || null
+  });
+  return true;
+}
+
+async function handleVcSummaryDetailInteraction(interaction) {
+  const client = interaction.client;
+  const customId = String(interaction.customId || '');
+  const token = customId.slice(VC_SUMMARY_DETAIL_PREFIX.length);
+  const state = getVcSummarySelectionState(client, token);
+  if (!state || state.kind !== 'detail') {
+    client.logger.info('vc summary detail expired', {
+      interactionId: interaction.id,
+      customId,
+      token,
+      userId: interaction.user?.id || null
+    });
+    await interaction.reply({
+      content: 'この詳細表示ボタンは期限切れです。もう一度 /vc-summary を実行してください。',
+      ephemeral: true
+    }).catch(() => null);
+    return true;
+  }
+
+  if (String(interaction.user.id) !== String(state.commandUserId)) {
+    client.logger.info('vc summary detail rejected wrong user', {
+      interactionId: interaction.id,
+      token,
+      commandUserId: state.commandUserId,
+      interactingUserId: interaction.user.id,
+      sessionId: state.sessionId || null
+    });
+    await interaction.reply({
+      content: 'この詳細表示ボタンは、コマンドを実行した人だけが使えます。',
+      ephemeral: true
+    }).catch(() => null);
+    return true;
+  }
+
+  const guild = interaction.guild || await client.guilds.fetch(state.guildId).catch(() => null);
+  if (!guild) {
+    await interaction.reply({
+      content: 'サーバー情報を取得できませんでした。時間をおいてもう一度試してください。',
+      ephemeral: true
+    }).catch(() => null);
+    return true;
+  }
+  if (typeof guild.channels?.fetch === 'function') {
+    await guild.channels.fetch().catch(() => null);
+  }
+  const session = client.db.vcVoiceSessions.get({
+    guildId: state.guildId,
+    sessionId: state.sessionId
+  });
+  if (!session) {
+    await interaction.reply({
+      content: '通話セッションの記録が見つかりませんでした。もう一度 /vc-summary を実行してください。',
+      ephemeral: true
+    }).catch(() => null);
+    return true;
+  }
+
+  const payload = await buildVcSummaryDetailPayload(client, guild, session, {
+    commandUserId: state.commandUserId,
+    mode: state.mode,
+    lookbackHours: state.lookbackHours
+  });
+  await interaction.reply({
+    ...payload,
+    flags: payload.flags | MessageFlags.Ephemeral
+  }).catch((error) => {
+    client.logger.warn('vc summary detail reply failed', {
+      interactionId: interaction.id,
+      token,
+      sessionId: state.sessionId,
+      error: error.message
+    });
+  });
+  client.logger.info('vc summary detail shown', {
+    interactionId: interaction.id,
+    token,
+    guildId: state.guildId,
+    commandUserId: state.commandUserId,
+    sessionId: state.sessionId,
+    mode: state.mode,
+    lookbackHours: state.lookbackHours
   });
   return true;
 }

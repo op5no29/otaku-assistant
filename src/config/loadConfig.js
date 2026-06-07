@@ -234,7 +234,9 @@ function ensureIntroVcReminderConfig(value, introDmConfig = {}, fallbackLogChann
 function ensureVoiceSessionSummaryConfig(value) {
   const defaultEndCard = {
     enabled: true,
-    ttlMinutes: 30,
+    deleteMode: 'on_next_session',
+    ttlMinutes: null,
+    restoreLatestOnReady: true,
     messages: {
       default: '通話チャンネルのご利用ありがとうございました。またお気軽にどうぞ。',
       work: '今日の作業もお疲れ様でした。',
@@ -274,7 +276,11 @@ function ensureVoiceSessionSummaryConfig(value) {
     reconcileIntervalMinutes: Math.max(1, Number(value.reconcileIntervalMinutes ?? 5)),
     endCard: {
       enabled: endCardValue.enabled !== false,
-      ttlMinutes: Math.max(1, Number(endCardValue.ttlMinutes ?? defaultEndCard.ttlMinutes)),
+      deleteMode: endCardValue.deleteMode === 'ttl' ? 'ttl' : 'on_next_session',
+      ttlMinutes: endCardValue.deleteMode === 'ttl'
+        ? Math.max(1, Number(endCardValue.ttlMinutes ?? 30))
+        : null,
+      restoreLatestOnReady: endCardValue.restoreLatestOnReady !== false,
       messages: {
         ...defaultEndCard.messages,
         ...Object.fromEntries(

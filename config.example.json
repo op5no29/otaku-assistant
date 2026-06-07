@@ -52,7 +52,9 @@
     "reconcileIntervalMinutes": 5,
     "endCard": {
       "enabled": true,
-      "ttlMinutes": 30,
+      "deleteMode": "on_next_session",
+      "ttlMinutes": null,
+      "restoreLatestOnReady": true,
       "messages": {
         "default": "通話チャンネルのご利用ありがとうございました。またお気軽にどうぞ。",
         "work": "今日の作業もお疲れ様でした。",

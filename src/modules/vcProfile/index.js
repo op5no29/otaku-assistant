@@ -1629,12 +1629,15 @@ async function syncVoiceProfileCategoryLocked(client, guild, categoryId, mapping
     return;
   }
 
-  await deleteActiveVoiceSessionEndCardsForCategory(client, {
-    guildId,
-    categoryId,
-    profileChannelId: profileChannel.id,
-    reason: 'new_live_session'
-  });
+  const minHumansForSummarySession = Math.max(2, Number(client.appConfig.voiceSessionSummary?.minHumansToStart || 2));
+  if (snapshot.members.length >= minHumansForSummarySession) {
+    await deleteActiveVoiceSessionEndCardsForCategory(client, {
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      reason: 'new_live_session'
+    });
+  }
 
   const accentColor = resolveCategoryAccentColor(client, {
     guildId,
