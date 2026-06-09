@@ -431,13 +431,57 @@ async function buildVoiceMemberProfiles(client, humanEntries, { guildId, categor
       const member = entry.member;
       let introMessage = null;
       let introSummary = null;
-      const introProfile = client.db.introProfiles.getLatestByUser(
+      let introProfile = client.db.introProfiles.getLatestByUser(
         guildId,
         member.id,
         introChannelId
       );
       if (introProfile?.introText?.trim()) {
         introSummary = introProfile.introText.trim();
+        if (introChannel && introProfile.introMessageId) {
+          try {
+            const {
+              maybeRepairIntroProfileTextFromMessage,
+              shouldCheckIntroProfileTextForRepair
+            } = require('../introProfiles');
+            if (shouldCheckIntroProfileTextForRepair(introSummary)) {
+              const sourceMessage = await introChannel.messages.fetch(introProfile.introMessageId).catch(() => null);
+              if (sourceMessage) {
+                const repairResult = await maybeRepairIntroProfileTextFromMessage(
+                  client,
+                  introProfile,
+                  sourceMessage,
+                  { reason: 'vc_profile_render' }
+                );
+                if (repairResult.repaired && repairResult.profile?.introText?.trim()) {
+                  introProfile = repairResult.profile;
+                  introSummary = introProfile.introText.trim();
+                  client.logger.info('vc profile intro text repaired before render', {
+                    guildId,
+                    categoryId,
+                    userId: member.id,
+                    introMessageId: introProfile.introMessageId
+                  });
+                }
+              } else {
+                client.logger.info('vc profile intro text repair skipped source missing', {
+                  guildId,
+                  categoryId,
+                  userId: member.id,
+                  introMessageId: introProfile.introMessageId
+                });
+              }
+            }
+          } catch (error) {
+            client.logger.warn('vc profile intro text repair failed', {
+              guildId,
+              categoryId,
+              userId: member.id,
+              introMessageId: introProfile.introMessageId,
+              error: error.message
+            });
+          }
+        }
       }
       if (introChannel) {
         try {

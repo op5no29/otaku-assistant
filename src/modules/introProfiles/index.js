@@ -78,6 +78,90 @@ function normalizeAddendumText(content) {
   return String(content || '').trim();
 }
 
+const CUSTOM_EMOJI_PATTERN = /<a?:[A-Za-z0-9_~]+:\d+>/gu;
+const COLON_EMOJI_NAME_PATTERN = /(^|[^\w<]):[A-Za-z0-9_~]{2,}:(?=$|[^\d])/u;
+const INCOMPLETE_CUSTOM_EMOJI_PATTERN = /<a?:[A-Za-z0-9_~]*(?::\d*)?$/mu;
+
+function countCustomEmojiTags(text) {
+  return Array.from(String(text || '').matchAll(CUSTOM_EMOJI_PATTERN)).length;
+}
+
+function shouldCheckIntroProfileTextForRepair(introText) {
+  const text = String(introText || '');
+  if (!text) {
+    return false;
+  }
+  if (INCOMPLETE_CUSTOM_EMOJI_PATTERN.test(text)) {
+    return true;
+  }
+  return countCustomEmojiTags(text) === 0 && COLON_EMOJI_NAME_PATTERN.test(text);
+}
+
+function shouldRepairIntroProfileTextFromSource(storedText, sourceText) {
+  const stored = String(storedText || '').trim();
+  const source = String(sourceText || '').trim();
+  if (!source || source === stored) {
+    return false;
+  }
+  const storedEmojiCount = countCustomEmojiTags(stored);
+  const sourceEmojiCount = countCustomEmojiTags(source);
+  if (sourceEmojiCount > storedEmojiCount) {
+    return true;
+  }
+  return shouldCheckIntroProfileTextForRepair(stored) && sourceEmojiCount > 0;
+}
+
+async function maybeRepairIntroProfileTextFromMessage(client, introProfile, message, { reason = 'vc_profile_render' } = {}) {
+  if (!introProfile || !message) {
+    return {
+      repaired: false,
+      profile: introProfile || null,
+      reason: 'missing_context'
+    };
+  }
+  if (
+    String(introProfile.userId || '') &&
+    String(message.author?.id || '') &&
+    String(introProfile.userId) !== String(message.author.id)
+  ) {
+    return {
+      repaired: false,
+      profile: introProfile,
+      reason: 'author_mismatch'
+    };
+  }
+
+  const sourceText = String(message.content || '').trim();
+  const currentText = String(introProfile.introText || '').trim();
+  if (!shouldRepairIntroProfileTextFromSource(currentText, sourceText)) {
+    return {
+      repaired: false,
+      profile: introProfile,
+      reason: 'not_needed'
+    };
+  }
+
+  const record = buildIntroProfileRecord(client, message);
+  client.db.introProfiles.upsert(record);
+  const repairedProfile = client.db.introProfiles.getByMessageId(message.id) || {
+    ...introProfile,
+    introText: sourceText
+  };
+  client.logger.info('intro profile text repaired from original message', {
+    guildId: message.guildId,
+    userId: message.author?.id || introProfile.userId,
+    introMessageId: message.id,
+    reason,
+    previousCustomEmojiCount: countCustomEmojiTags(currentText),
+    repairedCustomEmojiCount: countCustomEmojiTags(sourceText)
+  });
+  return {
+    repaired: true,
+    profile: repairedProfile,
+    reason: 'repaired_from_source_message'
+  };
+}
+
 function buildSearchAliasesFromIdentity(identity, links) {
   const aliases = new Set();
   const candidates = [
@@ -1234,5 +1318,7 @@ module.exports = {
   backfillIntroProfiles,
   getIntroProfileStatus,
   cleanupIntroProfiles,
-  rebuildIntroProfiles
+  rebuildIntroProfiles,
+  maybeRepairIntroProfileTextFromMessage,
+  shouldCheckIntroProfileTextForRepair
 };

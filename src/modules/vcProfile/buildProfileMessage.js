@@ -7,20 +7,85 @@ const {
   TextDisplayBuilder,
   ThumbnailBuilder
 } = require('discord.js');
-const { truncateText } = require('../../utils/text');
 
-function emphasizeSocialLinks(content) {
-  return content
-    .split('\n')
-    .map((line) => (/x\.com|twitter\.com/i.test(line) ? `**${line}**` : line))
-    .join('\n');
+const INTRO_TEXT_MAX_LENGTH = 1200;
+const COMPACT_INTRO_TEXT_MAX_LENGTH = 800;
+const CUSTOM_EMOJI_PATTERN = /<a?:[A-Za-z0-9_~]+:\d+>/gu;
+const URL_PATTERN = /https?:\/\/[^\s<>()]+/giu;
+
+function collectProtectedRanges(text) {
+  const ranges = [];
+  for (const pattern of [CUSTOM_EMOJI_PATTERN, URL_PATTERN]) {
+    pattern.lastIndex = 0;
+    for (const match of text.matchAll(pattern)) {
+      ranges.push({
+        start: match.index,
+        end: match.index + match[0].length
+      });
+    }
+  }
+  return ranges.sort((left, right) => left.start - right.start || left.end - right.end);
+}
+
+function avoidProtectedRangeCut(text, cutIndex) {
+  const ranges = collectProtectedRanges(text);
+  let safeIndex = cutIndex;
+  for (const range of ranges) {
+    if (range.start < safeIndex && safeIndex < range.end) {
+      safeIndex = range.start;
+    }
+  }
+  return safeIndex;
+}
+
+function segmentSafeSlice(text, maxLength) {
+  const normalizedMax = Math.max(0, Number(maxLength || 0));
+  if (!text || Array.from(text).length <= normalizedMax) {
+    return text;
+  }
+
+  const budget = Math.max(0, normalizedMax - 1);
+  if (budget <= 0) {
+    return '…';
+  }
+
+  if (typeof Intl?.Segmenter === 'function') {
+    const segmenter = new Intl.Segmenter('ja', { granularity: 'grapheme' });
+    let endIndex = 0;
+    let count = 0;
+    for (const segment of segmenter.segment(text)) {
+      if (count >= budget) {
+        break;
+      }
+      endIndex = segment.index + segment.segment.length;
+      count += 1;
+    }
+    return text.slice(0, avoidProtectedRangeCut(text, endIndex)).trimEnd();
+  }
+
+  const chars = Array.from(text);
+  const approximateSlice = chars.slice(0, budget).join('');
+  return text.slice(0, avoidProtectedRangeCut(text, approximateSlice.length)).trimEnd();
+}
+
+function truncateIntroText(text, maxLength) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) {
+    return '';
+  }
+  if (Array.from(trimmed).length <= maxLength) {
+    return trimmed;
+  }
+
+  const sliced = segmentSafeSlice(trimmed, maxLength);
+  return `${sliced}…`;
 }
 
 function buildMemberSection(member, { compact = false } = {}) {
   const displayName = member.displayName || '不明なメンバー';
   const headingName = member.mention || (member.id ? `<@${member.id}>` : displayName);
   const introSummary = member.introSummary?.trim()
-    ? emphasizeSocialLinks(truncateText(member.introSummary.trim(), 260))
+    ? truncateIntroText(member.introSummary, compact ? COMPACT_INTRO_TEXT_MAX_LENGTH : INTRO_TEXT_MAX_LENGTH)
     : '自己紹介がまだありません';
   const avatarUrl = member.avatarUrl || null;
 
