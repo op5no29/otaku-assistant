@@ -513,6 +513,57 @@ function createDatabase(databasePath) {
       DELETE FROM vc_profile_member_sessions
       WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
     `),
+    upsertVcProfileRecentLeave: sqlite.prepare(`
+      INSERT INTO vc_profile_recent_leaves (
+        guild_id,
+        category_id,
+        profile_channel_id,
+        voice_channel_id,
+        user_id,
+        left_at,
+        display_name_snapshot,
+        avatar_url_snapshot,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, category_id, profile_channel_id, voice_channel_id, user_id) DO UPDATE SET
+        left_at = excluded.left_at,
+        display_name_snapshot = excluded.display_name_snapshot,
+        avatar_url_snapshot = excluded.avatar_url_snapshot,
+        updated_at = excluded.updated_at
+    `),
+    deleteVcProfileRecentLeave: sqlite.prepare(`
+      DELETE FROM vc_profile_recent_leaves
+      WHERE guild_id = ?
+        AND category_id = ?
+        AND profile_channel_id = ?
+        AND voice_channel_id = ?
+        AND user_id = ?
+    `),
+    listVcProfileRecentLeavesForChannel: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        voice_channel_id AS voiceChannelId,
+        user_id AS userId,
+        left_at AS leftAt,
+        display_name_snapshot AS displayNameSnapshot,
+        avatar_url_snapshot AS avatarUrlSnapshot,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_profile_recent_leaves
+      WHERE guild_id = ?
+        AND category_id = ?
+        AND profile_channel_id = ?
+        AND voice_channel_id = ?
+        AND datetime(left_at) >= datetime(?)
+      ORDER BY datetime(left_at) DESC, user_id ASC
+    `),
+    deleteExpiredVcProfileRecentLeaves: sqlite.prepare(`
+      DELETE FROM vc_profile_recent_leaves
+      WHERE datetime(left_at) < datetime(?)
+    `),
     getVcProfileColorSession: sqlite.prepare(`
       SELECT
         guild_id AS guildId,
@@ -3297,6 +3348,51 @@ function createDatabase(databasePath) {
           categoryId,
           profileChannelId
         ).changes;
+      },
+      upsertRecentLeave({
+        guildId,
+        categoryId,
+        profileChannelId,
+        voiceChannelId,
+        userId,
+        leftAt,
+        displayNameSnapshot = null,
+        avatarUrlSnapshot = null
+      }) {
+        const now = new Date().toISOString();
+        statements.upsertVcProfileRecentLeave.run(
+          guildId,
+          categoryId,
+          profileChannelId,
+          voiceChannelId,
+          userId,
+          leftAt || now,
+          displayNameSnapshot,
+          avatarUrlSnapshot,
+          now,
+          now
+        );
+      },
+      deleteRecentLeave({ guildId, categoryId, profileChannelId, voiceChannelId, userId }) {
+        return statements.deleteVcProfileRecentLeave.run(
+          guildId,
+          categoryId,
+          profileChannelId,
+          voiceChannelId,
+          userId
+        ).changes;
+      },
+      listRecentLeavesForChannel({ guildId, categoryId, profileChannelId, voiceChannelId, sinceIso }) {
+        return statements.listVcProfileRecentLeavesForChannel.all(
+          guildId,
+          categoryId,
+          profileChannelId,
+          voiceChannelId,
+          sinceIso
+        );
+      },
+      deleteExpiredRecentLeaves(cutoffIso) {
+        return statements.deleteExpiredVcProfileRecentLeaves.run(cutoffIso).changes;
       },
       getColorSession({ guildId, categoryId, profileChannelId }) {
         return statements.getVcProfileColorSession.get(guildId, categoryId, profileChannelId) || null;

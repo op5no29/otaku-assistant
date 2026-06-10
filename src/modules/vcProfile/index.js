@@ -7,6 +7,8 @@ const { deleteActiveVoiceSessionEndCardsForCategory } = require('../vcSessionSum
 
 const DISCORD_COMPONENT_LIMIT = 40;
 const DEFAULT_MEMBERS_PER_PAGE = 6;
+const RECENT_LEAVE_WINDOW_MINUTES = 10;
+const MAX_RECENT_LEAVES_DISPLAY = 3;
 const SESSION_ACCENT_COLOR_PALETTE = [
   0x14b8a6,
   0x0ea5e9,
@@ -87,6 +89,32 @@ function getStableMemberName(member) {
   return member?.displayName || member?.user?.globalName || member?.user?.username || String(member?.id || '');
 }
 
+function getMemberAvatarUrl(member) {
+  if (!member?.displayAvatarURL) {
+    return null;
+  }
+
+  try {
+    return member.displayAvatarURL({ extension: 'png', size: 128 }) || null;
+  } catch {
+    return null;
+  }
+}
+
+function getRecentLeaveCutoffIso(now = new Date()) {
+  return new Date(now.getTime() - RECENT_LEAVE_WINDOW_MINUTES * 60 * 1000).toISOString();
+}
+
+function formatRecentLeaveRelativeTime(leftAt, now = new Date()) {
+  const parsed = Date.parse(leftAt);
+  if (!Number.isFinite(parsed)) {
+    return '';
+  }
+
+  const diffMinutes = Math.max(1, Math.floor((now.getTime() - parsed) / 60_000));
+  return `${diffMinutes}分前`;
+}
+
 function selectRandomSessionAccentColor() {
   const index = crypto.randomInt(0, SESSION_ACCENT_COLOR_PALETTE.length);
   return SESSION_ACCENT_COLOR_PALETTE[index];
@@ -159,6 +187,74 @@ function removeVoiceMemberSession(client, {
     });
   }
   return deletedRows;
+}
+
+function recordRecentVoiceLeave(client, {
+  guildId,
+  categoryId,
+  profileChannelId,
+  voiceChannelId,
+  member,
+  leftAt = new Date().toISOString(),
+  reason = 'voice_state_update'
+}) {
+  if (!guildId || !categoryId || !profileChannelId || !voiceChannelId || !member?.id) {
+    return false;
+  }
+
+  client.db.vcProfiles.upsertRecentLeave({
+    guildId,
+    categoryId,
+    profileChannelId,
+    voiceChannelId,
+    userId: member.id,
+    leftAt,
+    displayNameSnapshot: getStableMemberName(member),
+    avatarUrlSnapshot: getMemberAvatarUrl(member)
+  });
+  client.logger.info('vc profile recent leave recorded', {
+    guildId,
+    categoryId,
+    profileChannelId,
+    voiceChannelId,
+    userId: member.id,
+    leftAt,
+    reason
+  });
+  return true;
+}
+
+function removeRecentVoiceLeaveForRejoin(client, {
+  guildId,
+  categoryId,
+  profileChannelId,
+  voiceChannelId,
+  userId,
+  reason = 'voice_state_update'
+}) {
+  if (!guildId || !categoryId || !profileChannelId || !voiceChannelId || !userId) {
+    return 0;
+  }
+
+  const removedRows = client.db.vcProfiles.deleteRecentLeave({
+    guildId,
+    categoryId,
+    profileChannelId,
+    voiceChannelId,
+    userId
+  });
+  if (removedRows > 0) {
+    client.logger.info('vc profile recent leave removed due to rejoin', {
+      guildId,
+      categoryId,
+      profileChannelId,
+      voiceChannelId,
+      userId,
+      count: removedRows,
+      reason
+    });
+  }
+  return removedRows;
 }
 
 function normalizeStatusCandidate(value) {
@@ -836,10 +932,61 @@ function ensureCategoryMemberSessions(client, {
   return entriesWithSessions;
 }
 
+function resolveRecentLeavesForVoiceChannel(client, {
+  guildId,
+  categoryId,
+  profileChannelId,
+  voiceChannelId,
+  currentMemberIds = [],
+  now = new Date()
+}) {
+  const sinceIso = getRecentLeaveCutoffIso(now);
+  const currentIds = new Set([...currentMemberIds].map((userId) => String(userId)));
+  const rows = client.db.vcProfiles.listRecentLeavesForChannel({
+    guildId,
+    categoryId,
+    profileChannelId,
+    voiceChannelId,
+    sinceIso
+  });
+  const filteredRows = rows.filter((row) => !currentIds.has(String(row.userId)));
+  const visibleRows = filteredRows.slice(0, MAX_RECENT_LEAVES_DISPLAY);
+  const recentLeaves = visibleRows.map((row) => ({
+    userId: String(row.userId),
+    mention: `<@${row.userId}>`,
+    leftAt: row.leftAt,
+    relativeLabel: formatRecentLeaveRelativeTime(row.leftAt, now),
+    displayName: row.displayNameSnapshot || null,
+    avatarUrl: row.avatarUrlSnapshot || null
+  }));
+  recentLeaves.extraCount = Math.max(0, filteredRows.length - visibleRows.length);
+
+  client.logger.info('vc profile recent leaves resolved for card', {
+    guildId,
+    categoryId,
+    profileChannelId,
+    voiceChannelId,
+    count: filteredRows.length,
+    displayedCount: recentLeaves.length,
+    extraCount: recentLeaves.extraCount
+  });
+
+  return recentLeaves;
+}
+
 async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapping) {
   const voiceChannels = await getVoiceChannelsForCategory(guild, categoryId);
   const channelById = new Map(voiceChannels.map((channel) => [String(channel.id), channel]));
   const memberScan = await collectCategoryVoiceMembers(client, guild, categoryId, voiceChannels);
+  const now = new Date();
+  const expiredLeaveRows = client.db.vcProfiles.deleteExpiredRecentLeaves(getRecentLeaveCutoffIso(now));
+  if (expiredLeaveRows > 0) {
+    client.logger.info('vc profile recent leaves expired/ignored', {
+      guildId: guild.id,
+      categoryId,
+      count: expiredLeaveRows
+    });
+  }
   const activeChannelIds = new Set(memberScan.entries.map((entry) => String(entry.channelId)));
   const activeChannels = [...activeChannelIds]
     .map((channelId) => channelById.get(channelId))
@@ -891,11 +1038,20 @@ async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapp
 
   const channelSnapshots = activeChannels.map((activeChannel) => {
     const channelMembers = members.filter((member) => String(member.voiceChannelId || '') === String(activeChannel.id));
+    const recentLeaves = resolveRecentLeavesForVoiceChannel(client, {
+      guildId: guild.id,
+      categoryId,
+      profileChannelId: mapping.profileChannelId,
+      voiceChannelId: String(activeChannel.id),
+      currentMemberIds: channelMembers.map((member) => member.id),
+      now
+    });
     return {
       voiceChannelId: String(activeChannel.id),
       voiceChannelName: activeChannel.name || String(activeChannel.id),
       activeChannels: [activeChannel],
       members: channelMembers,
+      recentLeaves,
       statusText: statusByChannelId.get(String(activeChannel.id)) || null
     };
   }).filter((channelSnapshot) => channelSnapshot.members.length > 0);
@@ -909,6 +1065,7 @@ async function buildCategoryVoiceProfileSnapshot(client, guild, categoryId, mapp
       voiceChannelId: channelSnapshot.voiceChannelId,
       voiceChannelName: channelSnapshot.voiceChannelName,
       memberCount: channelSnapshot.members.length,
+      recentLeaveCount: channelSnapshot.recentLeaves?.length || 0,
       memberIds: channelSnapshot.members.map((member) => member.id)
     }))
   });
@@ -962,6 +1119,7 @@ function buildProfilePagePayload({
   contextName,
   voiceChannelName,
   statusText,
+  recentLeaves = [],
   members,
   totalMemberCount,
   pageIndex,
@@ -973,6 +1131,7 @@ function buildProfilePagePayload({
     contextName,
     voiceChannelName,
     statusText,
+    recentLeaves,
     members,
     totalMemberCount,
     pageIndex,
@@ -1005,6 +1164,7 @@ function buildPaginatedProfilePayloads({
           contextName: mapping.name,
           voiceChannelName: snapshot.voiceChannelName,
           statusText: snapshot.statusText,
+          recentLeaves: snapshot.recentLeaves || [],
           members,
           totalMemberCount: snapshot.members.length,
           pageIndex,
@@ -1018,6 +1178,7 @@ function buildPaginatedProfilePayloads({
             contextName: mapping.name,
             voiceChannelName: snapshot.voiceChannelName,
             statusText: snapshot.statusText,
+            recentLeaves: snapshot.recentLeaves || [],
             members,
             totalMemberCount: snapshot.members.length,
             pageIndex,
@@ -1036,6 +1197,7 @@ function buildPaginatedProfilePayloads({
           totalPages,
           memberCount: members.length,
           totalMemberCount: snapshot.members.length,
+          recentLeaveCount: snapshot.recentLeaves?.length || 0,
           compact,
           componentCount: normal.componentCount,
           compactFallbackComponentCount: compactFallback.componentCount
@@ -1135,6 +1297,7 @@ function buildPaginatedProfilePayloads({
       contextName: mapping.name,
       voiceChannelName: snapshot.voiceChannelName,
       statusText: snapshot.statusText,
+      recentLeaves: snapshot.recentLeaves || [],
       members,
       totalMemberCount: snapshot.members.length,
       pageIndex,
@@ -1883,11 +2046,26 @@ function updateVoiceProfileMemberSessionsForStateChange(client, {
   member,
   oldCategoryId,
   newCategoryId,
+  oldChannelId,
   newChannelId,
   reason = 'voice_state_update'
 }) {
   if (!guild?.id || !member?.id) {
     return;
+  }
+
+  if (oldCategoryId && oldChannelId && String(oldChannelId) !== String(newChannelId || '')) {
+    const oldMapping = getCategoryMapping(client, oldCategoryId);
+    if (oldMapping) {
+      recordRecentVoiceLeave(client, {
+        guildId: guild.id,
+        categoryId: oldCategoryId,
+        profileChannelId: oldMapping.profileChannelId,
+        voiceChannelId: oldChannelId,
+        member,
+        reason
+      });
+    }
   }
 
   if (oldCategoryId && oldCategoryId !== newCategoryId) {
@@ -1911,6 +2089,15 @@ function updateVoiceProfileMemberSessionsForStateChange(client, {
   if (!newMapping) {
     return;
   }
+
+  removeRecentVoiceLeaveForRejoin(client, {
+    guildId: guild.id,
+    categoryId: newCategoryId,
+    profileChannelId: newMapping.profileChannelId,
+    voiceChannelId: newChannelId,
+    userId: member.id,
+    reason
+  });
 
   const existing = client.db.vcProfiles.getMemberSession({
     guildId: guild.id,
@@ -2011,6 +2198,7 @@ async function handleVoiceStateUpdate(oldState, newState) {
     member,
     oldCategoryId,
     newCategoryId,
+    oldChannelId: oldState.channelId,
     newChannelId: newState.channelId,
     reason: 'voice_state_update'
   });

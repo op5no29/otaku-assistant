@@ -126,6 +126,29 @@ function runMigrations(database) {
       PRIMARY KEY (guild_id, user_id, category_id, profile_channel_id)
     );
 
+    CREATE TABLE IF NOT EXISTS vc_profile_recent_leaves (
+      guild_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      profile_channel_id TEXT NOT NULL,
+      voice_channel_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      left_at TEXT NOT NULL,
+      display_name_snapshot TEXT,
+      avatar_url_snapshot TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, category_id, profile_channel_id, voice_channel_id, user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_vc_profile_recent_leaves_channel
+      ON vc_profile_recent_leaves (
+        guild_id,
+        category_id,
+        profile_channel_id,
+        voice_channel_id,
+        left_at
+      );
+
     CREATE TABLE IF NOT EXISTS vc_profile_color_sessions (
       guild_id TEXT NOT NULL,
       category_id TEXT NOT NULL,

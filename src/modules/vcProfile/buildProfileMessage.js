@@ -116,9 +116,33 @@ function buildMemberSection(member, { compact = false } = {}) {
   return section;
 }
 
+function formatRecentLeaveSection(recentLeaves) {
+  if (!Array.isArray(recentLeaves) || recentLeaves.length === 0) {
+    return '';
+  }
+
+  const visibleItems = recentLeaves.slice(0, 3).map((leave) => {
+    const mention = leave.mention || (leave.userId ? `<@${leave.userId}>` : null);
+    const relativeLabel = leave.relativeLabel || leave.leftAgoLabel || '';
+    return [mention, relativeLabel].filter(Boolean).join(' ');
+  }).filter(Boolean);
+
+  if (visibleItems.length === 0) {
+    return '';
+  }
+
+  const extraCount = Math.max(0, Number(recentLeaves.extraCount || 0));
+  if (extraCount > 0) {
+    visibleItems.push(`ほか${extraCount}名`);
+  }
+
+  return `\n\n**直近の退出**\n${visibleItems.join(' / ')}`;
+}
+
 function buildProfileMessage({
   voiceChannelName,
   statusText = null,
+  recentLeaves = [],
   members,
   accentColor = 0x3b82f6,
   totalMemberCount = members.length,
@@ -134,9 +158,10 @@ function buildProfileMessage({
   const statusLine = statusText?.trim()
     ? `**ステータス**\n${statusText.trim()}\n\n`
     : '';
+  const recentLeaveSection = formatRecentLeaveSection(recentLeaves);
   container.addTextDisplayComponents(
     new TextDisplayBuilder().setContent(`## ${title}`),
-    new TextDisplayBuilder().setContent(`${statusLine}**現在の人数**\n${countLabel}`)
+    new TextDisplayBuilder().setContent(`${statusLine}**現在の人数**\n${countLabel}${recentLeaveSection}`)
   );
 
   for (const member of members) {
