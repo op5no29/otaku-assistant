@@ -1,10 +1,10 @@
 const SUPPORTED_HOST_PATTERNS = [
   /(^|\.)open\.spotify\.com$/i,
   /(^|\.)music\.apple\.com$/i,
-  /(^|\.)youtube\.com$/i,
-  /(^|\.)youtu\.be$/i,
   /(^|\.)music\.youtube\.com$/i,
   /(^|\.)soundcloud\.com$/i,
+  /(^|\.)song\.link$/i,
+  /(^|\.)odesli\.co$/i,
   /(^|\.)tidal\.com$/i,
   /(^|\.)music\.amazon\./i,
   /(^|\.)amazon\.com$/i
@@ -289,6 +289,18 @@ async function enrichPostWithMusicLink(post, { db, logger }) {
 
   const sourceUrl = extractMusicSourceUrl(post.content || '');
   if (!sourceUrl) {
+    const urls = String(post.content || '').match(/https?:\/\/\S+/g) || [];
+    logger.info('music preview skipped non-music url', {
+      messageId: post.messageId || null,
+      urls,
+      hosts: urls.map((url) => {
+        try {
+          return new URL(url).hostname.toLowerCase();
+        } catch {
+          return null;
+        }
+      }).filter(Boolean)
+    });
     logger.info('Music route detected but no supported music URL was found', {
       messageId: post.messageId || null
     });

@@ -259,6 +259,27 @@ function isYouTubeRelayUrl(value) {
   }
 }
 
+function classifyPreviewUrl(value) {
+  try {
+    const host = new URL(String(value || '')).hostname.toLowerCase().replace(/^www\./, '');
+    if (host === 'youtu.be' || host.endsWith('youtube.com')) {
+      return { previewType: 'youtube', host };
+    }
+    if (host === 'x.com' || host.endsWith('twitter.com')) {
+      return { previewType: 'x_twitter', host };
+    }
+    if (host === 'on.soundcloud.com' || host.endsWith('soundcloud.com')) {
+      return { previewType: 'soundcloud', host };
+    }
+    if (host === 'tiget.net' || host.endsWith('.tiget.net')) {
+      return { previewType: 'tiget', host };
+    }
+    return { previewType: 'generic', host };
+  } catch {
+    return { previewType: 'unknown', host: null };
+  }
+}
+
 function labelRelayLinkButton(url, index, usedLabels) {
   let label = index === 0 ? 'リンク先へ飛ぶ' : `リンク先へ飛ぶ ${index + 1}`;
   try {
@@ -532,6 +553,70 @@ function postHasYouTubeRelayUrl(post) {
     post?.socialPreview?.sourceUrl,
     post?.musicLink?.sourceUrl
   ].filter(Boolean).some((url) => isYouTubeRelayUrl(url));
+}
+
+function isTimelineDestinationTarget(target, config) {
+  return String(target?.destinationChannelId || '') === String(config.timelineChannelId || '');
+}
+
+function preparePostForRelayTarget(post, target, config, logger = null) {
+  if (!isTimelineDestinationTarget(target, config)) {
+    logger?.info?.('timeline relay using curated/source card layout', {
+      sourceMessageId: post?.messageId || null,
+      sourceChannelId: post?.message?.channelId || null,
+      targetTimelineChannelId: config.timelineChannelId || null,
+      destinationChannelId: target?.destinationChannelId || null,
+      relayKind: target?.relayKind || null,
+      cardLayout: 'source_or_route'
+    });
+    return post;
+  }
+
+  const hadRouteLayoutMetadata = Boolean(
+    (Array.isArray(post?.matchedBotHashtagRoutes) && post.matchedBotHashtagRoutes.length) ||
+    (Array.isArray(post?.matchedGlobalHashtagRoutes) && post.matchedGlobalHashtagRoutes.length) ||
+    (Array.isArray(post?.displayBotHashtags) && post.displayBotHashtags.length) ||
+    post?.accentColor
+  );
+
+  logger?.info?.('timeline relay using normal card layout', {
+    sourceMessageId: post?.messageId || null,
+    sourceChannelId: post?.message?.channelId || null,
+    targetTimelineChannelId: config.timelineChannelId || null,
+    destinationChannelId: target?.destinationChannelId || null,
+    relayKind: target?.relayKind || null,
+    cardLayout: 'normal_timeline'
+  });
+
+  if (hadRouteLayoutMetadata) {
+    logger?.info?.('source curated card layout skipped for timeline relay', {
+      sourceMessageId: post?.messageId || null,
+      sourceChannelId: post?.message?.channelId || null,
+      targetTimelineChannelId: config.timelineChannelId || null,
+      destinationChannelId: target?.destinationChannelId || null,
+      relayKind: target?.relayKind || null,
+      cardLayout: 'normal_timeline'
+    });
+  }
+
+  if (post?.relayOrigin === 'posthoc_hashtag') {
+    return {
+      ...post,
+      forceRelayLinkButtons: true,
+      timelineCardLayout: 'posthoc_timeline'
+    };
+  }
+
+  return {
+    ...post,
+    matchedBotHashtagRoutes: [],
+    matchedGlobalHashtagRoutes: [],
+    detectedGlobalHashtags: [],
+    displayBotHashtags: [],
+    accentColor: null,
+    forceRelayLinkButtons: true,
+    timelineCardLayout: 'normal_timeline'
+  };
 }
 
 function normalizeRoleIds(roleIds = []) {
@@ -810,6 +895,18 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
   const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, logger);
   const attachmentPrepared = await prepareAttachmentRelay(videoPrepared.post, config, logger);
   const previewPrepared = await preparePreviewImageRelay(attachmentPrepared.post, config, logger);
+  const previewSourceUrl = previewPrepared.post?.socialPreview?.sourceUrl || previewPrepared.post?.musicLink?.sourceUrl || null;
+  if (previewSourceUrl) {
+    const { previewType, host } = classifyPreviewUrl(previewSourceUrl);
+    logger.info(`${previewType === 'x_twitter' ? 'x/twitter' : previewType} preview selected`, {
+      sourceMessageId: previewPrepared.post?.messageId || null,
+      sourceChannelId: previewPrepared.post?.message?.channelId || null,
+      targetTimelineChannelId: config.timelineChannelId || null,
+      urlHost: host,
+      previewType,
+      cardLayout: previewPrepared.post?.timelineCardLayout || 'source_or_auto'
+    });
+  }
   if (postHasYouTubeRelayUrl(attachmentPrepared.post)) {
     logger.info('youtube preview strategy selected', {
       sourceMessageId: attachmentPrepared.post?.messageId || null,
@@ -855,7 +952,7 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
     matchedBotRoutes.length > 0 ||
     previewPrepared.post?.relayOrigin === 'posthoc_hashtag'
   ));
-  if (isRouteRelayCard) {
+  if (isRouteRelayCard || previewPrepared.post?.forceRelayLinkButtons === true) {
     const existingExtraButtons = Array.isArray(previewPrepared.post.extraLinkButtons)
       ? previewPrepared.post.extraLinkButtons
       : [];
@@ -2215,14 +2312,7 @@ async function relayTweetMessage(message, { config, db, logger }) {
     existingTargets.map((target) => [String(target.destinationChannelId), target])
   );
 
-  const { payload, cleanup } = await buildTimelinePayload(post, {
-    config,
-    forumType: 'tweet',
-    logger
-  });
-
-  try {
-    for (const target of desiredTargets) {
+  for (const target of desiredTargets) {
       if (existingTargetByChannelId.has(target.destinationChannelId)) {
         logger.info('Skipped tweet relay because destination copy already exists', {
           messageId: message.id,
@@ -2278,10 +2368,6 @@ async function relayTweetMessage(message, { config, db, logger }) {
         if (mergedResult?.merged) {
           continue;
         }
-        const sendPayload = {
-          ...payload,
-          ...(reply ? { reply } : {})
-        };
         logger.info('relay hashtag transform applied', {
           sourceMessageId: message.id,
           rawContent: String(message.content || '').slice(0, 500),
@@ -2291,13 +2377,28 @@ async function relayTweetMessage(message, { config, db, logger }) {
           relayKind: target.relayKind,
           rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
         });
-        const sentMessage = await sendRelayMessage(destinationChannel, sendPayload, logger, {
-          sourceMessageId: message.id,
-          destinationChannelId: target.destinationChannelId,
-          relayKind: target.relayKind,
-          sendPurpose: buildRelaySendPurpose(message, target),
-          callsiteLabel: 'timeline:message-create'
+        const targetPost = preparePostForRelayTarget(post, target, config, logger);
+        const { payload, cleanup } = await buildTimelinePayload(targetPost, {
+          config,
+          forumType: 'tweet',
+          logger
         });
+        let sentMessage;
+        try {
+          const sendPayload = {
+            ...payload,
+            ...(reply ? { reply } : {})
+          };
+          sentMessage = await sendRelayMessage(destinationChannel, sendPayload, logger, {
+            sourceMessageId: message.id,
+            destinationChannelId: target.destinationChannelId,
+            relayKind: target.relayKind,
+            sendPurpose: buildRelaySendPurpose(message, target),
+            callsiteLabel: 'timeline:message-create'
+          });
+        } finally {
+          await cleanup();
+        }
         db.relays.upsertMessageRelayTarget({
           sourceMessageId: message.id,
           destinationChannelId: target.destinationChannelId,
@@ -2359,9 +2460,6 @@ async function relayTweetMessage(message, { config, db, logger }) {
       } finally {
         message.client.timelineRelayMessageInFlight.delete(relayInFlightKey);
       }
-    }
-  } finally {
-    await cleanup();
   }
 }
 
@@ -2444,14 +2542,7 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
     }
     desiredTargetByChannelId.set(String(target.destinationChannelId), target);
   }
-  const { payload, cleanup } = await buildTimelinePayload(post, {
-    config,
-    forumType: 'tweet',
-    logger
-  });
-
-  try {
-    for (const relayTarget of normalizedRelayTargets) {
+  for (const relayTarget of normalizedRelayTargets) {
       const destinationChannel = await getTextChannel(message.guild, relayTarget.destinationChannelId || config.timelineChannelId);
       if (!destinationChannel) {
         logger.warn('Tweet timeline card update skipped because destination channel was missing', {
@@ -2495,10 +2586,20 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
         rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
       });
 
-      await timelineMessage.edit({
-        ...payload,
-        attachments: []
+      const targetPost = preparePostForRelayTarget(post, currentTarget || relayTarget, config, logger);
+      const { payload, cleanup } = await buildTimelinePayload(targetPost, {
+        config,
+        forumType: 'tweet',
+        logger
       });
+      try {
+        await timelineMessage.edit({
+          ...payload,
+          attachments: []
+        });
+      } finally {
+        await cleanup();
+      }
 
       db.relays.upsertMessageRelayTarget({
         sourceMessageId: message.id,
@@ -2585,16 +2686,26 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
           rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
         });
 
-        sentMessage = await sendRelayMessage(destinationChannel, {
-          ...payload,
-          ...(reply ? { reply } : {})
-        }, logger, {
-          sourceMessageId: message.id,
-          destinationChannelId: target.destinationChannelId,
-          relayKind: target.relayKind,
-          sendPurpose: 'timeline:missing-route-create-send',
-          callsiteLabel: 'timeline:message-update'
+        const targetPost = preparePostForRelayTarget(post, target, config, logger);
+        const { payload, cleanup } = await buildTimelinePayload(targetPost, {
+          config,
+          forumType: 'tweet',
+          logger
         });
+        try {
+          sentMessage = await sendRelayMessage(destinationChannel, {
+            ...payload,
+            ...(reply ? { reply } : {})
+          }, logger, {
+            sourceMessageId: message.id,
+            destinationChannelId: target.destinationChannelId,
+            relayKind: target.relayKind,
+            sendPurpose: 'timeline:missing-route-create-send',
+            callsiteLabel: 'timeline:message-update'
+          });
+        } finally {
+          await cleanup();
+        }
       } finally {
         message.client.timelineRelayMessageInFlight.delete(relayInFlightKey);
       }
@@ -2608,9 +2719,6 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
         relayedMessageId: sentMessage.id,
         authorId: message.author?.id || null
       });
-    }
-  } finally {
-    await cleanup();
   }
   logger.info('Tweet timeline card copies updated', {
     messageId: message.id,
@@ -2927,14 +3035,7 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
     cleanedBody
   });
 
-  const { payload, cleanup } = await buildTimelinePayload(post, {
-    config,
-    forumType: 'tweet',
-    logger
-  });
-
-  try {
-    for (const target of destinationTargets) {
+  for (const target of destinationTargets) {
       const existingRelay = db.relays.getMessageRelayTarget(message.id, target.destinationChannelId);
       if (existingRelay?.relayedMessageId) {
         if (isAnimeRouteMatched && String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
@@ -2996,13 +3097,24 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
           rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
         });
 
-        const sentMessage = await sendRelayMessage(destinationChannel, payload, logger, {
-          sourceMessageId: message.id,
-          destinationChannelId: target.destinationChannelId,
-          relayKind: target.relayKind,
-          sendPurpose: 'global_hashtag:relay-send',
-          callsiteLabel: 'global-hashtag:message-create'
+        const targetPost = preparePostForRelayTarget(post, target, config, logger);
+        const { payload, cleanup } = await buildTimelinePayload(targetPost, {
+          config,
+          forumType: 'tweet',
+          logger
         });
+        let sentMessage;
+        try {
+          sentMessage = await sendRelayMessage(destinationChannel, payload, logger, {
+            sourceMessageId: message.id,
+            destinationChannelId: target.destinationChannelId,
+            relayKind: target.relayKind,
+            sendPurpose: 'global_hashtag:relay-send',
+            callsiteLabel: 'global-hashtag:message-create'
+          });
+        } finally {
+          await cleanup();
+        }
 
         db.relays.upsertMessageRelayTarget({
           sourceMessageId: message.id,
@@ -3066,23 +3178,20 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
       } finally {
         message.client.timelineRelayMessageInFlight.delete(relayInFlightKey);
       }
-    }
+  }
 
-    if (globalMatches.size > 0) {
-      void handleAnimeHashtagPost(message, {
-        matchedRouteKeys: Array.from(globalMatches.keys()),
-        cleanedContent: post.content,
-        displayHashtags: post.displayBotHashtags
-      }).catch((error) => {
-        logger.warn('anime hashtag integration failed', {
-          sourceMessageId: message.id,
-          sourceChannelId,
-          error: error.message
-        });
+  if (globalMatches.size > 0) {
+    void handleAnimeHashtagPost(message, {
+      matchedRouteKeys: Array.from(globalMatches.keys()),
+      cleanedContent: post.content,
+      displayHashtags: post.displayBotHashtags
+    }).catch((error) => {
+      logger.warn('anime hashtag integration failed', {
+        sourceMessageId: message.id,
+        sourceChannelId,
+        error: error.message
       });
-    }
-  } finally {
-    await cleanup();
+    });
   }
 }
 

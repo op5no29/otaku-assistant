@@ -24,6 +24,7 @@ const QUESTION_CATEGORY_LABELS = {
 const PREVIEW_IMAGE_VALIDATION_TIMEOUT_MS = 6_000;
 const PREVIEW_IMAGE_VALIDATION_PREFIX_BYTES = 4_096;
 const MAX_PREVIEW_IMAGE_VALIDATION_CANDIDATES = 8;
+const YOUTUBE_OEMBED_TIMEOUT_MS = 4_000;
 const PREVIEW_IMAGE_FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 compatible preview fetcher',
   Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,video/*,*/*;q=0.8'
@@ -140,6 +141,54 @@ function getPreviewProvider(url) {
 
 function isYoutubeLikeUrl(url) {
   return /(?:youtube\.com|youtu\.be|ytimg\.com|googlevideo\.com)/i.test(String(url || ''));
+}
+
+function cleanUrlToken(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[.,、。!?！？;；]+$/u, '');
+}
+
+function extractYouTubeVideoId(value) {
+  try {
+    const parsed = new URL(cleanUrlToken(value));
+    const host = parsed.hostname.toLowerCase().replace(/^www\./, '');
+    let videoId = null;
+    if (host === 'youtu.be') {
+      videoId = parsed.pathname.split('/').filter(Boolean)[0] || null;
+    } else if (host === 'youtube.com' || host === 'm.youtube.com' || host.endsWith('.youtube.com')) {
+      if (parsed.pathname === '/watch') {
+        videoId = parsed.searchParams.get('v') || null;
+      } else {
+        const parts = parsed.pathname.split('/').filter(Boolean);
+        if (['shorts', 'embed', 'live'].includes(parts[0])) {
+          videoId = parts[1] || null;
+        }
+      }
+    }
+
+    if (!videoId || !/^[A-Za-z0-9_-]{6,64}$/u.test(videoId)) {
+      return null;
+    }
+    return videoId;
+  } catch {
+    return null;
+  }
+}
+
+function getYouTubeWatchUrl(videoId) {
+  return `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`;
+}
+
+function isWeakYouTubeTitle(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return (
+    !normalized ||
+    normalized === 'youtube' ||
+    normalized === 'youtube.com' ||
+    normalized === 'youtu.be' ||
+    /^[-–—|•\s]*youtube$/u.test(normalized)
+  );
 }
 
 function isSoundCloudSourceUrl(url) {
@@ -665,6 +714,48 @@ function buildPreviewCandidate(url, source, sourceUrl) {
   };
 }
 
+function buildYouTubeThumbnailCandidates(sourceUrl, logger = null, messageId = null) {
+  const videoId = extractYouTubeVideoId(sourceUrl);
+  if (!videoId) {
+    return [];
+  }
+
+  logger?.info?.('youtube video id extracted', {
+    sourceMessageId: messageId,
+    originalUrl: sourceUrl,
+    videoId
+  });
+
+  const variants = [
+    ['maxresdefault', 120],
+    ['sddefault', 119],
+    ['hqdefault', 118],
+    ['mqdefault', 117],
+    ['default', 116]
+  ];
+  const watchUrl = getYouTubeWatchUrl(videoId);
+  return variants.map(([variant, priority]) => {
+    const thumbnailUrl = `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/${variant}.jpg`;
+    const candidate = buildPreviewCandidate(thumbnailUrl, `youtube.thumbnail.${variant}`, watchUrl);
+    if (!candidate) {
+      return null;
+    }
+    candidate.priority = priority;
+    candidate.kind = 'thumbnail';
+    candidate.videoId = videoId;
+    logger?.info?.('link preview image candidate found', {
+      sourceMessageId: messageId,
+      sourceUrl,
+      rawUrl: thumbnailUrl,
+      normalizedUrl: candidate.url,
+      sourceType: candidate.source,
+      priority: candidate.priority,
+      videoId
+    });
+    return candidate;
+  }).filter(Boolean);
+}
+
 function collectPreviewMediaCandidates(embeds, sourceUrl = null) {
   const candidates = [];
 
@@ -785,6 +876,8 @@ async function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger =
     .slice(0, MAX_PREVIEW_IMAGE_VALIDATION_CANDIDATES);
   const validationCandidateKeys = new Set(validationCandidates.map((candidate) => candidate.normalizedUrl));
   const validatedDeduped = [];
+  const isTwitterStatus = Boolean(extractTwitterStatusId(sourceUrl));
+  const isYoutubeSource = isYoutubeLikeUrl(sourceUrl);
 
   const validationResults = await Promise.all(validationCandidates.map(async (candidate) => ({
     candidate,
@@ -814,6 +907,17 @@ async function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger =
         failureReason: validation.failureReason || 'validation_failed',
         selected: false
       });
+      if (isYoutubeSource && /^youtube\.thumbnail\./i.test(String(candidate.source || ''))) {
+        logger?.info?.('youtube thumbnail candidate rejected', {
+          sourceMessageId: messageId,
+          originalUrl: sourceUrl,
+          videoId: candidate.videoId || extractYouTubeVideoId(sourceUrl),
+          thumbnailUrl: candidate.url,
+          reason: validation.failureReason || 'validation_failed',
+          httpStatus: validation.httpStatus || null,
+          contentType: validation.contentType || null
+        });
+      }
       continue;
     }
 
@@ -842,8 +946,6 @@ async function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger =
     }
   }
 
-  const isTwitterStatus = Boolean(extractTwitterStatusId(sourceUrl));
-  const isYoutubeSource = isYoutubeLikeUrl(sourceUrl);
   const nonLogo = validatedDeduped.filter((candidate) => candidate.kind !== 'logo');
   const selected = [];
 
@@ -935,11 +1037,25 @@ async function selectPreviewMediaForComponentsV2(candidates, sourceUrl, logger =
         selectedUrl: bestYoutubeCandidate.url,
         selectedKind: bestYoutubeCandidate.kind
       });
+      logger?.info?.('youtube thumbnail candidate selected', {
+        sourceMessageId: messageId,
+        originalUrl: sourceUrl,
+        videoId: bestYoutubeCandidate.videoId || extractYouTubeVideoId(sourceUrl),
+        selectedThumbnailUrl: bestYoutubeCandidate.url,
+        sourceType: bestYoutubeCandidate.source,
+        reason: 'validated_candidate'
+      });
     } else {
       logger?.info?.('youtube preview skipped reason', {
         sourceMessageId: messageId,
         sourceUrl,
         reason: 'no_candidate'
+      });
+      logger?.info?.('youtube thumbnail fallback exhausted', {
+        sourceMessageId: messageId,
+        originalUrl: sourceUrl,
+        videoId: extractYouTubeVideoId(sourceUrl),
+        reason: candidates.length ? 'no_valid_candidate' : 'no_candidate'
       });
     }
   } else {
@@ -1270,6 +1386,66 @@ async function fetchHtmlPreviewMetadata(sourceUrl, logger = null, messageId = nu
   }
 }
 
+async function fetchYouTubeOEmbedMetadata(videoId, originalUrl, logger = null, messageId = null) {
+  if (!videoId) {
+    return null;
+  }
+
+  const watchUrl = getYouTubeWatchUrl(videoId);
+  const requestUrl = new URL('https://www.youtube.com/oembed');
+  requestUrl.searchParams.set('url', watchUrl);
+  requestUrl.searchParams.set('format', 'json');
+
+  try {
+    const response = await fetch(requestUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 compatible preview fetcher',
+        Accept: 'application/json,*/*;q=0.8'
+      },
+      redirect: 'follow',
+      signal: AbortSignal.timeout(YOUTUBE_OEMBED_TIMEOUT_MS)
+    });
+    const contentType = response.headers.get('content-type') || null;
+    if (!response.ok) {
+      logger?.info?.('youtube oembed failed', {
+        sourceMessageId: messageId,
+        originalUrl,
+        videoId,
+        httpStatus: response.status,
+        contentType,
+        reason: 'http_status'
+      });
+      return null;
+    }
+
+    const payload = await response.json();
+    const title = String(payload?.title || '').trim() || null;
+    logger?.info?.('youtube oembed title fetched', {
+      sourceMessageId: messageId,
+      originalUrl,
+      videoId,
+      title,
+      authorName: payload?.author_name || null,
+      providerName: payload?.provider_name || null
+    });
+    return {
+      title,
+      authorName: payload?.author_name || null,
+      providerName: payload?.provider_name || 'YouTube',
+      sourceUrl: watchUrl
+    };
+  } catch (error) {
+    logger?.info?.('youtube oembed failed', {
+      sourceMessageId: messageId,
+      originalUrl,
+      videoId,
+      reason: error.name === 'TimeoutError' || error.name === 'AbortError' ? 'timeout' : 'request_failed',
+      error: error.message
+    });
+    return null;
+  }
+}
+
 function buildSocialPreviewMediaItem(candidate) {
   return {
     url: candidate.url,
@@ -1293,7 +1469,13 @@ function buildSocialPreviewMediaItem(candidate) {
 async function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null, logger = null, messageId = null) {
   let primaryPreview = null;
   const gifProvider = getGifProviderName(sourceUrl);
-  let candidates = collectPreviewMediaCandidates(embeds, sourceUrl);
+  const youtubeVideoId = extractYouTubeVideoId(sourceUrl);
+  const youtubeWatchUrl = youtubeVideoId ? getYouTubeWatchUrl(youtubeVideoId) : null;
+  const youtubeThumbnailCandidates = buildYouTubeThumbnailCandidates(sourceUrl, logger, messageId);
+  let candidates = [
+    ...youtubeThumbnailCandidates,
+    ...collectPreviewMediaCandidates(embeds, sourceUrl)
+  ];
   for (const candidate of candidates) {
     logger?.info?.('relay link preview image candidate found', {
       sourceMessageId: messageId,
@@ -1389,8 +1571,49 @@ async function extractSocialPreviewFromEmbeds(embeds, sourceUrl = null, logger =
     primaryPreview.siteName ||= htmlMetadata.siteName || null;
   }
 
+  let youtubeOEmbed = null;
+  if (youtubeVideoId && (!primaryPreview?.title || isWeakYouTubeTitle(primaryPreview.title))) {
+    youtubeOEmbed = await fetchYouTubeOEmbedMetadata(youtubeVideoId, sourceUrl, logger, messageId);
+  }
+
+  if (youtubeVideoId && !primaryPreview && (youtubeOEmbed?.title || selectedCandidates.length)) {
+    primaryPreview = {
+      title: youtubeOEmbed?.title || 'YouTube',
+      description: null,
+      imageUrl: selectedCandidates.find((candidate) => candidate.kind !== 'video')?.url || null,
+      imageUrls: [],
+      sourceUrl: youtubeWatchUrl,
+      siteName: youtubeOEmbed?.providerName || 'YouTube'
+    };
+  } else if (youtubeVideoId && primaryPreview) {
+    if (youtubeOEmbed?.title && isWeakYouTubeTitle(primaryPreview.title)) {
+      primaryPreview.title = youtubeOEmbed.title;
+    } else if (isWeakYouTubeTitle(primaryPreview.title)) {
+      primaryPreview.title = 'YouTube';
+    }
+    primaryPreview.siteName ||= youtubeOEmbed?.providerName || 'YouTube';
+    primaryPreview.sourceUrl = youtubeWatchUrl || primaryPreview.sourceUrl || sourceUrl;
+  }
+
   if (!primaryPreview && !selectedCandidates.length) {
+    if (youtubeVideoId) {
+      logger?.info?.('youtube preview rendered without thumbnail', {
+        sourceMessageId: messageId,
+        originalUrl: sourceUrl,
+        videoId: youtubeVideoId,
+        reason: 'no_primary_preview_no_thumbnail'
+      });
+    }
     return null;
+  }
+
+  if (youtubeVideoId && !selectedCandidates.length) {
+    logger?.info?.('youtube preview rendered without thumbnail', {
+      sourceMessageId: messageId,
+      originalUrl: sourceUrl,
+      videoId: youtubeVideoId,
+      reason: 'thumbnail_fallback_exhausted'
+    });
   }
 
   const finalMediaItems = selectedCandidates.map(buildSocialPreviewMediaItem);
