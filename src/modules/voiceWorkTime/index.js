@@ -3,6 +3,7 @@ const sharp = require('sharp');
 const { appendOperationLog } = require('../logDashboard');
 
 const FALLBACK_AVATAR_URL = 'https://cdn.discordapp.com/embed/avatars/0.png';
+const MILESTONE_CARD_FONT_FAMILY = "'Noto Sans CJK JP', 'Noto Sans JP', sans-serif";
 
 function getConfig(client) {
   return client.appConfig.voiceWorkTime || { enabled: false, channels: [] };
@@ -380,10 +381,10 @@ async function renderMilestoneCard(client, { user, member, milestoneHours, chann
     <svg width="${width}" height="${height}" xmlns="http://www.w3.org/2000/svg">
       <rect width="100%" height="100%" fill="rgba(0,0,0,${Number(config.darkOverlayOpacity ?? 0.42)})"/>
       <circle cx="${width / 2}" cy="220" r="126" fill="white"/>
-      <text x="50%" y="405" text-anchor="middle" font-family="sans-serif" font-size="58" font-weight="800" fill="white">${escapeXml(headline)}</text>
-      <text x="50%" y="466" text-anchor="middle" font-family="sans-serif" font-size="32" font-weight="700" fill="#dbeafe">${escapeXml(special)}</text>
-      <text x="50%" y="525" text-anchor="middle" font-family="sans-serif" font-size="38" font-weight="700" fill="white">${escapeXml(displayName)}</text>
-      <text x="50%" y="575" text-anchor="middle" font-family="sans-serif" font-size="24" fill="#e5e7eb">${escapeXml(channelLabel || config.footerBranding || 'Otaku Assistant')}</text>
+      <text x="50%" y="405" text-anchor="middle" font-family="${MILESTONE_CARD_FONT_FAMILY}" font-size="58" font-weight="800" fill="white">${escapeXml(headline)}</text>
+      <text x="50%" y="466" text-anchor="middle" font-family="${MILESTONE_CARD_FONT_FAMILY}" font-size="32" font-weight="700" fill="#dbeafe">${escapeXml(special)}</text>
+      <text x="50%" y="525" text-anchor="middle" font-family="${MILESTONE_CARD_FONT_FAMILY}" font-size="38" font-weight="700" fill="white">${escapeXml(displayName)}</text>
+      <text x="50%" y="575" text-anchor="middle" font-family="${MILESTONE_CARD_FONT_FAMILY}" font-size="24" fill="#e5e7eb">${escapeXml(channelLabel || config.footerBranding || 'Otaku Assistant')}</text>
     </svg>`;
   const composites = [{ input: Buffer.from(svg), top: 0, left: 0 }];
   if (avatarPng) {
