@@ -56,6 +56,10 @@ function createBotClient({ appConfig, database, logger }) {
   client.annictStatusLocks = new Set();
   client.annictSyncRunning = false;
   client.annictSyncInterval = null;
+  client.annictWatchedImportRunning = false;
+  client.annictWatchedImportInterval = null;
+  client.annictWatchedImportLocks = new Set();
+  client.annictReactionNoticeCooldowns = new Map();
   client.annictIntroDmLocks = new Set();
   client.annictIntroDmLastSentAt = 0;
   client.annictIntroDmDelayedChecks = new Map();

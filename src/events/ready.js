@@ -10,7 +10,7 @@ const { ensureLogDashboards } = require('../modules/logDashboard');
 const { startIntroDmQueueProcessor } = require('../modules/introDm');
 const { runAnimeOrphanScan } = require('../modules/anime');
 const { getAnnictAccessToken } = require('../modules/anime/annictClient');
-const { startAnnictUserSync } = require('../modules/annictUserIntegration');
+const { startAnnictUserSync, startAnnictWatchedImportWorker } = require('../modules/annictUserIntegration');
 const { startQuestionRolePromptTimeouts } = require('../modules/timelineRelay');
 const { backfillIntroAddendums } = require('../modules/introProfiles');
 const {
@@ -57,6 +57,7 @@ module.exports = {
     startVoiceWorkTimeTicker(client);
     startQuestionRolePromptTimeouts(client);
     startAnnictUserSync(client);
+    startAnnictWatchedImportWorker(client);
 
     const health = getBotHealth(client);
     const globalHashtagRoutes = Object.entries(client.appConfig.globalHashtagRoutes || {});

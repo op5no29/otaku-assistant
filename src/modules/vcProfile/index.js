@@ -4,7 +4,6 @@ const { buildProfileMessage } = require('./buildProfileMessage');
 const { findLatestIntroMessage } = require('./findLatestIntroMessage');
 const { parseAccentColor } = require('../../utils/accentColors');
 const { deleteActiveVoiceSessionEndCardsForCategory } = require('../vcSessionSummary');
-const { getChannelConfig: getWorkChannelConfig, getProjectedTotalSeconds, formatDuration: formatWorkDuration } = require('../voiceWorkTime');
 const { hideShortActivityCardForLiveProfile, updateShortActivityCard } = require('../vcShortActivity');
 
 const DISCORD_COMPONENT_LIMIT = 40;
@@ -647,10 +646,7 @@ async function buildVoiceMemberProfiles(client, humanEntries, { guildId, categor
         introSummary,
         voiceChannelId: entry.channelId || null,
         joinedAt: entry.joinedAt || null,
-        joinedAtLabel: formatJoinTimeLabel(entry.joinedAt, client.appConfig.voiceWorkTime?.timezone || 'Asia/Tokyo'),
-        workTotalLabel: getWorkChannelConfig(client, entry.channelId)
-          ? formatWorkDuration(getProjectedTotalSeconds(client, guildId, member.id).totalSeconds, { largeCompact: true })
-          : null
+        joinedAtLabel: formatJoinTimeLabel(entry.joinedAt, client.appConfig.voiceWorkTime?.timezone || 'Asia/Tokyo')
       };
     })
   );

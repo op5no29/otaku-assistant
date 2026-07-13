@@ -108,7 +108,11 @@
       "footerBranding": "Otaku Assistant",
       "cacheTtlMinutes": 1440,
       "maxAssetBytes": 10000000,
-      "fetchTimeoutMs": 10000
+      "fetchTimeoutMs": 10000,
+      "xProfileOverrides": {
+        "1454160830487728391": "https://x.com/_zahyou"
+      },
+      "xHeaderImageOverrides": {}
     }
   },
   "mediaRelay": {
@@ -292,6 +296,15 @@
     "syncIntervalMinutes": 10,
     "maxWorksPerSync": 100,
     "initialImportEnabled": false,
+    "watchedImport": {
+      "enabled": true,
+      "pageSize": 50,
+      "maxCardsPerBatch": 3,
+      "batchIntervalMinutes": 5,
+      "delayBetweenCardsMs": 5000,
+      "repairMissingMessages": true,
+      "maxAttemptsPerWork": 3
+    },
     "introDm": {
       "enabled": true,
       "excludedChannelIds": [],

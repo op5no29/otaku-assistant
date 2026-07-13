@@ -4,6 +4,8 @@ const { appendOperationLog } = require('../logDashboard');
 
 const FALLBACK_AVATAR_URL = 'https://cdn.discordapp.com/embed/avatars/0.png';
 const MILESTONE_CARD_FONT_FAMILY = "'Noto Sans CJK JP', 'Noto Sans JP', sans-serif";
+const X_HEADER_SUCCESS_TTL_MS = 24 * 60 * 60 * 1000;
+const X_HEADER_FAILURE_TTL_MS = 60 * 60 * 1000;
 
 function getConfig(client) {
   return client.appConfig.voiceWorkTime || { enabled: false, channels: [] };
@@ -306,20 +308,298 @@ function getNextMilestoneInfo(client, guildId, userId) {
   };
 }
 
-async function fetchLimitedBuffer(url, { timeoutMs = 10_000, maxBytes = 10_000_000 } = {}) {
-  const response = await fetch(url, { signal: AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined });
-  if (!response.ok) {
-    throw new Error(`asset_http_${response.status}`);
+async function fetchLimitedBuffer(url, { timeoutMs = null, fetchTimeoutMs = null, maxBytes = 10_000_000, redirectLimit = 3 } = {}) {
+  const effectiveTimeoutMs = Number(timeoutMs || fetchTimeoutMs || 10_000);
+  let currentUrl = String(url);
+  for (let redirectCount = 0; redirectCount <= redirectLimit; redirectCount += 1) {
+    const response = await fetch(currentUrl, {
+      redirect: 'manual',
+      signal: AbortSignal.timeout ? AbortSignal.timeout(effectiveTimeoutMs) : undefined
+    });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get('location');
+      if (!location) {
+        throw new Error('asset_redirect_missing_location');
+      }
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+    if (!response.ok) {
+      throw new Error(`asset_http_${response.status}`);
+    }
+    const contentType = String(response.headers.get('content-type') || '');
+    if (!/^image\//i.test(contentType)) {
+      throw new Error('asset_content_type_invalid');
+    }
+    const contentLength = Number(response.headers.get('content-length') || 0);
+    if (contentLength > maxBytes) {
+      throw new Error('asset_too_large');
+    }
+    const arrayBuffer = await response.arrayBuffer();
+    if (arrayBuffer.byteLength > maxBytes) {
+      throw new Error('asset_too_large');
+    }
+    return Buffer.from(arrayBuffer);
   }
-  const contentType = String(response.headers.get('content-type') || '');
-  if (!/^image\//i.test(contentType)) {
-    throw new Error('asset_content_type_invalid');
+  throw new Error('asset_too_many_redirects');
+}
+
+function normalizeXHandleFromProfileUrl(profileUrl) {
+  try {
+    const parsed = new URL(String(profileUrl || '').trim());
+    const host = parsed.hostname.replace(/^www\./iu, '').toLowerCase();
+    if (host !== 'x.com' && host !== 'twitter.com') {
+      return null;
+    }
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    if (parts.length !== 1) {
+      return null;
+    }
+    const handle = parts[0];
+    if (!/^[A-Za-z0-9_]{1,15}$/u.test(handle) || ['home', 'share', 'intent', 'search', 'i'].includes(handle.toLowerCase())) {
+      return null;
+    }
+    return handle.toLowerCase();
+  } catch {
+    return null;
   }
-  const arrayBuffer = await response.arrayBuffer();
-  if (arrayBuffer.byteLength > maxBytes) {
-    throw new Error('asset_too_large');
+}
+
+function extractXProfileUrlsFromIntro(profile) {
+  const values = [
+    profile?.introText,
+    ...(Array.isArray(profile?.links) ? profile.links : []),
+    ...(Array.isArray(profile?.embeds) ? profile.embeds.flatMap((embed) => [
+      embed?.url,
+      embed?.title,
+      embed?.description,
+      embed?.author?.url
+    ]) : [])
+  ].filter(Boolean);
+  const urls = [];
+  for (const value of values) {
+    for (const match of String(value).matchAll(/https?:\/\/(?:www\.)?(?:x\.com|twitter\.com)\/[A-Za-z0-9_]+\/?/giu)) {
+      const url = match[0].replace(/[.,、。!?！？;；]+$/u, '');
+      if (normalizeXHandleFromProfileUrl(url)) {
+        urls.push(url);
+      }
+    }
   }
-  return Buffer.from(arrayBuffer);
+  return [...new Set(urls)];
+}
+
+async function fetchTextLimited(url, { timeoutMs = null, fetchTimeoutMs = null, maxBytes = 1_500_000, redirectLimit = 3 } = {}) {
+  const effectiveTimeoutMs = Number(timeoutMs || fetchTimeoutMs || 10_000);
+  let currentUrl = String(url);
+  for (let redirectCount = 0; redirectCount <= redirectLimit; redirectCount += 1) {
+    const response = await fetch(currentUrl, {
+      redirect: 'manual',
+      headers: {
+        Accept: 'text/html,application/json;q=0.9,*/*;q=0.8',
+        'User-Agent': 'Mozilla/5.0 OtakuAssistant/1.0'
+      },
+      signal: AbortSignal.timeout ? AbortSignal.timeout(effectiveTimeoutMs) : undefined
+    });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get('location');
+      if (!location) {
+        throw new Error('redirect_missing_location');
+      }
+      currentUrl = new URL(location, currentUrl).toString();
+      continue;
+    }
+    if (!response.ok) {
+      throw new Error(`http_${response.status}`);
+    }
+    const contentLength = Number(response.headers.get('content-length') || 0);
+    if (contentLength > maxBytes) {
+      throw new Error('response_too_large');
+    }
+    const text = await response.text();
+    if (Buffer.byteLength(text, 'utf8') > maxBytes) {
+      throw new Error('response_too_large');
+    }
+    return text;
+  }
+  throw new Error('too_many_redirects');
+}
+
+function normalizeTwimgHeaderUrl(rawUrl) {
+  const cleaned = String(rawUrl || '')
+    .replace(/\\u002F/giu, '/')
+    .replace(/\\\//gu, '/')
+    .replace(/&amp;/giu, '&')
+    .replace(/\\u0026/giu, '&')
+    .trim();
+  if (!/^https:\/\/pbs\.twimg\.com\/profile_banners\//iu.test(cleaned)) {
+    return null;
+  }
+  return cleaned.replace(/\/(?:web|mobile|ipad|1500x500|600x200|300x100)(\?.*)?$/iu, '/1500x500$1');
+}
+
+function findTwimgHeaderUrlInText(text) {
+  const patterns = [
+    /https:\\\/\\\/pbs\.twimg\.com\\\/profile_banners\\\/[^"'\\<>\s]+/iu,
+    /https:\/\/pbs\.twimg\.com\/profile_banners\/[^"'<>\s\\]+/iu,
+    /profile_banner_url(?:_https)?["']?\s*[:=]\s*["']([^"']+)/iu
+  ];
+  for (const pattern of patterns) {
+    const match = String(text || '').match(pattern);
+    const url = normalizeTwimgHeaderUrl(match?.[1] || match?.[0]);
+    if (url) {
+      return url;
+    }
+  }
+  return null;
+}
+
+function findHeaderUrlInObject(value) {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      const found = findHeaderUrlInObject(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  for (const [key, child] of Object.entries(value)) {
+    if (/banner|header/iu.test(key) && typeof child === 'string') {
+      const url = normalizeTwimgHeaderUrl(child);
+      if (url) return url;
+    }
+    const found = findHeaderUrlInObject(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+async function resolveXHeaderFresh(handle, options, logger) {
+  const endpoints = [
+    { source: 'fxtwitter_profile', url: `https://api.fxtwitter.com/${encodeURIComponent(handle)}` },
+    { source: 'x_profile_html', url: `https://x.com/${encodeURIComponent(handle)}` }
+  ];
+  let lastErrorCode = 'not_found';
+  for (const endpoint of endpoints) {
+    try {
+      const text = await fetchTextLimited(endpoint.url, options);
+      let headerUrl = null;
+      if (endpoint.source === 'fxtwitter_profile') {
+        try {
+          headerUrl = findHeaderUrlInObject(JSON.parse(text));
+        } catch {
+          headerUrl = findTwimgHeaderUrlInText(text);
+        }
+      } else {
+        headerUrl = findTwimgHeaderUrlInText(text);
+      }
+      if (headerUrl) {
+        logger?.info?.('twitter header resolved', {
+          normalizedHandle: handle,
+          source: endpoint.source
+        });
+        return { headerUrl, resolverSource: endpoint.source };
+      }
+      lastErrorCode = `${endpoint.source}_no_header`;
+    } catch (error) {
+      lastErrorCode = error.message || `${endpoint.source}_failed`;
+      logger?.warn?.('twitter header resolve attempt failed', {
+        normalizedHandle: handle,
+        source: endpoint.source,
+        errorCode: lastErrorCode
+      });
+    }
+  }
+  const error = new Error(lastErrorCode);
+  error.code = lastErrorCode;
+  throw error;
+}
+
+async function resolveXProfileHeader(client, profileUrl, options = {}) {
+  const handle = normalizeXHandleFromProfileUrl(profileUrl);
+  if (!handle) {
+    return null;
+  }
+  const now = Date.now();
+  const cached = client.db.xProfileHeaders?.get?.(handle);
+  if (cached && new Date(cached.expiresAt).getTime() > now) {
+    if (cached.headerUrl) {
+      return { headerUrl: cached.headerUrl, handle, resolverSource: 'cache' };
+    }
+    return null;
+  }
+  try {
+    const resolved = await resolveXHeaderFresh(handle, options, client.logger);
+    const resolvedAt = new Date().toISOString();
+    client.db.xProfileHeaders?.upsert?.({
+      normalizedHandle: handle,
+      headerUrl: resolved.headerUrl,
+      resolvedAt,
+      expiresAt: new Date(now + X_HEADER_SUCCESS_TTL_MS).toISOString(),
+      lastErrorCode: null
+    });
+    return { ...resolved, handle };
+  } catch (error) {
+    client.db.xProfileHeaders?.upsert?.({
+      normalizedHandle: handle,
+      headerUrl: null,
+      resolvedAt: null,
+      expiresAt: new Date(now + X_HEADER_FAILURE_TTL_MS).toISOString(),
+      lastErrorCode: error.code || error.message || 'resolve_failed'
+    });
+    client.logger.warn('twitter header resolved failed', {
+      normalizedHandle: handle,
+      errorCode: error.code || error.message || 'resolve_failed'
+    });
+    return null;
+  }
+}
+
+async function getIntroXProfileUrl(client, guildId, userId) {
+  try {
+    const { getLatestIntroProfileByUser } = require('../introProfiles');
+    const profile = getLatestIntroProfileByUser(client, guildId, userId);
+    return extractXProfileUrlsFromIntro(profile)[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveMilestoneBackground(client, { user, guildId, config }) {
+  const headerOverride = config.xHeaderImageOverrides?.[user.id] || null;
+  if (headerOverride) {
+    try {
+      const buffer = await fetchLimitedBuffer(headerOverride, config);
+      return { buffer, source: 'x_header', resolverSource: 'x_header_override' };
+    } catch (error) {
+      client.logger.warn('twitter header override failed', { userId: user.id, error: error.message });
+    }
+  }
+
+  const profileUrls = [
+    config.xProfileOverrides?.[user.id] || null,
+    config.useTwitterHeaderFallback === false ? null : await getIntroXProfileUrl(client, guildId, user.id)
+  ].filter(Boolean);
+
+  for (const profileUrl of profileUrls) {
+    const resolved = await resolveXProfileHeader(client, profileUrl, config);
+    if (!resolved?.headerUrl) {
+      continue;
+    }
+    try {
+      const buffer = await fetchLimitedBuffer(resolved.headerUrl, config);
+      return { buffer, source: 'x_header', resolverSource: resolved.resolverSource, handle: resolved.handle };
+    } catch (error) {
+      client.logger.warn('twitter header asset validation failed', {
+        userId: user.id,
+        normalizedHandle: resolved.handle,
+        error: error.message
+      });
+    }
+  }
+
+  return null;
 }
 
 function escapeXml(value) {
@@ -330,7 +610,7 @@ function escapeXml(value) {
     .replace(/"/g, '&quot;');
 }
 
-async function renderMilestoneCard(client, { user, member, milestoneHours, channelLabel }) {
+async function renderMilestoneCard(client, { user, member, milestoneHours, channelLabel, guildId = process.env.GUILD_ID }) {
   const config = getConfig(client).milestoneCard || {};
   const width = Number(config.width || 1200);
   const height = Number(config.height || 630);
@@ -350,6 +630,20 @@ async function renderMilestoneCard(client, { user, member, milestoneHours, chann
     }
   } catch (error) {
     client.logger.warn('discord banner fetch failed', { userId: user.id, error: error.message });
+  }
+  if (!backgroundBuffer) {
+    const xBackground = await resolveMilestoneBackground(client, { user, guildId, config });
+    if (xBackground?.buffer) {
+      backgroundBuffer = xBackground.buffer;
+      backgroundSource = xBackground.source;
+      client.logger.info('work milestone card banner source selected', {
+        userId: user.id,
+        milestoneHours,
+        source: backgroundSource,
+        resolverSource: xBackground.resolverSource || null,
+        normalizedHandle: xBackground.handle || null
+      });
+    }
   }
   try {
     avatarBuffer = await fetchLimitedBuffer(avatarUrl, config);
@@ -406,7 +700,7 @@ async function sendMilestoneNotification(client, award) {
   let cardStatus = 'failed';
   let cardError = null;
   try {
-    attachment = await renderMilestoneCard(client, { user, member, milestoneHours: award.milestoneHours, channelLabel });
+    attachment = await renderMilestoneCard(client, { user, member, milestoneHours: award.milestoneHours, channelLabel, guildId: award.guildId });
     cardStatus = 'rendered';
   } catch (error) {
     cardError = error.message;
@@ -502,5 +796,7 @@ module.exports = {
   startVoiceWorkTimeTicker,
   checkAndDeliverMilestones,
   getMilestoneHours,
-  renderMilestoneCard
+  renderMilestoneCard,
+  resolveXProfileHeader,
+  normalizeXHandleFromProfileUrl
 };

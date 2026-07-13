@@ -46,6 +46,7 @@ const REVIEW_PROMPT_TYPES = {
 };
 const IMAGE_VALIDATION_TTL_MS = 1000 * 60 * 60 * 6;
 const WATCHED_PROMPT_TTL_MS = 1000 * 60 * 60 * 24 * 30;
+const ANNICT_REACTION_NOTICE_COOLDOWN_MS = 1000 * 60 * 60 * 12;
 
 function parseAliases(value) {
   try {
@@ -1478,15 +1479,40 @@ async function handleAnimeReactionAdd(reaction, user) {
     return;
   }
 
-  await addAnimeUserReactionStatus(client, message.guildId, entry.id, user.id, interestedMatch ? 'interested' : 'watched', true);
-  await updateAnimeChannelCard(client, entry).catch(() => null);
-  await updateAnimeReviewCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
-  client.logger.info('anime reaction added', {
-    guildId: message.guildId,
-    animeEntryId: entry.id,
-    userId: user.id,
-    reactionType: interestedMatch ? 'interested' : 'watched'
-  });
+  const action = interestedMatch ? 'interested' : 'watched';
+  try {
+    const { updateAnnictStatusForAnimeEntry } = require('../annictUserIntegration');
+    await updateAnnictStatusForAnimeEntry(client, {
+      guildId: message.guildId,
+      userId: user.id,
+      entry,
+      action,
+      idempotencyKey: `reaction:${message.id}:${user.id}:${action}`,
+      source: 'discord_reaction',
+      updateLocal: true
+    });
+    await updateAnimeChannelCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
+    await updateAnimeReviewCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
+    client.logger.info('anime reaction annict status updated', {
+      guildId: message.guildId,
+      animeEntryId: entry.id,
+      userId: user.id,
+      reactionType: action
+    });
+  } catch (error) {
+    await maybeNotifyAnnictReactionFailure(client, user, error);
+    await reaction.users?.remove?.(user.id).catch(() => null);
+    client.logger.warn('anime reaction annict status update failed', {
+      guildId: message.guildId,
+      animeEntryId: entry.id,
+      userId: user.id,
+      reactionType: action,
+      annictWorkId: String(entry.provider || '') === 'annict' ? entry.providerMediaId || null : null,
+      errorCode: error.code || null,
+      error: error.message
+    });
+    return;
+  }
 
   if (watchedMatch) {
     const promptState = client.db.anime.getReviewPromptState(message.guildId, entry.id, user.id, REVIEW_PROMPT_TYPES.WATCHED);
@@ -1518,6 +1544,31 @@ async function handleAnimeReactionAdd(reaction, user) {
     }
   }
 
+}
+
+async function maybeNotifyAnnictReactionFailure(client, user, error) {
+  if (!user?.id) {
+    return;
+  }
+  const cooldowns = client.annictReactionNoticeCooldowns || new Map();
+  client.annictReactionNoticeCooldowns = cooldowns;
+  const reason = error?.code === 'not_connected' ? 'not_connected' : 'failed';
+  const key = `${user.id}:${reason}`;
+  const lastSentAt = Number(cooldowns.get(key) || 0);
+  if (Date.now() - lastSentAt < ANNICT_REACTION_NOTICE_COOLDOWN_MS) {
+    return;
+  }
+  cooldowns.set(key, Date.now());
+  const content = reason === 'not_connected'
+    ? 'アニメカードのリアクションをAnnictへ反映するには `/annict connect` で連携してください。'
+    : 'アニメカードのリアクションをAnnictへ反映できませんでした。時間をおいてもう一度お試しください。';
+  await user.send({ content, allowedMentions: { parse: [] } }).catch((dmError) => {
+    client.logger.warn('anime reaction annict private notice failed', {
+      userId: user.id,
+      reason,
+      error: dmError.message
+    });
+  });
 }
 
 async function handleAnimeReactionRemove(reaction, user) {

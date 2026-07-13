@@ -24,6 +24,7 @@ const DELAYED_EMBED_INSPECTION_MS = 3500;
 const YOUTUBE_OEMBED_TIMEOUT_MS = 4000;
 const PREVIEW_CACHE_TTL_MS = 60 * 60 * 1000;
 const VALID_SYNC_STATES = new Set(['WANNA_WATCH', 'WATCHING', 'WATCHED']);
+const DEFAULT_WATCHED_IMPORT_WORKER_INTERVAL_MS = 60 * 1000;
 const STATUS_TO_ANNICT_KIND = {
   interested: 'wanna_watch',
   watched: 'watched'
@@ -49,6 +50,19 @@ class AnnictUserIntegrationError extends Error {
 
 function getConfig(client) {
   return client.appConfig?.annictUserIntegration || {};
+}
+
+function getWatchedImportConfig(client) {
+  const config = getConfig(client).watchedImport || {};
+  return {
+    enabled: config.enabled !== false,
+    pageSize: Math.max(1, Math.min(Number(config.pageSize || 50), 100)),
+    maxCardsPerBatch: Math.max(1, Math.min(Number(config.maxCardsPerBatch || 3), 10)),
+    batchIntervalMinutes: Math.max(1, Number(config.batchIntervalMinutes || 5)),
+    delayBetweenCardsMs: Math.max(0, Number(config.delayBetweenCardsMs || 5000)),
+    repairMissingMessages: config.repairMissingMessages !== false,
+    maxAttemptsPerWork: Math.max(1, Number(config.maxAttemptsPerWork || 3))
+  };
 }
 
 function getEnv(config, name) {
@@ -309,6 +323,10 @@ function parseCursor(value) {
   return value;
 }
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function buildAnnictWorkMediaFromGraphql(work) {
   return {
     provider: 'annict',
@@ -350,6 +368,61 @@ async function ensureAnnictCardForWork(client, guild, work) {
   const media = buildAnnictWorkMediaFromGraphql(work);
   const posted = await postAnimeToChannel(guild, media, client.user?.id || null, media.aliases || []);
   return posted.entry || null;
+}
+
+async function hasExistingAnimeCardMessage(client, entry) {
+  if (!entry?.animeChannelId || !entry?.animeChannelMessageId) {
+    return false;
+  }
+  const channel = await client.channels.fetch(entry.animeChannelId).catch(() => null);
+  if (!channel?.messages?.fetch) {
+    return false;
+  }
+  const message = await channel.messages.fetch(entry.animeChannelMessageId).catch(() => null);
+  if (!message) {
+    return false;
+  }
+  if (!entry.threadId) {
+    return false;
+  }
+  const thread = await client.channels.fetch(entry.threadId).catch(() => null);
+  return Boolean(thread?.isThread?.() || thread?.isTextBased?.());
+}
+
+async function ensureAnnictCardForWatchedImport(client, guild, work, { repairMissingMessages = true } = {}) {
+  const annictWorkId = String(work.annictId || '');
+  if (!annictWorkId) {
+    return { entry: null, action: 'failed', requiresCardWrite: false };
+  }
+
+  const existing = client.db.anime.getEntryByProviderMediaId(guild.id, 'annict', annictWorkId);
+  if (existing?.animeChannelMessageId) {
+    const existsInDiscord = await hasExistingAnimeCardMessage(client, existing);
+    if (existsInDiscord) {
+      return { entry: existing, action: 'skipped_existing', requiresCardWrite: false };
+    }
+    if (!repairMissingMessages) {
+      return { entry: existing, action: 'skipped_existing', requiresCardWrite: false };
+    }
+    client.db.anime.clearBindings(existing.id);
+    const media = buildAnnictWorkMediaFromGraphql(work);
+    const posted = await postAnimeToChannel(guild, media, client.user?.id || null, media.aliases || []);
+    return { entry: posted.entry || client.db.anime.getEntryById(existing.id), action: 'repaired', requiresCardWrite: true };
+  }
+
+  if (existing) {
+    if (!repairMissingMessages) {
+      return { entry: existing, action: 'skipped_existing', requiresCardWrite: false };
+    }
+    client.db.anime.clearBindings(existing.id);
+    const media = buildAnnictWorkMediaFromGraphql(work);
+    const posted = await postAnimeToChannel(guild, media, client.user?.id || null, media.aliases || []);
+    return { entry: posted.entry || client.db.anime.getEntryById(existing.id), action: 'repaired', requiresCardWrite: true };
+  }
+
+  const media = buildAnnictWorkMediaFromGraphql(work);
+  const posted = await postAnimeToChannel(guild, media, client.user?.id || null, media.aliases || []);
+  return { entry: posted.entry || null, action: 'posted', requiresCardWrite: true };
 }
 
 async function getStoredAccessToken(client, guildId, discordUserId) {
@@ -695,6 +768,80 @@ async function resolveAnnictWorkIdForEntry(client, entry) {
   return null;
 }
 
+async function updateAnnictStatusForAnimeEntry(client, {
+  guildId,
+  userId,
+  entry,
+  action,
+  idempotencyKey,
+  source = 'discord_action',
+  updateLocal = true
+}) {
+  if (!entry || String(entry.guildId) !== String(guildId)) {
+    throw new AnnictUserIntegrationError('対象の作品カードを確認できませんでした。', 'anime_entry_missing');
+  }
+
+  const annictWorkId = await resolveAnnictWorkIdForEntry(client, entry);
+  if (!annictWorkId) {
+    throw new AnnictUserIntegrationError('この作品カードはAnnict作品IDを確認できないため、Annictには反映できません。', 'annict_work_id_missing');
+  }
+
+  const targetKind = STATUS_TO_ANNICT_KIND[action];
+  if (!targetKind) {
+    throw new AnnictUserIntegrationError('未対応のAnnict操作です。', 'unsupported_annict_action');
+  }
+
+  const lockKey = `${guildId}:${userId}:${annictWorkId}`;
+  if (client.annictStatusLocks.has(lockKey)) {
+    throw new AnnictUserIntegrationError('同じ作品のAnnict更新を処理中です。少し待ってからもう一度お試しください。', 'status_update_locked');
+  }
+
+  client.annictStatusLocks.add(lockKey);
+  try {
+    const { accessToken } = await getStoredAccessToken(client, guildId, userId);
+    await postAnnictStatus(client, accessToken, annictWorkId, targetKind);
+
+    const now = new Date().toISOString();
+    client.db.annictUserIntegration.upsertUserWorkState({
+      guildId,
+      discordUserId: userId,
+      annictWorkId,
+      animeEntryId: entry.id,
+      status: targetKind,
+      source,
+      sourceUpdatedAt: now,
+      syncedAt: now
+    });
+    client.db.annictUserIntegration.upsertStatusWriteLog({
+      guildId,
+      discordUserId: userId,
+      annictWorkId,
+      targetStatus: targetKind,
+      idempotencyKey,
+      status: 'success'
+    });
+    if (updateLocal) {
+      await updateLocalAnimeStatus(client, guildId, entry.id, userId, action);
+    }
+    client.logger.info('annict anime status update succeeded', {
+      guildId,
+      discordUserId: userId,
+      animeEntryId: entry.id,
+      annictWorkId,
+      action,
+      source
+    });
+    return { annictWorkId, targetKind };
+  } catch (error) {
+    if (error.code === 'annict_unauthorized') {
+      await markConnectionInvalid(client, guildId, userId, error.code);
+    }
+    throw error;
+  } finally {
+    client.annictStatusLocks.delete(lockKey);
+  }
+}
+
 async function handleAnimeCardAction(interaction, action, animeEntryId) {
   const client = interaction.client;
   const entry = client.db.anime.getEntryById(Number(animeEntryId));
@@ -707,58 +854,26 @@ async function handleAnimeCardAction(interaction, action, animeEntryId) {
     return true;
   }
 
-  const annictWorkId = await resolveAnnictWorkIdForEntry(client, entry);
-  if (!annictWorkId) {
-    await interaction.reply({
-      content: 'この作品カードはAnnict作品IDを確認できないため、Annictには反映できません。',
-      ephemeral: true,
-      allowedMentions: { parse: [] }
-    });
-    return true;
-  }
-
-  const lockKey = `${interaction.guildId}:${interaction.user.id}:${annictWorkId}`;
-  if (client.annictStatusLocks.has(lockKey)) {
-    await interaction.reply({
-      content: '同じ作品のAnnict更新を処理中です。少し待ってからもう一度お試しください。',
-      ephemeral: true,
-      allowedMentions: { parse: [] }
-    });
-    return true;
-  }
-
-  client.annictStatusLocks.add(lockKey);
   await interaction.deferReply({ ephemeral: true });
   try {
-    const targetKind = STATUS_TO_ANNICT_KIND[action];
-    const { accessToken } = await getStoredAccessToken(client, interaction.guildId, interaction.user.id);
-    await postAnnictStatus(client, accessToken, annictWorkId, targetKind);
-
-    const now = new Date().toISOString();
-    client.db.annictUserIntegration.upsertUserWorkState({
+    await updateAnnictStatusForAnimeEntry(client, {
       guildId: interaction.guildId,
-      discordUserId: interaction.user.id,
-      annictWorkId,
-      animeEntryId: entry.id,
-      status: targetKind,
-      source: 'discord_action',
-      sourceUpdatedAt: now,
-      syncedAt: now
+      userId: interaction.user.id,
+      entry,
+      action,
+      idempotencyKey: `${interaction.id}:${action}`,
+      source: 'discord_button',
+      updateLocal: true
     });
-    client.db.annictUserIntegration.upsertStatusWriteLog({
-      guildId: interaction.guildId,
-      discordUserId: interaction.user.id,
-      annictWorkId,
-      targetStatus: targetKind,
-      idempotencyKey: `${interaction.id}:${targetKind}`,
-      status: 'success'
-    });
-    await updateLocalAnimeStatus(client, interaction.guildId, entry.id, interaction.user.id, action);
     await interaction.editReply(action === 'interested'
       ? 'Annictの「見たい」に追加しました。'
       : 'Annictで「見た」に更新しました。');
   } catch (error) {
     if (error.code === 'not_connected') {
+      await interaction.editReply(error.message);
+    } else if (error.code === 'status_update_locked') {
+      await interaction.editReply(error.message);
+    } else if (error.code === 'annict_work_id_missing' || error.code === 'anime_entry_missing') {
       await interaction.editReply(error.message);
     } else if (error.code === 'annict_unauthorized') {
       await markConnectionInvalid(client, interaction.guildId, interaction.user.id, error.code);
@@ -769,15 +884,13 @@ async function handleAnimeCardAction(interaction, action, animeEntryId) {
       client.logger.warn('annict status update failed', {
         guildId: interaction.guildId,
         discordUserId: interaction.user.id,
-        annictWorkId,
+        animeEntryId: entry.id,
         action,
         errorCode: error.code || null,
         error: error.message
       });
       await interaction.editReply('Annictの更新に失敗しました。時間をおいてもう一度お試しください。');
     }
-  } finally {
-    client.annictStatusLocks.delete(lockKey);
   }
   return true;
 }
@@ -842,6 +955,433 @@ async function fetchLibraryEntries(client, accessToken, { first, after = null })
   `;
   const data = await graphql(client, accessToken, query, { first, after });
   return data.viewer?.libraryEntries || { edges: [], pageInfo: {} };
+}
+
+async function fetchWatchedLibraryEntries(client, accessToken, { first, after = null }) {
+  const query = `
+    query AnnictUserWatchedLibraryEntries($first: Int!, $after: String) {
+      viewer {
+        libraryEntries(
+          first: $first,
+          after: $after,
+          states: [WATCHED],
+          orderBy: { field: LAST_TRACKED_AT, direction: DESC }
+        ) {
+          edges {
+            cursor
+            node {
+              status { state createdAt }
+              work {
+                id
+                annictId
+                title
+                titleKana
+                titleRo
+                titleEn
+                malAnimeId
+                media
+                seasonName
+                seasonYear
+                officialSiteUrl
+                image {
+                  recommendedImageUrl
+                  facebookOgImageUrl
+                }
+              }
+            }
+          }
+          pageInfo {
+            hasNextPage
+            endCursor
+          }
+        }
+      }
+    }
+  `;
+  const data = await graphql(client, accessToken, query, { first, after });
+  return data.viewer?.libraryEntries || { edges: [], pageInfo: {} };
+}
+
+function addMinutesIso(minutes) {
+  return new Date(Date.now() + Math.max(1, Number(minutes || 1)) * 60 * 1000).toISOString();
+}
+
+function formatJobDate(value) {
+  return value || 'なし';
+}
+
+function compactCursor(value) {
+  if (!value) {
+    return 'なし';
+  }
+  const text = String(value);
+  return text.length > 14 ? `...${text.slice(-14)}` : text;
+}
+
+async function markWatchedImportLocalState(client, {
+  guildId,
+  discordUserId,
+  annictWorkId,
+  animeEntryId,
+  sourceUpdatedAt = null
+}) {
+  const now = new Date().toISOString();
+  client.db.annictUserIntegration.upsertUserWorkState({
+    guildId,
+    discordUserId,
+    annictWorkId,
+    animeEntryId: animeEntryId || null,
+    status: 'watched',
+    source: 'annict_watched_import',
+    sourceUpdatedAt: sourceUpdatedAt || now,
+    syncedAt: now
+  });
+  if (animeEntryId) {
+    await updateLocalAnimeStatus(client, guildId, animeEntryId, discordUserId, 'watched');
+  }
+}
+
+async function processWatchedImportJob(client, job) {
+  const config = getWatchedImportConfig(client);
+  if (!config.enabled) {
+    return;
+  }
+
+  const lockKey = `${job.guildId}:${job.discordUserId}`;
+  if (client.annictWatchedImportLocks.has(lockKey)) {
+    client.logger.info('annict watched import duplicate prevented', {
+      guildId: job.guildId,
+      discordUserId: job.discordUserId
+    });
+    return;
+  }
+
+  client.annictWatchedImportLocks.add(lockKey);
+  client.logger.info('annict watched import batch started', {
+    guildId: job.guildId,
+    discordUserId: job.discordUserId
+  });
+
+  let scannedDelta = 0;
+  let postedDelta = 0;
+  let skippedExistingDelta = 0;
+  let repairedDelta = 0;
+  let failedDelta = 0;
+  let batchScanned = 0;
+  let batchPosted = 0;
+  let batchSkippedExisting = 0;
+  let batchRepaired = 0;
+  let batchFailed = 0;
+  let cursor = job.graphqlCursor || null;
+  let lastProcessedAt = job.lastProcessedAt || null;
+  let status = 'active';
+  let nextRunAt = addMinutesIso(config.batchIntervalMinutes);
+  let completedAt = null;
+  let cancelledAt = null;
+  let hasNextPage = job.hasNextPage == null ? true : Boolean(job.hasNextPage);
+  let lastErrorCode = null;
+  let shouldPersistProgress = true;
+
+  const persistProgress = () => {
+    batchScanned += scannedDelta;
+    batchPosted += postedDelta;
+    batchSkippedExisting += skippedExistingDelta;
+    batchRepaired += repairedDelta;
+    batchFailed += failedDelta;
+    client.db.annictUserIntegration.updateWatchedImportJobProgress({
+      guildId: job.guildId,
+      discordUserId: job.discordUserId,
+      status,
+      graphqlCursor: cursor,
+      hasNextPage,
+      scannedDelta,
+      postedDelta,
+      skippedExistingDelta,
+      repairedDelta,
+      failedDelta,
+      lastProcessedAt,
+      nextRunAt,
+      completedAt,
+      cancelledAt,
+      lastErrorCode
+    });
+    scannedDelta = 0;
+    postedDelta = 0;
+    skippedExistingDelta = 0;
+    repairedDelta = 0;
+    failedDelta = 0;
+  };
+
+  try {
+    const latestJob = client.db.annictUserIntegration.getWatchedImportJob(job.guildId, job.discordUserId);
+    if (!latestJob || latestJob.status !== 'active') {
+      shouldPersistProgress = false;
+      return;
+    }
+    cursor = latestJob.graphqlCursor || null;
+
+    const guild = client.guilds.cache.get(job.guildId) || await client.guilds.fetch(job.guildId).catch(() => null);
+    if (!guild) {
+      throw new AnnictUserIntegrationError('対象サーバーを確認できませんでした。', 'guild_missing');
+    }
+
+    const { accessToken } = await getStoredAccessToken(client, job.guildId, job.discordUserId);
+    const page = await fetchWatchedLibraryEntries(client, accessToken, {
+      first: config.pageSize,
+      after: cursor
+    });
+    const edges = Array.isArray(page.edges) ? page.edges : [];
+    hasNextPage = Boolean(page.pageInfo?.hasNextPage);
+
+    if (!edges.length) {
+      status = 'completed';
+      nextRunAt = null;
+      completedAt = new Date().toISOString();
+      hasNextPage = false;
+      client.logger.info('annict watched import completed', {
+        guildId: job.guildId,
+        discordUserId: job.discordUserId
+      });
+      return;
+    }
+
+    let cardWrites = 0;
+    let exhaustedPage = true;
+    for (const edge of edges) {
+      const currentJob = client.db.annictUserIntegration.getWatchedImportJob(job.guildId, job.discordUserId);
+      if (!currentJob || currentJob.status !== 'active') {
+        status = currentJob?.status || 'cancelled';
+        nextRunAt = null;
+        completedAt = currentJob?.completedAt || null;
+        cancelledAt = currentJob?.cancelledAt || null;
+        lastErrorCode = currentJob?.lastErrorCode || null;
+        exhaustedPage = false;
+        break;
+      }
+
+      const state = edge.node?.status?.state;
+      const work = edge.node?.work || null;
+      const annictWorkId = work?.annictId ? String(work.annictId) : null;
+      if (state !== 'WATCHED' || !annictWorkId) {
+        scannedDelta += 1;
+        failedDelta += 1;
+        cursor = edge.cursor || cursor;
+        lastProcessedAt = new Date().toISOString();
+        lastErrorCode = 'invalid_watched_work';
+        persistProgress();
+        continue;
+      }
+
+      const existingItem = client.db.annictUserIntegration.getWatchedImportItem(job.guildId, job.discordUserId, annictWorkId);
+      if (existingItem && Number(existingItem.attempts || 0) >= config.maxAttemptsPerWork && existingItem.status === 'failed') {
+        scannedDelta += 1;
+        failedDelta += 1;
+        cursor = edge.cursor || cursor;
+        lastProcessedAt = new Date().toISOString();
+        lastErrorCode = 'max_attempts_exceeded';
+        persistProgress();
+        continue;
+      }
+
+      const existingEntry = client.db.anime.getEntryByProviderMediaId(job.guildId, 'annict', annictWorkId);
+      const existingCardPresent = existingEntry?.animeChannelMessageId
+        ? await hasExistingAnimeCardMessage(client, existingEntry)
+        : false;
+      const wouldWriteCard = !existingEntry || (!existingCardPresent && config.repairMissingMessages);
+      if (wouldWriteCard && cardWrites >= config.maxCardsPerBatch) {
+        exhaustedPage = false;
+        break;
+      }
+
+      client.db.annictUserIntegration.upsertWatchedImportItem({
+        guildId: job.guildId,
+        discordUserId: job.discordUserId,
+        annictWorkId,
+        status: 'processing',
+        attemptsDelta: 1
+      });
+
+      try {
+        const result = existingEntry && existingCardPresent
+          ? { entry: existingEntry, action: 'skipped_existing', requiresCardWrite: false }
+          : await ensureAnnictCardForWatchedImport(client, guild, work, {
+            repairMissingMessages: config.repairMissingMessages
+          });
+        const entry = result.entry || null;
+        await markWatchedImportLocalState(client, {
+          guildId: job.guildId,
+          discordUserId: job.discordUserId,
+          annictWorkId,
+          animeEntryId: entry?.id || null,
+          sourceUpdatedAt: edge.node?.status?.createdAt || null
+        });
+
+        scannedDelta += 1;
+        if (result.action === 'posted') {
+          postedDelta += 1;
+          cardWrites += 1;
+          client.logger.info('annict watched import card posted', {
+            guildId: job.guildId,
+            discordUserId: job.discordUserId,
+            annictWorkId,
+            animeEntryId: entry?.id || null
+          });
+        } else if (result.action === 'repaired') {
+          repairedDelta += 1;
+          cardWrites += 1;
+          client.logger.info('annict watched import missing card repaired', {
+            guildId: job.guildId,
+            discordUserId: job.discordUserId,
+            annictWorkId,
+            animeEntryId: entry?.id || null
+          });
+        } else {
+          skippedExistingDelta += 1;
+          client.logger.info('annict watched import work skipped existing', {
+            guildId: job.guildId,
+            discordUserId: job.discordUserId,
+            annictWorkId,
+            animeEntryId: entry?.id || null
+          });
+        }
+
+        client.db.annictUserIntegration.upsertWatchedImportItem({
+          guildId: job.guildId,
+          discordUserId: job.discordUserId,
+          annictWorkId,
+          status: result.action,
+          animeEntryId: entry?.id || null,
+          attemptsDelta: 0,
+          processedAt: new Date().toISOString()
+        });
+
+        cursor = edge.cursor || cursor;
+        lastProcessedAt = new Date().toISOString();
+        lastErrorCode = null;
+        persistProgress();
+        if (result.requiresCardWrite && config.delayBetweenCardsMs > 0 && cardWrites < config.maxCardsPerBatch) {
+          await sleep(config.delayBetweenCardsMs);
+        }
+      } catch (error) {
+        scannedDelta += 1;
+        failedDelta += 1;
+        cursor = edge.cursor || cursor;
+        lastProcessedAt = new Date().toISOString();
+        lastErrorCode = error.code || 'work_failed';
+        client.db.annictUserIntegration.upsertWatchedImportItem({
+          guildId: job.guildId,
+          discordUserId: job.discordUserId,
+          annictWorkId,
+          status: 'failed',
+          attemptsDelta: 0,
+          lastErrorCode
+        });
+        client.logger.warn('annict watched import work failed', {
+          guildId: job.guildId,
+          discordUserId: job.discordUserId,
+          annictWorkId,
+          errorCode: error.code || null,
+          error: error.message
+        });
+        persistProgress();
+      }
+    }
+
+    if (exhaustedPage && !page.pageInfo?.hasNextPage) {
+      status = 'completed';
+      nextRunAt = null;
+      completedAt = new Date().toISOString();
+      hasNextPage = false;
+      client.logger.info('annict watched import completed', {
+        guildId: job.guildId,
+        discordUserId: job.discordUserId
+      });
+    }
+  } catch (error) {
+    failedDelta += 1;
+    lastErrorCode = error.code || 'batch_failed';
+    if (error.code === 'annict_unauthorized' || error.code === 'decrypt_failed') {
+      await markConnectionInvalid(client, job.guildId, job.discordUserId, error.code);
+      status = 'failed';
+      nextRunAt = null;
+      hasNextPage = false;
+    }
+    client.logger.warn('annict watched import batch failed', {
+      guildId: job.guildId,
+      discordUserId: job.discordUserId,
+      errorCode: error.code || null,
+      error: error.message
+    });
+  } finally {
+    if (shouldPersistProgress) {
+      persistProgress();
+      client.logger.info('annict watched import batch completed', {
+        guildId: job.guildId,
+        discordUserId: job.discordUserId,
+        status,
+        scannedDelta: batchScanned,
+        postedDelta: batchPosted,
+        skippedExistingDelta: batchSkippedExisting,
+        repairedDelta: batchRepaired,
+        failedDelta: batchFailed,
+        nextRunAt
+      });
+    }
+    client.annictWatchedImportLocks.delete(lockKey);
+  }
+}
+
+async function runAnnictWatchedImportDueJobs(client) {
+  const config = getWatchedImportConfig(client);
+  if (!config.enabled) {
+    return { skipped: true, reason: 'disabled' };
+  }
+
+  const runtime = getRuntimeStatus(client);
+  if (!runtime.ok) {
+    client.logger.warn('annict watched import skipped', { reason: runtime.code });
+    return { skipped: true, reason: runtime.code };
+  }
+
+  if (client.annictWatchedImportRunning) {
+    return { skipped: true, reason: 'already_running' };
+  }
+
+  client.annictWatchedImportRunning = true;
+  let processed = 0;
+  try {
+    const jobs = client.db.annictUserIntegration.listDueWatchedImportJobs(new Date().toISOString(), 5);
+    for (const job of jobs) {
+      await processWatchedImportJob(client, job);
+      processed += 1;
+    }
+  } finally {
+    client.annictWatchedImportRunning = false;
+  }
+  return { processed };
+}
+
+function startAnnictWatchedImportWorker(client) {
+  const config = getWatchedImportConfig(client);
+  if (!config.enabled) {
+    return;
+  }
+
+  if (client.annictWatchedImportInterval) {
+    clearInterval(client.annictWatchedImportInterval);
+  }
+
+  client.annictWatchedImportInterval = setInterval(() => {
+    void runAnnictWatchedImportDueJobs(client).catch((error) => {
+      client.logger.warn('annict watched import loop failed', { error: error.message });
+    });
+  }, DEFAULT_WATCHED_IMPORT_WORKER_INTERVAL_MS);
+  client.annictWatchedImportInterval.unref?.();
+  setTimeout(() => {
+    void runAnnictWatchedImportDueJobs(client).catch((error) => {
+      client.logger.warn('annict watched import startup tick failed', { error: error.message });
+    });
+  }, 1000).unref?.();
 }
 
 async function establishSyncBaseline(client, guildId, discordUserId) {
@@ -1086,6 +1626,85 @@ async function handleSyncCommand(interaction) {
     `- 処理した作品: ${result.processedWorks || 0}`,
     `- 失敗した接続: ${result.failedConnections || 0}`
   ].join('\n'));
+}
+
+async function handleWatchedImportCommand(interaction) {
+  const action = interaction.options.getString('action', true);
+  const config = getWatchedImportConfig(interaction.client);
+  if (!config.enabled) {
+    await interaction.editReply('Annictの「見た」作品取り込みは現在無効です。');
+    return;
+  }
+
+  if (action === 'start') {
+    const connection = interaction.client.db.annictUserIntegration.getConnection(interaction.guildId, interaction.user.id);
+    if (!connection || connection.tokenStatus !== 'active') {
+      await interaction.editReply('Annictとはまだ連携されていません。`/annict connect` を実行してください。');
+      return;
+    }
+
+    const existing = interaction.client.db.annictUserIntegration.getWatchedImportJob(interaction.guildId, interaction.user.id);
+    const job = interaction.client.db.annictUserIntegration.startOrResumeWatchedImportJob({
+      guildId: interaction.guildId,
+      discordUserId: interaction.user.id,
+      nextRunAt: new Date().toISOString()
+    });
+    interaction.client.logger.info(existing ? 'annict watched import resumed' : 'annict watched import started', {
+      guildId: interaction.guildId,
+      discordUserId: interaction.user.id
+    });
+    setTimeout(() => {
+      void runAnnictWatchedImportDueJobs(interaction.client).catch((error) => {
+        interaction.client.logger.warn('annict watched import manual kick failed', { error: error.message });
+      });
+    }, 500).unref?.();
+
+    await interaction.editReply([
+      'Annictの「見た」作品取り込みを開始しました。',
+      '既存カードがある作品はスキップし、カードがない作品だけ少しずつ追加します。',
+      `- 状態: ${job?.status || 'active'}`,
+      `- 1バッチのカード作成上限: ${config.maxCardsPerBatch}`,
+      `- バッチ間隔: ${config.batchIntervalMinutes}分`
+    ].join('\n'));
+    return;
+  }
+
+  if (action === 'status') {
+    const job = interaction.client.db.annictUserIntegration.getWatchedImportJob(interaction.guildId, interaction.user.id);
+    if (!job) {
+      await interaction.editReply('Annictの「見た」作品取り込みジョブはまだありません。`/annict import-watched action:start` で開始できます。');
+      return;
+    }
+
+    await interaction.editReply([
+      'Annict「見た」作品取り込み状況',
+      `- 状態: ${job.status}`,
+      `- スキャン済み: ${Number(job.scannedCount || 0)}`,
+      `- 新規カード: ${Number(job.postedCount || 0)}`,
+      `- 既存カードをスキップ: ${Number(job.skippedExistingCount || 0)}`,
+      `- 削除/欠落カード修復: ${Number(job.repairedCount || 0)}`,
+      `- 失敗: ${Number(job.failedCount || 0)}`,
+      `- カーソル: ${compactCursor(job.graphqlCursor)}`,
+      `- 最終処理: ${formatJobDate(job.lastProcessedAt)}`,
+      `- 次回処理: ${formatJobDate(job.nextRunAt)}`,
+      `- 続きのページ: ${job.hasNextPage ? 'あり' : 'なし'}`
+    ].join('\n'));
+    return;
+  }
+
+  if (action === 'cancel') {
+    const job = interaction.client.db.annictUserIntegration.cancelWatchedImportJob(interaction.guildId, interaction.user.id);
+    interaction.client.logger.info('annict watched import cancelled', {
+      guildId: interaction.guildId,
+      discordUserId: interaction.user.id
+    });
+    await interaction.editReply(job
+      ? 'Annictの「見た」作品取り込みをキャンセルしました。作成済みカードは削除しません。再開する場合は `/annict import-watched action:start` を実行してください。'
+      : 'Annictの「見た」作品取り込みジョブはまだありません。');
+    return;
+  }
+
+  await interaction.editReply('未対応の取り込み操作です。');
 }
 
 async function handleImportHistoryButton(interaction) {
@@ -1763,6 +2382,10 @@ async function handleAnnictCommand(interaction) {
     await handleSyncCommand(interaction);
     return;
   }
+  if (subcommand === 'import-watched') {
+    await handleWatchedImportCommand(interaction);
+    return;
+  }
   await interaction.editReply('不明なAnnictコマンドです。');
 }
 
@@ -1803,8 +2426,11 @@ module.exports = {
   handleAnnictInteraction,
   handleAnnictIntroDmCandidate,
   handleAnnictPreviewMessageUpdate,
+  updateAnnictStatusForAnimeEntry,
   runAnnictUserSync,
   startAnnictUserSync,
+  runAnnictWatchedImportDueJobs,
+  startAnnictWatchedImportWorker,
   getRuntimeStatus,
   encryptAccessToken,
   decryptAccessToken,

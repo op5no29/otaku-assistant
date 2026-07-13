@@ -17,18 +17,10 @@ module.exports = {
     const targetUser = interaction.options.getUser('user') || interaction.user;
     const info = getNextMilestoneInfo(interaction.client, interaction.guildId, targetUser.id);
     const lines = [
-      `<@${targetUser.id}> の作業通話累計`,
-      `- 合計: ${formatDuration(info.totalSeconds, { largeCompact: true })}`,
-      `- 履歴復元分: ${formatDuration(info.historicalBackfillSeconds)}`,
-      `- 新規計測分: ${formatDuration(info.liveTrackedSeconds)}`,
-      info.openInterval ? `- 現在参加中の見込みを含む: はい` : `- 現在参加中の見込みを含む: いいえ`
+      `合計: ${formatDuration(info.totalSeconds, { largeCompact: true })}`,
+      `次のマイルストーン: ${info.nextMilestoneHours ? getMilestoneLabel(info.nextMilestoneHours) : 'なし'}`,
+      `次まで残り: ${info.nextMilestoneHours ? formatDuration(info.remainingSeconds) : 'なし'}`
     ];
-    if (info.nextMilestoneHours) {
-      lines.push(`- 次のマイルストーン: ${getMilestoneLabel(info.nextMilestoneHours)}`);
-      lines.push(`- 残り: ${formatDuration(info.remainingSeconds)}`);
-    } else {
-      lines.push('- 次のマイルストーン: 現在設定されている範囲ではありません');
-    }
     await interaction.editReply({
       content: lines.join('\n'),
       allowedMentions: { parse: [], users: [], roles: [] }

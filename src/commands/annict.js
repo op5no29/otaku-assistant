@@ -30,6 +30,22 @@ module.exports = {
             .setDescription('過去履歴も取り込みます（管理者が有効化している場合のみ）。')
             .setRequired(false)
         )
+    )
+    .addSubcommand((subcommand) =>
+      subcommand
+        .setName('import-watched')
+        .setDescription('Annictの「見た」作品を少しずつアニメカードへ取り込みます。')
+        .addStringOption((option) =>
+          option
+            .setName('action')
+            .setDescription('操作')
+            .setRequired(true)
+            .addChoices(
+              { name: 'start', value: 'start' },
+              { name: 'status', value: 'status' },
+              { name: 'cancel', value: 'cancel' }
+            )
+        )
     ),
 
   async execute(interaction) {

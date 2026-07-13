@@ -1205,6 +1205,34 @@ function createDatabase(databasePath) {
       FROM vc_work_user_totals
       WHERE guild_id = ?
     `),
+    listVcWorkRankingRows: sqlite.prepare(`
+      WITH users AS (
+        SELECT guild_id, user_id
+        FROM vc_work_user_totals
+        WHERE guild_id = ?
+        UNION
+        SELECT guild_id, user_id
+        FROM vc_work_presence_intervals
+        WHERE guild_id = ? AND status = 'open'
+      )
+      SELECT
+        users.guild_id AS guildId,
+        users.user_id AS userId,
+        COALESCE(t.total_seconds, 0) AS totalSeconds,
+        open_interval.started_at AS openStartedAt
+      FROM users
+      LEFT JOIN vc_work_user_totals t
+        ON t.guild_id = users.guild_id AND t.user_id = users.user_id
+      LEFT JOIN vc_work_presence_intervals open_interval
+        ON open_interval.guild_id = users.guild_id
+       AND open_interval.user_id = users.user_id
+       AND open_interval.status = 'open'
+      LEFT JOIN guild_members gm
+        ON gm.guild_id = users.guild_id AND gm.user_id = users.user_id
+      WHERE COALESCE(gm.is_bot, 0) = 0
+        AND gm.left_at IS NULL
+      ORDER BY users.user_id ASC
+    `),
     insertVcWorkMilestoneAward: sqlite.prepare(`
       INSERT OR IGNORE INTO vc_work_milestone_awards (
         guild_id,
@@ -2619,6 +2647,16 @@ function createDatabase(databasePath) {
           updated_at = ?
       WHERE id = ?
     `),
+    clearAnimeEntryMessageBindings: sqlite.prepare(`
+      UPDATE anime_entries
+      SET anime_channel_id = NULL,
+          anime_channel_message_id = NULL,
+          thread_id = NULL,
+          thread_card_message_id = NULL,
+          review_card_message_id = NULL,
+          updated_at = ?
+      WHERE id = ?
+    `),
     deleteAnimeCastByEntryId: sqlite.prepare(`
       DELETE FROM anime_cast_cache
       WHERE anime_entry_id = ?
@@ -3166,6 +3204,168 @@ function createDatabase(databasePath) {
       FROM annict_user_work_states
       WHERE guild_id = ? AND discord_user_id = ? AND annict_work_id = ?
       LIMIT 1
+    `),
+    getAnnictWatchedImportJob: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        discord_user_id AS discordUserId,
+        status,
+        graphql_cursor AS graphqlCursor,
+        has_next_page AS hasNextPage,
+        scanned_count AS scannedCount,
+        posted_count AS postedCount,
+        skipped_existing_count AS skippedExistingCount,
+        repaired_count AS repairedCount,
+        failed_count AS failedCount,
+        started_at AS startedAt,
+        last_processed_at AS lastProcessedAt,
+        next_run_at AS nextRunAt,
+        completed_at AS completedAt,
+        cancelled_at AS cancelledAt,
+        last_error_code AS lastErrorCode,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM annict_watched_import_jobs
+      WHERE guild_id = ? AND discord_user_id = ?
+      LIMIT 1
+    `),
+    listDueAnnictWatchedImportJobs: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        discord_user_id AS discordUserId,
+        status,
+        graphql_cursor AS graphqlCursor,
+        has_next_page AS hasNextPage,
+        scanned_count AS scannedCount,
+        posted_count AS postedCount,
+        skipped_existing_count AS skippedExistingCount,
+        repaired_count AS repairedCount,
+        failed_count AS failedCount,
+        started_at AS startedAt,
+        last_processed_at AS lastProcessedAt,
+        next_run_at AS nextRunAt,
+        completed_at AS completedAt,
+        cancelled_at AS cancelledAt,
+        last_error_code AS lastErrorCode,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM annict_watched_import_jobs
+      WHERE status = 'active'
+        AND (next_run_at IS NULL OR datetime(next_run_at) <= datetime(?))
+      ORDER BY datetime(COALESCE(next_run_at, started_at, created_at)) ASC
+      LIMIT ?
+    `),
+    upsertAnnictWatchedImportJob: sqlite.prepare(`
+      INSERT INTO annict_watched_import_jobs (
+        guild_id,
+        discord_user_id,
+        status,
+        graphql_cursor,
+        has_next_page,
+        scanned_count,
+        posted_count,
+        skipped_existing_count,
+        repaired_count,
+        failed_count,
+        started_at,
+        last_processed_at,
+        next_run_at,
+        completed_at,
+        cancelled_at,
+        last_error_code,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, discord_user_id) DO UPDATE SET
+        status = excluded.status,
+        next_run_at = excluded.next_run_at,
+        completed_at = excluded.completed_at,
+        cancelled_at = excluded.cancelled_at,
+        last_error_code = excluded.last_error_code,
+        updated_at = excluded.updated_at
+    `),
+    updateAnnictWatchedImportJobProgress: sqlite.prepare(`
+      UPDATE annict_watched_import_jobs
+      SET status = ?,
+          graphql_cursor = ?,
+          has_next_page = ?,
+          scanned_count = scanned_count + ?,
+          posted_count = posted_count + ?,
+          skipped_existing_count = skipped_existing_count + ?,
+          repaired_count = repaired_count + ?,
+          failed_count = failed_count + ?,
+          last_processed_at = ?,
+          next_run_at = ?,
+          completed_at = ?,
+          cancelled_at = ?,
+          last_error_code = ?,
+          updated_at = ?
+      WHERE guild_id = ? AND discord_user_id = ?
+    `),
+    upsertAnnictWatchedImportItem: sqlite.prepare(`
+      INSERT INTO annict_watched_import_items (
+        guild_id,
+        discord_user_id,
+        annict_work_id,
+        status,
+        anime_entry_id,
+        attempts,
+        last_error_code,
+        first_seen_at,
+        processed_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, discord_user_id, annict_work_id) DO UPDATE SET
+        status = excluded.status,
+        anime_entry_id = COALESCE(excluded.anime_entry_id, annict_watched_import_items.anime_entry_id),
+        attempts = annict_watched_import_items.attempts + excluded.attempts,
+        last_error_code = excluded.last_error_code,
+        processed_at = COALESCE(excluded.processed_at, annict_watched_import_items.processed_at),
+        updated_at = excluded.updated_at
+    `),
+    getAnnictWatchedImportItem: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        discord_user_id AS discordUserId,
+        annict_work_id AS annictWorkId,
+        anime_entry_id AS animeEntryId,
+        status,
+        attempts,
+        last_error_code AS lastErrorCode,
+        first_seen_at AS firstSeenAt,
+        processed_at AS processedAt,
+        updated_at AS updatedAt
+      FROM annict_watched_import_items
+      WHERE guild_id = ? AND discord_user_id = ? AND annict_work_id = ?
+      LIMIT 1
+    `),
+    getXProfileHeaderCache: sqlite.prepare(`
+      SELECT
+        normalized_handle AS normalizedHandle,
+        header_url AS headerUrl,
+        resolved_at AS resolvedAt,
+        expires_at AS expiresAt,
+        last_error_code AS lastErrorCode,
+        updated_at AS updatedAt
+      FROM x_profile_header_cache
+      WHERE normalized_handle = ?
+      LIMIT 1
+    `),
+    upsertXProfileHeaderCache: sqlite.prepare(`
+      INSERT INTO x_profile_header_cache (
+        normalized_handle,
+        header_url,
+        resolved_at,
+        expires_at,
+        last_error_code,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(normalized_handle) DO UPDATE SET
+        header_url = excluded.header_url,
+        resolved_at = excluded.resolved_at,
+        expires_at = excluded.expires_at,
+        last_error_code = excluded.last_error_code,
+        updated_at = excluded.updated_at
     `),
     upsertAnnictStatusWriteLog: sqlite.prepare(`
       INSERT INTO annict_status_write_log (
@@ -4164,6 +4364,9 @@ function createDatabase(databasePath) {
       listTotals(guildId) {
         return statements.listVcWorkTotals.all(guildId);
       },
+      listRankingRows(guildId) {
+        return statements.listVcWorkRankingRows.all(guildId, guildId);
+      },
       claimMilestone(record) {
         const now = new Date().toISOString();
         return statements.insertVcWorkMilestoneAward.run(
@@ -4685,6 +4888,9 @@ function createDatabase(databasePath) {
           id
         );
       },
+      clearBindings(id) {
+        statements.clearAnimeEntryMessageBindings.run(new Date().toISOString(), id);
+      },
       updateSpoilerFlag(id, hasSpoilerReviews) {
         statements.replaceAnimeEntrySpoilerFlag.run(hasSpoilerReviews ? 1 : 0, new Date().toISOString(), id);
       },
@@ -4948,6 +5154,127 @@ function createDatabase(databasePath) {
       getUserWorkState(guildId, discordUserId, annictWorkId) {
         return statements.getAnnictUserWorkState.get(guildId, discordUserId, annictWorkId) || null;
       },
+      getWatchedImportJob(guildId, discordUserId) {
+        return statements.getAnnictWatchedImportJob.get(guildId, discordUserId) || null;
+      },
+      listDueWatchedImportJobs(nowIso = new Date().toISOString(), limit = 5) {
+        return statements.listDueAnnictWatchedImportJobs.all(nowIso, limit);
+      },
+      startOrResumeWatchedImportJob({ guildId, discordUserId, nextRunAt = new Date().toISOString() }) {
+        const now = new Date().toISOString();
+        const existing = statements.getAnnictWatchedImportJob.get(guildId, discordUserId) || null;
+        statements.upsertAnnictWatchedImportJob.run(
+          guildId,
+          discordUserId,
+          'active',
+          existing?.graphqlCursor || null,
+          existing?.hasNextPage == null ? 1 : (existing.hasNextPage ? 1 : 0),
+          Number(existing?.scannedCount || 0),
+          Number(existing?.postedCount || 0),
+          Number(existing?.skippedExistingCount || 0),
+          Number(existing?.repairedCount || 0),
+          Number(existing?.failedCount || 0),
+          existing?.startedAt || now,
+          existing?.lastProcessedAt || null,
+          nextRunAt,
+          null,
+          null,
+          null,
+          existing?.createdAt || now,
+          now
+        );
+        return statements.getAnnictWatchedImportJob.get(guildId, discordUserId) || null;
+      },
+      cancelWatchedImportJob(guildId, discordUserId) {
+        const now = new Date().toISOString();
+        const existing = statements.getAnnictWatchedImportJob.get(guildId, discordUserId) || null;
+        if (!existing) {
+          return null;
+        }
+        statements.updateAnnictWatchedImportJobProgress.run(
+          'cancelled',
+          existing.graphqlCursor || null,
+          existing.hasNextPage == null ? 1 : (existing.hasNextPage ? 1 : 0),
+          0,
+          0,
+          0,
+          0,
+          0,
+          existing.lastProcessedAt || null,
+          null,
+          existing.completedAt || null,
+          now,
+          null,
+          now,
+          guildId,
+          discordUserId
+        );
+        return statements.getAnnictWatchedImportJob.get(guildId, discordUserId) || null;
+      },
+      updateWatchedImportJobProgress({
+        guildId,
+        discordUserId,
+        status = 'active',
+        graphqlCursor = null,
+        hasNextPage = true,
+        scannedDelta = 0,
+        postedDelta = 0,
+        skippedExistingDelta = 0,
+        repairedDelta = 0,
+        failedDelta = 0,
+        lastProcessedAt = null,
+        nextRunAt = null,
+        completedAt = null,
+        cancelledAt = null,
+        lastErrorCode = null
+      }) {
+        const now = new Date().toISOString();
+        return statements.updateAnnictWatchedImportJobProgress.run(
+          status,
+          graphqlCursor,
+          hasNextPage ? 1 : 0,
+          Number(scannedDelta || 0),
+          Number(postedDelta || 0),
+          Number(skippedExistingDelta || 0),
+          Number(repairedDelta || 0),
+          Number(failedDelta || 0),
+          lastProcessedAt,
+          nextRunAt,
+          completedAt,
+          cancelledAt,
+          lastErrorCode,
+          now,
+          guildId,
+          discordUserId
+        ).changes;
+      },
+      upsertWatchedImportItem({
+        guildId,
+        discordUserId,
+        annictWorkId,
+        status,
+        animeEntryId = null,
+        attemptsDelta = 0,
+        lastErrorCode = null,
+        processedAt = null
+      }) {
+        const now = new Date().toISOString();
+        statements.upsertAnnictWatchedImportItem.run(
+          guildId,
+          discordUserId,
+          annictWorkId,
+          status,
+          animeEntryId,
+          Number(attemptsDelta || 0),
+          lastErrorCode,
+          now,
+          processedAt,
+          now
+        );
+      },
+      getWatchedImportItem(guildId, discordUserId, annictWorkId) {
+        return statements.getAnnictWatchedImportItem.get(guildId, discordUserId, annictWorkId) || null;
+      },
       upsertStatusWriteLog({ guildId, discordUserId, annictWorkId, targetStatus, idempotencyKey, status, lastErrorCode = null }) {
         const now = new Date().toISOString();
         statements.upsertAnnictStatusWriteLog.run(
@@ -4981,6 +5308,21 @@ function createDatabase(databasePath) {
           record.status || 'pending',
           record.lastErrorCode || null,
           now
+        );
+      }
+    },
+    xProfileHeaders: {
+      get(normalizedHandle) {
+        return statements.getXProfileHeaderCache.get(normalizedHandle) || null;
+      },
+      upsert({ normalizedHandle, headerUrl = null, resolvedAt = null, expiresAt, lastErrorCode = null }) {
+        statements.upsertXProfileHeaderCache.run(
+          normalizedHandle,
+          headerUrl,
+          resolvedAt,
+          expiresAt,
+          lastErrorCode,
+          new Date().toISOString()
         );
       }
     },

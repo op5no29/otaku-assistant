@@ -336,6 +336,16 @@ function ensureVoiceWorkTimeConfig(value) {
   const cardValue = value?.milestoneCard && typeof value.milestoneCard === 'object' && !Array.isArray(value.milestoneCard)
     ? value.milestoneCard
     : {};
+  const configuredXProfileOverrides = cardValue.xProfileOverrides && typeof cardValue.xProfileOverrides === 'object' && !Array.isArray(cardValue.xProfileOverrides)
+    ? Object.fromEntries(Object.entries(cardValue.xProfileOverrides).map(([key, val]) => [String(key), String(val || '').trim()]).filter(([, val]) => val))
+    : {};
+  const xProfileOverrides = {
+    '1454160830487728391': 'https://x.com/_zahyou',
+    ...configuredXProfileOverrides
+  };
+  const xHeaderImageOverrides = cardValue.xHeaderImageOverrides && typeof cardValue.xHeaderImageOverrides === 'object' && !Array.isArray(cardValue.xHeaderImageOverrides)
+    ? Object.fromEntries(Object.entries(cardValue.xHeaderImageOverrides).map(([key, val]) => [String(key), String(val || '').trim()]).filter(([, val]) => val))
+    : {};
   const generatedValue = value?.generatedMilestones && typeof value.generatedMilestones === 'object' && !Array.isArray(value.generatedMilestones)
     ? value.generatedMilestones
     : {};
@@ -373,7 +383,9 @@ function ensureVoiceWorkTimeConfig(value) {
       footerBranding: String(cardValue.footerBranding || 'Otaku Assistant'),
       cacheTtlMinutes: Math.max(1, Number(cardValue.cacheTtlMinutes ?? 1440)),
       maxAssetBytes: Math.max(100_000, Number(cardValue.maxAssetBytes ?? 10_000_000)),
-      fetchTimeoutMs: Math.max(1000, Number(cardValue.fetchTimeoutMs ?? 10_000))
+      fetchTimeoutMs: Math.max(1000, Number(cardValue.fetchTimeoutMs ?? 10_000)),
+      xProfileOverrides,
+      xHeaderImageOverrides
     }
   };
 }
@@ -593,6 +605,15 @@ function ensureAnnictUserIntegrationConfig(value) {
       syncIntervalMinutes: 10,
       maxWorksPerSync: 100,
       initialImportEnabled: false,
+      watchedImport: {
+        enabled: true,
+        pageSize: 50,
+        maxCardsPerBatch: 3,
+        batchIntervalMinutes: 5,
+        delayBetweenCardsMs: 5000,
+        repairMissingMessages: true,
+        maxAttemptsPerWork: 3
+      },
       introDm: {
         enabled: true,
         excludedChannelIds: [],
@@ -606,6 +627,9 @@ function ensureAnnictUserIntegrationConfig(value) {
   const introDmValue = value.introDm && typeof value.introDm === 'object' && !Array.isArray(value.introDm)
     ? value.introDm
     : {};
+  const watchedImportValue = value.watchedImport && typeof value.watchedImport === 'object' && !Array.isArray(value.watchedImport)
+    ? value.watchedImport
+    : {};
 
   return {
     enabled: value.enabled !== false,
@@ -617,6 +641,15 @@ function ensureAnnictUserIntegrationConfig(value) {
     syncIntervalMinutes: Math.max(1, Number(value.syncIntervalMinutes ?? 10)),
     maxWorksPerSync: Math.max(1, Math.min(Number(value.maxWorksPerSync ?? 100), 100)),
     initialImportEnabled: value.initialImportEnabled === true,
+    watchedImport: {
+      enabled: watchedImportValue.enabled !== false,
+      pageSize: Math.max(1, Math.min(Number(watchedImportValue.pageSize ?? 50), 100)),
+      maxCardsPerBatch: Math.max(1, Math.min(Number(watchedImportValue.maxCardsPerBatch ?? 3), 10)),
+      batchIntervalMinutes: Math.max(1, Number(watchedImportValue.batchIntervalMinutes ?? 5)),
+      delayBetweenCardsMs: Math.max(0, Number(watchedImportValue.delayBetweenCardsMs ?? 5000)),
+      repairMissingMessages: watchedImportValue.repairMissingMessages !== false,
+      maxAttemptsPerWork: Math.max(1, Number(watchedImportValue.maxAttemptsPerWork ?? 3))
+    },
     introDm: {
       enabled: introDmValue.enabled !== false,
       excludedChannelIds: ensureArray(introDmValue.excludedChannelIds || [], 'annictUserIntegration.introDm.excludedChannelIds'),

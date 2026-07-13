@@ -9,6 +9,7 @@ const animeCommand = require('./anime');
 const rolePanelCommand = require('./rolePanel');
 const vcSummaryCommand = require('./vcSummary');
 const workTimeCommand = require('./workTime');
+const workRankingCommand = require('./workRanking');
 const knowledgeExportCommand = require('./knowledgeExport');
 const annictCommand = require('./annict');
 
@@ -24,6 +25,7 @@ const list = [
   rolePanelCommand,
   vcSummaryCommand,
   workTimeCommand,
+  workRankingCommand,
   knowledgeExportCommand,
   annictCommand
 ];

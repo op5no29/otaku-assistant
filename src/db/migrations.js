@@ -759,6 +759,54 @@ function runMigrations(database) {
     CREATE INDEX IF NOT EXISTS idx_annict_user_work_states_work
       ON annict_user_work_states (guild_id, annict_work_id);
 
+    CREATE TABLE IF NOT EXISTS annict_watched_import_jobs (
+      guild_id TEXT NOT NULL,
+      discord_user_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      graphql_cursor TEXT,
+      has_next_page INTEGER NOT NULL DEFAULT 1,
+      scanned_count INTEGER NOT NULL DEFAULT 0,
+      posted_count INTEGER NOT NULL DEFAULT 0,
+      skipped_existing_count INTEGER NOT NULL DEFAULT 0,
+      repaired_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      started_at TEXT,
+      last_processed_at TEXT,
+      next_run_at TEXT,
+      completed_at TEXT,
+      cancelled_at TEXT,
+      last_error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, discord_user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_annict_watched_import_jobs_due
+      ON annict_watched_import_jobs (status, next_run_at);
+
+    CREATE TABLE IF NOT EXISTS annict_watched_import_items (
+      guild_id TEXT NOT NULL,
+      discord_user_id TEXT NOT NULL,
+      annict_work_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      anime_entry_id INTEGER,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      last_error_code TEXT,
+      first_seen_at TEXT NOT NULL,
+      processed_at TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, discord_user_id, annict_work_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS x_profile_header_cache (
+      normalized_handle TEXT PRIMARY KEY,
+      header_url TEXT,
+      resolved_at TEXT,
+      expires_at TEXT NOT NULL,
+      last_error_code TEXT,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS annict_status_write_log (
       guild_id TEXT NOT NULL,
       discord_user_id TEXT NOT NULL,
@@ -1025,6 +1073,30 @@ function runMigrations(database) {
 
   if (annictFeatureIntroDmStateColumns.size && !annictFeatureIntroDmStateColumns.has('matched_term')) {
     database.exec('ALTER TABLE annict_feature_intro_dm_state ADD COLUMN matched_term TEXT');
+  }
+
+  const annictWatchedImportJobColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(annict_watched_import_jobs)')
+      .all()
+      .map((column) => column.name)
+  );
+  if (annictWatchedImportJobColumns.size && !annictWatchedImportJobColumns.has('has_next_page')) {
+    database.exec('ALTER TABLE annict_watched_import_jobs ADD COLUMN has_next_page INTEGER NOT NULL DEFAULT 1');
+  }
+
+  const annictWatchedImportItemColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(annict_watched_import_items)')
+      .all()
+      .map((column) => column.name)
+  );
+  if (annictWatchedImportItemColumns.size && !annictWatchedImportItemColumns.has('first_seen_at')) {
+    database.exec('ALTER TABLE annict_watched_import_items ADD COLUMN first_seen_at TEXT');
+    database.exec('UPDATE annict_watched_import_items SET first_seen_at = COALESCE(first_seen_at, created_at, updated_at, datetime(\'now\'))');
+  }
+  if (annictWatchedImportItemColumns.size && !annictWatchedImportItemColumns.has('processed_at')) {
+    database.exec('ALTER TABLE annict_watched_import_items ADD COLUMN processed_at TEXT');
   }
 
   const animeReviewPromptStateColumns = new Set(
