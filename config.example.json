@@ -54,7 +54,7 @@
       "enabled": true,
       "deleteMode": "on_next_session",
       "ttlMinutes": null,
-      "restoreLatestOnReady": true,
+      "restoreLatestOnReady": false,
       "messages": {
         "default": "通話チャンネルのご利用ありがとうございました。またお気軽にどうぞ。",
         "work": "集中作業、お疲れ様でした。",
@@ -69,6 +69,46 @@
         "chat": "通話お疲れ様でした。また気軽に遊びに来てください。",
         "longChat": "長時間の通話、お疲れ様でした。またゆっくり休んでください。"
       }
+    },
+    "shortActivity": {
+      "enabled": true,
+      "maxDisplayedEpisodes": 5,
+      "maxStoredEpisodes": 50,
+      "retentionDays": 7,
+      "includeAfk": false
+    }
+  },
+  "voiceWorkTime": {
+    "enabled": true,
+    "timezone": "Asia/Tokyo",
+    "tickIntervalSeconds": 60,
+    "channels": [
+      {
+        "voiceChannelId": "WORK_VOICE_CHANNEL_ID",
+        "categoryId": "CATEGORY_ID",
+        "profileChannelId": "VC_PROFILE_DISPLAY_CHANNEL_ID",
+        "listenChatChannelId": "LISTEN_ONLY_TEXT_CHANNEL_ID",
+        "label": "作業通話(超集中)"
+      }
+    ],
+    "milestoneHours": [1, 5, 10, 24, 48, 72, 100, 168, 200, 300, 336, 500, 720, 1000],
+    "generatedMilestones": {
+      "startExclusiveHours": 1000,
+      "everyHours": 500,
+      "throughHours": 10000
+    },
+    "milestoneCard": {
+      "enabled": true,
+      "width": 1200,
+      "height": 630,
+      "useDiscordBanner": true,
+      "useTwitterHeaderFallback": true,
+      "darkOverlayOpacity": 0.42,
+      "blurBackground": true,
+      "footerBranding": "Otaku Assistant",
+      "cacheTtlMinutes": 1440,
+      "maxAssetBytes": 10000000,
+      "fetchTimeoutMs": 10000
     }
   },
   "mediaRelay": {
@@ -158,6 +198,15 @@
       "323041740963446785"
     ]
   },
+  "knowledgeExport": {
+    "enabled": true,
+    "forumChannelId": "1503762457779376179",
+    "maxMessages": 5000,
+    "maxTotalAttachmentBytes": 50000000,
+    "fetchTimeoutMs": 15000,
+    "maxConcurrentExports": 2,
+    "timezone": "Asia/Tokyo"
+  },
   "introAddendums": {
     "enabled": true,
     "maxMessages": 500,
@@ -187,7 +236,13 @@
     "devUserId": "YOUR_DEV_USER_ID",
     "introChannelId": "YOUR_INTRO_CHANNEL_ID",
     "logChannelId": "YOUR_OPS_LOG_CHANNEL_ID",
-    "maxReminderCount": 3,
+    "maxAutomaticReminders": null,
+    "rapidRejoinWindowMinutes": 30,
+    "firstReminderJoinCount": 1,
+    "earlyReminderJoinCounts": [3, 6],
+    "repeatEveryQualifyingJoins": 5,
+    "minimumDaysBetweenReminders": 7,
+    "dmFailureCooldownDays": 14,
     "cooldownHoursByCount": [0, 24, 168],
     "failureCooldownHours": 24,
     "sendOnVoiceJoin": true
@@ -226,6 +281,24 @@
     "accessTokenEnv": "ANNICT_ACCESS_TOKEN",
     "timeoutMs": 15000,
     "cacheTtlHours": 24
+  },
+  "annictUserIntegration": {
+    "enabled": true,
+    "oauthClientIdEnv": "ANNICT_OAUTH_CLIENT_ID",
+    "oauthClientSecretEnv": "ANNICT_OAUTH_CLIENT_SECRET",
+    "tokenEncryptionKeyEnv": "ANNICT_TOKEN_ENCRYPTION_KEY",
+    "tokenEncryptionKeyId": "default",
+    "redirectUri": "urn:ietf:wg:oauth:2.0:oob",
+    "syncIntervalMinutes": 10,
+    "maxWorksPerSync": 100,
+    "initialImportEnabled": false,
+    "introDm": {
+      "enabled": true,
+      "excludedChannelIds": [],
+      "retryCooldownDays": 14,
+      "globalSendIntervalMs": 3000,
+      "minTitleLength": 4
+    }
   },
   "ops": {
     "logChannelId": "YOUR_OPS_LOG_CHANNEL_ID",

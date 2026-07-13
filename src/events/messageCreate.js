@@ -5,6 +5,7 @@ const { handleLlmMessage } = require('../modules/llm');
 const { handleIntroDmMessage } = require('../modules/introDm');
 const { saveIntroProfileFromMessage } = require('../modules/introProfiles');
 const { handleAnimeWatchedPromptReply } = require('../modules/anime');
+const { handleAnnictIntroDmCandidate } = require('../modules/annictUserIntegration');
 
 module.exports = {
   async execute(message) {
@@ -47,6 +48,16 @@ module.exports = {
       await applyWelcomeReactionsToMessage(message);
     } catch (error) {
       client.logger.error('Failed to apply welcome reactions', {
+        messageId: message.id,
+        channelId: message.channelId,
+        error: error.message
+      });
+    }
+
+    try {
+      await handleAnnictIntroDmCandidate(message);
+    } catch (error) {
+      client.logger.error('Failed to handle Annict feature intro DM candidate', {
         messageId: message.id,
         channelId: message.channelId,
         error: error.message

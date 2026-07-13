@@ -138,39 +138,23 @@ function buildVcReminderMessage(introChannelId) {
 
 function buildVcIntroReminderMessage(introChannelId, alreadySentCount = 0) {
   const introChannelLine = introChannelId ? [`<#${introChannelId}>`] : [];
-
-  if (alreadySentCount >= 2) {
-    return [
-      '何度もすみません。',
-      'まだ自己紹介が確認できていないため、念のためもう一度だけご連絡しています。',
-      '',
-      '通話に参加する方には、簡単な自己紹介の投稿をお願いしています。',
-      'お手すきの時に対応してもらえると助かります。',
-      '',
-      ...introChannelLine
-    ].join('\n').trim();
-  }
-
-  if (alreadySentCount >= 1) {
-    return [
-      '再度のご連絡ですみません。',
-      '以前もお願いしたのですが、まだ自己紹介が確認できていないようです。',
-      '',
-      '通話にいる人が誰なのかわかりやすくするため、簡単で大丈夫なので自己紹介チャンネルへの投稿をお願いします。',
-      'SNSリンクだけでも大丈夫です。',
-      '',
-      ...introChannelLine
-    ].join('\n').trim();
-  }
-
+  const variants = [
+    'VCへのご参加ありがとうございます。このサーバーでは、自己紹介を書いておくと通話中のプロフィールカードに活動内容などを表示できます。',
+    '以前もご案内しましたが、まだ自己紹介が確認できなかったため、改めてお知らせします。お時間のある時にご記入いただけると嬉しいです。',
+    '自己紹介を投稿すると、VC参加中にあなたの活動やSNSをほかの参加者が確認しやすくなります。',
+    '通話で初めて会う方にも活動内容が伝わるよう、よろしければ自己紹介をご登録ください。',
+    '再度のご案内です。自己紹介はいつでも投稿できます。',
+    '何度かVCをご利用いただいているため、改めて自己紹介機能をご案内します。投稿後はこのリマインドは届かなくなります。'
+  ];
+  const lead = variants[Math.max(0, Number(alreadySentCount || 0)) % variants.length];
   return [
-    'こんにちは！サーバーの通話に参加してくださってありがとうございます。',
-    'このサーバーでは、通話で話す人が誰なのかわかりやすくするために、自己紹介チャンネルへの投稿をお願いしています。',
+    lead,
     '',
-    'よければ、こちらの自己紹介チャンネルに簡単な自己紹介を書いてください。',
-    '映像・音楽・イラスト・開発など、やっていることやSNSリンクだけでも大丈夫です。',
+    '投稿先:',
+    ...introChannelLine,
     '',
-    ...introChannelLine
+    'プロフィールカードには、自己紹介文、活動内容、SNSやポートフォリオのリンクなどが表示されます。',
+    '自己紹介が確認できた後、このVC参加時リマインドは届かなくなります。'
   ].join('\n').trim();
 }
 
@@ -680,6 +664,25 @@ function hasElapsedSince(dateOrIso, hours) {
   return Date.now() >= next.getTime();
 }
 
+function shouldSendIntroVcReminderForJoin(config, qualifyingJoinCount) {
+  const count = Number(qualifyingJoinCount || 0);
+  if (count <= 0) {
+    return false;
+  }
+  if (count === Number(config.firstReminderJoinCount || 1)) {
+    return true;
+  }
+  const earlyCounts = (config.earlyReminderJoinCounts || [3, 6])
+    .map(Number)
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (new Set(earlyCounts).has(count)) {
+    return true;
+  }
+  const anchor = Math.max(Number(config.firstReminderJoinCount || 1), ...earlyCounts);
+  const every = Math.max(1, Number(config.repeatEveryQualifyingJoins || 5));
+  return count > anchor && (count - anchor) % every === 0;
+}
+
 function getVoiceChannelLabel(voiceChannel, channelId) {
   if (voiceChannel?.name) {
     return `${voiceChannel.name} (\`${voiceChannel.id || channelId}\`)`;
@@ -858,34 +861,54 @@ async function maybeSendVcNoIntroDmLocked(client, member, options = {}) {
   }
 
   const previousState = client.db.introVcReminder?.get?.(guildId, userId) || null;
+  if (
+    previousState?.lastDisconnectedAt &&
+    !hasElapsedSince(previousState.lastDisconnectedAt, Number(config.rapidRejoinWindowMinutes || 30) / 60)
+  ) {
+    logger.info('intro rapid rejoin ignored', {
+      guildId,
+      userId,
+      channelId,
+      lastDisconnectedAt: previousState.lastDisconnectedAt
+    });
+    return { ok: false, skippedReason: 'rapid_rejoin' };
+  }
   client.db.introVcReminder?.recordJoin?.({ guildId, userId, channelId, joinedAt: voiceJoinAt });
   const state = client.db.introVcReminder?.get?.(guildId, userId) || previousState || null;
   const reminderCount = Math.max(0, Number(state?.reminderCount || 0));
-  const maxReminderCount = Math.max(1, Number(config.maxReminderCount || 3));
+  const qualifyingJoinCount = Math.max(0, Number(state?.qualifyingJoinCount || 0));
+  logger.info('intro qualifying join counted', {
+    guildId,
+    userId,
+    channelId,
+    qualifyingJoinCount
+  });
 
-  if (reminderCount >= maxReminderCount) {
-    logger.info('intro reminder limit reached', {
+  if (config.maxReminderCount != null && reminderCount >= Number(config.maxReminderCount)) {
+    logger.info('intro reminder legacy limit reached', {
       guildId,
       userId,
-      reminderCount,
-      maxReminderCount
-    });
-    await sendIntroVcReminderReport(client, {
-      userId,
-      voiceChannel,
-      channelId,
-      reminderCount,
-      skippedReason: 'reminder_limit_reached'
+      reminderCount
     });
     return { ok: false, skippedReason: 'reminder_limit_reached' };
   }
 
-  const failureCooldownHours = Math.max(1, Number(config.failureCooldownHours || 24));
+  if (!shouldSendIntroVcReminderForJoin(config, qualifyingJoinCount)) {
+    logger.info('intro reminder DM skipped join cadence', {
+      guildId,
+      userId,
+      qualifyingJoinCount,
+      reminderCount
+    });
+    return { ok: false, skippedReason: 'join_cadence' };
+  }
+
+  const failureCooldownHours = Math.max(1, Number(config.dmFailureCooldownDays || 14) * 24);
   if (
     previousState?.lastError &&
-    !hasElapsedSince(previousState.updatedAt, failureCooldownHours)
+    !hasElapsedSince(previousState.lastFailureAt || previousState.updatedAt, failureCooldownHours)
   ) {
-    const nextEligibleAt = addHours(previousState.updatedAt, failureCooldownHours);
+    const nextEligibleAt = addHours(previousState.lastFailureAt || previousState.updatedAt, failureCooldownHours);
     logger.info('intro reminder DM skipped cooldown', {
       guildId,
       userId,
@@ -904,7 +927,7 @@ async function maybeSendVcNoIntroDmLocked(client, member, options = {}) {
     return { ok: false, skippedReason: 'dm_failed' };
   }
 
-  const cooldownHours = getIntroVcReminderCooldownHours(config, reminderCount);
+  const cooldownHours = Math.max(1, Number(config.minimumDaysBetweenReminders || 7) * 24);
   if (
     state?.lastSentAt &&
     !hasElapsedSince(state.lastSentAt, cooldownHours)

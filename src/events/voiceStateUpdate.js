@@ -1,5 +1,6 @@
 const { handleVoiceStateUpdate } = require('../modules/vcProfile');
 const { handleVoiceSessionStateUpdate } = require('../modules/vcSessionSummary');
+const { handleVoiceWorkTimeStateUpdate } = require('../modules/voiceWorkTime');
 const { updateGuildMemberVcJoined, upsertGuildMember } = require('../modules/guildMembers');
 const { maybeSendVcNoIntroDm } = require('../modules/introDm');
 
@@ -27,7 +28,25 @@ module.exports = {
       });
     }
 
+    try {
+      await handleVoiceWorkTimeStateUpdate(oldState, newState);
+    } catch (error) {
+      newState.client.logger.error('Failed to handle work VC time state', {
+        userId: newState.id,
+        oldChannelId: oldState.channelId,
+        newChannelId: newState.channelId,
+        error: error.message
+      });
+    }
+
     const member = newState.member || oldState.member || null;
+    if (member?.guild && oldState.channelId && !newState.channelId) {
+      newState.client.db.introVcReminder?.recordDisconnect?.({
+        guildId: member.guild.id,
+        userId: member.id,
+        leftAt: new Date().toISOString()
+      });
+    }
     if (!member?.guild || !newState.channelId || oldState.channelId) {
       return;
     }

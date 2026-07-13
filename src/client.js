@@ -49,6 +49,17 @@ function createBotClient({ appConfig, database, logger }) {
   client.activeLlmUsers = new Set();
   client.llmGlobalRequestActive = false;
   client.questionResolveLocks = new Set();
+  client.knowledgeExportThreadLocks = new Set();
+  client.knowledgeExportActiveCount = 0;
+  client.knowledgeExportUserCooldowns = new Map();
+  client.annictOauthStates = new Map();
+  client.annictStatusLocks = new Set();
+  client.annictSyncRunning = false;
+  client.annictSyncInterval = null;
+  client.annictIntroDmLocks = new Set();
+  client.annictIntroDmLastSentAt = 0;
+  client.annictIntroDmDelayedChecks = new Map();
+  client.annictIntroDmPreviewCache = new Map();
   client.questionRolePromptTimers = new Map();
   client.introDmQueueProcessing = false;
   client.introDmQueueInterval = null;
@@ -63,6 +74,8 @@ function createBotClient({ appConfig, database, logger }) {
   client.vcSessionEndCardTimers = new Map();
   client.voiceProfileReconcileInterval = null;
   client.voiceProfileUpdateQueues = new Map();
+  client.voiceWorkTimeLocks = new Set();
+  client.voiceWorkTimeInterval = null;
 
   client.once('clientReady', (...args) => readyEvent.execute(...args));
   client.on('threadCreate', (...args) => threadCreateEvent.execute(...args));

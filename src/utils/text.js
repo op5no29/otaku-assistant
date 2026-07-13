@@ -726,6 +726,7 @@ module.exports = {
   parseBotHashtagRoutes,
   parseGlobalHashtagRoutes,
   parseRelayHashtagPrefixes,
+  splitFileName,
   sanitizeDisplayFileName,
   hasSpoilerPrefix,
   stripSpoilerPrefix,

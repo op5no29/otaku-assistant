@@ -29,6 +29,20 @@ module.exports = {
         });
       }
 
+      const { handleAnnictInteraction } = require('../modules/annictUserIntegration');
+      try {
+        const handledAnnict = await handleAnnictInteraction(interaction);
+        if (handledAnnict) {
+          return;
+        }
+      } catch (error) {
+        interaction.client.logger.error('Annict user integration interaction failed', {
+          interactionId: interaction.id,
+          customId: interaction.customId || null,
+          error: error.message
+        });
+      }
+
       const animeCommand = interaction.client.commands.get('anime');
       if (animeCommand?.handleComponentInteraction) {
         try {

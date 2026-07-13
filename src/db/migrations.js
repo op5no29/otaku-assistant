@@ -122,6 +122,7 @@ function runMigrations(database) {
       profile_channel_id TEXT NOT NULL,
       voice_channel_id TEXT NOT NULL,
       joined_at TEXT NOT NULL,
+      joined_at_estimated INTEGER NOT NULL DEFAULT 0,
       updated_at TEXT NOT NULL,
       PRIMARY KEY (guild_id, user_id, category_id, profile_channel_id)
     );
@@ -252,6 +253,108 @@ function runMigrations(database) {
     CREATE INDEX IF NOT EXISTS idx_vc_voice_session_summary_messages_active_category
       ON vc_voice_session_summary_messages (guild_id, category_id, profile_channel_id, status, expires_at);
 
+    CREATE TABLE IF NOT EXISTS vc_short_activity_episodes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      stable_episode_key TEXT NOT NULL UNIQUE,
+      guild_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      profile_channel_id TEXT NOT NULL,
+      voice_channel_id TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      ended_at TEXT NOT NULL,
+      duration_seconds INTEGER NOT NULL DEFAULT 0,
+      participant_ids_json TEXT NOT NULL,
+      peak_human_count INTEGER NOT NULL DEFAULT 0,
+      close_reason TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_vc_short_activity_scope
+      ON vc_short_activity_episodes (guild_id, category_id, profile_channel_id, voice_channel_id, status, ended_at);
+
+    CREATE TABLE IF NOT EXISTS vc_short_activity_messages (
+      guild_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      profile_channel_id TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active',
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, category_id, profile_channel_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS vc_work_presence_intervals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      stable_interval_key TEXT NOT NULL UNIQUE,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      voice_channel_id TEXT NOT NULL,
+      listen_chat_channel_id TEXT,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      duration_seconds INTEGER NOT NULL DEFAULT 0,
+      source TEXT NOT NULL,
+      source_session_id TEXT,
+      source_member_key TEXT,
+      start_estimated INTEGER NOT NULL DEFAULT 0,
+      end_estimated INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vc_work_one_open_interval
+      ON vc_work_presence_intervals (guild_id, user_id)
+      WHERE status = 'open';
+
+    CREATE INDEX IF NOT EXISTS idx_vc_work_intervals_user
+      ON vc_work_presence_intervals (guild_id, user_id, started_at, ended_at);
+
+    CREATE TABLE IF NOT EXISTS vc_work_user_totals (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      total_seconds INTEGER NOT NULL DEFAULT 0,
+      historical_backfill_seconds INTEGER NOT NULL DEFAULT 0,
+      live_tracked_seconds INTEGER NOT NULL DEFAULT 0,
+      last_counted_at TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS vc_work_backfill_state (
+      guild_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      cutoff_at TEXT NOT NULL,
+      completed_at TEXT NOT NULL,
+      source_row_count INTEGER NOT NULL DEFAULT 0,
+      skipped_row_count INTEGER NOT NULL DEFAULT 0,
+      metadata_json TEXT,
+      PRIMARY KEY (guild_id, version)
+    );
+
+    CREATE TABLE IF NOT EXISTS vc_work_milestone_awards (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      milestone_hours INTEGER NOT NULL,
+      reached_at TEXT NOT NULL,
+      reached_in_voice_channel_id TEXT,
+      reached_in_category_id TEXT,
+      dm_status TEXT,
+      dm_message_id TEXT,
+      dm_sent_at TEXT,
+      public_status TEXT,
+      public_message_channel_id TEXT,
+      public_message_id TEXT,
+      public_sent_at TEXT,
+      card_status TEXT,
+      card_error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id, milestone_hours)
+    );
+
     CREATE TABLE IF NOT EXISTS relayed_message_targets (
       source_message_id TEXT NOT NULL,
       destination_channel_id TEXT NOT NULL,
@@ -373,9 +476,13 @@ function runMigrations(database) {
       guild_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
       reminder_count INTEGER NOT NULL DEFAULT 0,
+      qualifying_join_count INTEGER NOT NULL DEFAULT 0,
       first_sent_at TEXT,
       last_sent_at TEXT,
       last_voice_join_at TEXT,
+      last_qualifying_join_at TEXT,
+      last_disconnected_at TEXT,
+      last_failure_at TEXT,
       last_channel_id TEXT,
       last_dm_message_id TEXT,
       last_error TEXT,
@@ -601,6 +708,89 @@ function runMigrations(database) {
     CREATE INDEX IF NOT EXISTS idx_anime_hashtag_sources_status
       ON anime_hashtag_sources (guild_id, status, updated_at DESC);
 
+    CREATE TABLE IF NOT EXISTS annict_user_connections (
+      guild_id TEXT NOT NULL,
+      discord_user_id TEXT NOT NULL,
+      annict_resource_owner_id TEXT NOT NULL,
+      encrypted_access_token TEXT NOT NULL,
+      token_iv TEXT NOT NULL,
+      token_auth_tag TEXT NOT NULL,
+      encryption_version INTEGER NOT NULL,
+      encryption_key_id TEXT NOT NULL DEFAULT 'default',
+      scopes_json TEXT NOT NULL,
+      connected_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_successful_sync_at TEXT,
+      sync_cursor_json TEXT,
+      token_status TEXT NOT NULL,
+      last_error_code TEXT,
+      PRIMARY KEY (guild_id, discord_user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_annict_user_connections_status
+      ON annict_user_connections (guild_id, token_status, updated_at);
+
+    CREATE TABLE IF NOT EXISTS annict_oauth_states (
+      state TEXT PRIMARY KEY,
+      guild_id TEXT NOT NULL,
+      discord_user_id TEXT NOT NULL,
+      redirect_uri TEXT NOT NULL,
+      scopes_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      consumed_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_annict_oauth_states_user
+      ON annict_oauth_states (guild_id, discord_user_id, expires_at);
+
+    CREATE TABLE IF NOT EXISTS annict_user_work_states (
+      guild_id TEXT NOT NULL,
+      discord_user_id TEXT NOT NULL,
+      annict_work_id TEXT NOT NULL,
+      anime_entry_id INTEGER,
+      status TEXT NOT NULL,
+      source TEXT NOT NULL,
+      source_updated_at TEXT,
+      synced_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, discord_user_id, annict_work_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_annict_user_work_states_work
+      ON annict_user_work_states (guild_id, annict_work_id);
+
+    CREATE TABLE IF NOT EXISTS annict_status_write_log (
+      guild_id TEXT NOT NULL,
+      discord_user_id TEXT NOT NULL,
+      annict_work_id TEXT NOT NULL,
+      target_status TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      status TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_error_code TEXT,
+      PRIMARY KEY (guild_id, discord_user_id, annict_work_id, target_status)
+    );
+
+    CREATE TABLE IF NOT EXISTS annict_feature_intro_dm_state (
+      guild_id TEXT NOT NULL,
+      discord_user_id TEXT NOT NULL,
+      trigger_message_id TEXT,
+      trigger_type TEXT,
+      matched_term TEXT,
+      matched_anime_entry_id INTEGER,
+      first_triggered_at TEXT NOT NULL,
+      sent_at TEXT,
+      dm_message_id TEXT,
+      status TEXT NOT NULL,
+      last_error_code TEXT,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, discord_user_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_annict_feature_intro_dm_status
+      ON annict_feature_intro_dm_state (guild_id, status, updated_at);
+
     CREATE TABLE IF NOT EXISTS bot_deletable_messages (
       guild_id TEXT NOT NULL,
       channel_id TEXT NOT NULL,
@@ -691,6 +881,17 @@ function runMigrations(database) {
 
   if (!vcProfileColumns.has('voice_channel_name')) {
     database.exec('ALTER TABLE vc_profile_messages ADD COLUMN voice_channel_name TEXT');
+  }
+
+  const vcProfileMemberSessionColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(vc_profile_member_sessions)')
+      .all()
+      .map((column) => column.name)
+  );
+
+  if (vcProfileMemberSessionColumns.size && !vcProfileMemberSessionColumns.has('joined_at_estimated')) {
+    database.exec('ALTER TABLE vc_profile_member_sessions ADD COLUMN joined_at_estimated INTEGER NOT NULL DEFAULT 0');
   }
 
   const questionThreadColumns = new Set(
@@ -793,6 +994,37 @@ function runMigrations(database) {
 
   if (introDmStateColumns.size && !introDmStateColumns.has('status')) {
     database.exec("ALTER TABLE intro_dm_state ADD COLUMN status TEXT NOT NULL DEFAULT 'pending'");
+  }
+
+  const introVcReminderColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(intro_vc_reminder_state)')
+      .all()
+      .map((column) => column.name)
+  );
+
+  if (introVcReminderColumns.size && !introVcReminderColumns.has('qualifying_join_count')) {
+    database.exec('ALTER TABLE intro_vc_reminder_state ADD COLUMN qualifying_join_count INTEGER NOT NULL DEFAULT 0');
+  }
+  if (introVcReminderColumns.size && !introVcReminderColumns.has('last_qualifying_join_at')) {
+    database.exec('ALTER TABLE intro_vc_reminder_state ADD COLUMN last_qualifying_join_at TEXT');
+  }
+  if (introVcReminderColumns.size && !introVcReminderColumns.has('last_disconnected_at')) {
+    database.exec('ALTER TABLE intro_vc_reminder_state ADD COLUMN last_disconnected_at TEXT');
+  }
+  if (introVcReminderColumns.size && !introVcReminderColumns.has('last_failure_at')) {
+    database.exec('ALTER TABLE intro_vc_reminder_state ADD COLUMN last_failure_at TEXT');
+  }
+
+  const annictFeatureIntroDmStateColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(annict_feature_intro_dm_state)')
+      .all()
+      .map((column) => column.name)
+  );
+
+  if (annictFeatureIntroDmStateColumns.size && !annictFeatureIntroDmStateColumns.has('matched_term')) {
+    database.exec('ALTER TABLE annict_feature_intro_dm_state ADD COLUMN matched_term TEXT');
   }
 
   const animeReviewPromptStateColumns = new Set(

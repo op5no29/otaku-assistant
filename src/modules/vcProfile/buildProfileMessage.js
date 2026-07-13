@@ -83,7 +83,15 @@ function truncateIntroText(text, maxLength) {
 
 function buildMemberSection(member, { compact = false } = {}) {
   const displayName = member.displayName || '不明なメンバー';
-  const headingName = member.mention || (member.id ? `<@${member.id}>` : displayName);
+  const headingBits = [];
+  if (member.joinedAtLabel) {
+    headingBits.push(`参加 ${member.joinedAtLabel}`);
+  }
+  if (member.workTotalLabel) {
+    headingBits.push(`累計作業 ${member.workTotalLabel}`);
+  }
+  const suffix = headingBits.length ? `（${headingBits.join('・')}）` : '';
+  const headingName = `${member.mention || (member.id ? `<@${member.id}>` : displayName)}${suffix}`;
   const introSummary = member.introSummary?.trim()
     ? truncateIntroText(member.introSummary, compact ? COMPACT_INTRO_TEXT_MAX_LENGTH : INTRO_TEXT_MAX_LENGTH)
     : '自己紹介がまだありません';

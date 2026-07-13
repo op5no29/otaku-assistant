@@ -1,6 +1,7 @@
 const { updateTweetTimelineCard, handleRouteAddedOnMessageUpdate } = require('../modules/timelineRelay');
 const { saveMessageToArchive } = require('../modules/messageArchive');
 const { saveIntroProfileFromMessage } = require('../modules/introProfiles');
+const { handleAnnictPreviewMessageUpdate } = require('../modules/annictUserIntegration');
 
 module.exports = {
   async execute(oldMessage, newMessage) {
@@ -41,6 +42,16 @@ module.exports = {
       });
     } catch (error) {
       client.logger.error('Failed to handle messageUpdate route-added relay', {
+        messageId: newMessage.id,
+        channelId: newMessage.channelId,
+        error: error.message
+      });
+    }
+
+    try {
+      await handleAnnictPreviewMessageUpdate(oldMessage, newMessage);
+    } catch (error) {
+      client.logger.error('Failed to handle Annict intro preview update', {
         messageId: newMessage.id,
         channelId: newMessage.channelId,
         error: error.message

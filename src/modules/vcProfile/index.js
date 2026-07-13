@@ -4,6 +4,8 @@ const { buildProfileMessage } = require('./buildProfileMessage');
 const { findLatestIntroMessage } = require('./findLatestIntroMessage');
 const { parseAccentColor } = require('../../utils/accentColors');
 const { deleteActiveVoiceSessionEndCardsForCategory } = require('../vcSessionSummary');
+const { getChannelConfig: getWorkChannelConfig, getProjectedTotalSeconds, formatDuration: formatWorkDuration } = require('../voiceWorkTime');
+const { hideShortActivityCardForLiveProfile, updateShortActivityCard } = require('../vcShortActivity');
 
 const DISCORD_COMPONENT_LIMIT = 40;
 const DEFAULT_MEMBERS_PER_PAGE = 6;
@@ -113,6 +115,26 @@ function formatRecentLeaveRelativeTime(leftAt, now = new Date()) {
 
   const diffMinutes = Math.max(1, Math.floor((now.getTime() - parsed) / 60_000));
   return `${diffMinutes}分前`;
+}
+
+function formatJoinTimeLabel(iso, timezone = 'Asia/Tokyo') {
+  if (!iso) {
+    return null;
+  }
+  try {
+    const parts = new Intl.DateTimeFormat('ja-JP', {
+      timeZone: timezone,
+      month: 'numeric',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23'
+    }).formatToParts(new Date(iso));
+    const byType = new Map(parts.map((part) => [part.type, part.value]));
+    return `${Number(byType.get('month'))}/${Number(byType.get('day'))} ${byType.get('hour')}:${byType.get('minute')}`;
+  } catch {
+    return null;
+  }
 }
 
 function selectRandomSessionAccentColor() {
@@ -624,7 +646,11 @@ async function buildVoiceMemberProfiles(client, humanEntries, { guildId, categor
         avatarUrl,
         introSummary,
         voiceChannelId: entry.channelId || null,
-        joinedAt: entry.joinedAt || null
+        joinedAt: entry.joinedAt || null,
+        joinedAtLabel: formatJoinTimeLabel(entry.joinedAt, client.appConfig.voiceWorkTime?.timezone || 'Asia/Tokyo'),
+        workTotalLabel: getWorkChannelConfig(client, entry.channelId)
+          ? formatWorkDuration(getProjectedTotalSeconds(client, guildId, member.id).totalSeconds, { largeCompact: true })
+          : null
       };
     })
   );
@@ -894,7 +920,7 @@ function ensureCategoryMemberSessions(client, {
         categoryId,
         profileChannelId,
         voiceChannelId: entry.channelId,
-        joinedAt: session.joinedAt,
+        joinedAt: fallbackJoinedAtByUserId.get(userId),
         reason: `${reason}_channel_update`
       });
     }
@@ -1514,6 +1540,55 @@ async function cleanupEmptyCategoryProfile(client, {
     reason: `${reason}_empty_category`
   });
 
+  const endedAt = new Date().toISOString();
+  const existingMemberSessions = client.db.vcProfiles.listMemberSessions({
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id
+  });
+  const sessionsByChannel = new Map();
+  for (const session of existingMemberSessions) {
+    const key = String(session.voiceChannelId || '');
+    if (!key) continue;
+    if (!sessionsByChannel.has(key)) sessionsByChannel.set(key, []);
+    sessionsByChannel.get(key).push(session);
+  }
+  for (const [voiceChannelId, sessions] of sessionsByChannel) {
+    if (sessions.length !== 1) {
+      continue;
+    }
+    const session = sessions[0];
+    const startedAt = session.joinedAt;
+    const durationSeconds = Math.floor((new Date(endedAt).getTime() - new Date(startedAt || 0).getTime()) / 1000);
+    if (!startedAt || durationSeconds <= 0) {
+      continue;
+    }
+    const stableEpisodeKey = `${guildId}:solo:${categoryId}:${profileChannel.id}:${voiceChannelId}:${session.userId}:${startedAt}:${endedAt}`;
+    const inserted = client.db.vcShortActivity?.insertEpisode?.({
+      stableEpisodeKey,
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      voiceChannelId,
+      startedAt,
+      endedAt,
+      durationSeconds,
+      participantIds: [session.userId],
+      peakHumanCount: 1,
+      closeReason: 'solo_profile_cleanup'
+    });
+    client.logger.info(inserted ? 'vc short activity episode recorded' : 'vc short activity duplicate prevented', {
+      guildId,
+      categoryId,
+      profileChannelId: profileChannel.id,
+      voiceChannelId,
+      userId: session.userId,
+      stableEpisodeKey,
+      durationSeconds,
+      reason: 'solo_profile_cleanup'
+    });
+  }
+
   const deletedCategoryRows = client.db.vcProfiles.deleteCategoryMessage({
     guildId,
     categoryId,
@@ -1542,6 +1617,11 @@ async function cleanupEmptyCategoryProfile(client, {
       reason
     });
   }
+  await updateShortActivityCard(client, {
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id
+  }).catch(() => null);
 
   client.logger.info('vc profile empty category cleanup finished', {
     guildId,
@@ -1842,6 +1922,11 @@ async function syncVoiceProfileCategoryLocked(client, guild, categoryId, mapping
     profileChannelId: profileChannel.id,
     reason: 'new_live_session'
   });
+  await hideShortActivityCardForLiveProfile(client, {
+    guildId,
+    categoryId,
+    profileChannelId: profileChannel.id
+  }).catch(() => null);
 
   const accentColor = resolveCategoryAccentColor(client, {
     guildId,

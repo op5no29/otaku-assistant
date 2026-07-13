@@ -119,6 +119,23 @@ function buildLinkRows({ threadUrl, siteUrl, parentUrl, provider = null }) {
   return [new ActionRowBuilder().addComponents(...buttons.slice(0, 5))];
 }
 
+function buildAnnictActionRow(entry) {
+  if (!entry?.id || String(entry?.provider || '') !== 'annict') {
+    return null;
+  }
+
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`annict:anime:interested:${entry.id}`)
+      .setLabel('気になる')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId(`annict:anime:watched:${entry.id}`)
+      .setLabel('視聴済み')
+      .setStyle(ButtonStyle.Secondary)
+  );
+}
+
 function buildAnimeChannelCard(entry, stats, cast = [], latestReviews = []) {
   const container = createContainer(stats?.hasSpoilerReviews ? 0xfca5a5 : ANIME_PARENT_ACCENT);
   const iconImageUrl = entry.resolvedIconUrl || entry.coverImageUrl || null;
@@ -171,6 +188,10 @@ function buildAnimeChannelCard(entry, stats, cast = [], latestReviews = []) {
       new TextDisplayBuilder().setContent('⚠️ この作品のスレッドにはネタバレ感想が含まれています。')
     );
   }
+  const annictActionRow = buildAnnictActionRow(entry);
+  if (annictActionRow) {
+    container.addActionRowComponents(annictActionRow);
+  }
   for (const row of buildLinkRows({
     threadUrl: stats?.threadUrl || null,
     siteUrl: entry.siteUrl || null,
@@ -211,6 +232,11 @@ function buildAnimeReviewUiCard(entry, stats, latestReviews = []) {
     container.addTextDisplayComponents(
       new TextDisplayBuilder().setContent('⚠️ ネタバレ感想あり')
     );
+  }
+
+  const annictActionRow = buildAnnictActionRow(entry);
+  if (annictActionRow) {
+    container.addActionRowComponents(annictActionRow);
   }
 
   for (const row of buildLinkRows({

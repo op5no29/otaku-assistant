@@ -200,6 +200,7 @@ function ensureIntroDmConfig(value, introChannelId = '') {
 }
 
 function ensureIntroVcReminderConfig(value, introDmConfig = {}, fallbackLogChannelId = '') {
+  const defaultEarlyCounts = [3, 6];
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return {
       enabled: introDmConfig.enabled === true,
@@ -207,10 +208,16 @@ function ensureIntroVcReminderConfig(value, introDmConfig = {}, fallbackLogChann
       devUserId: String(introDmConfig.devUserId || ''),
       introChannelId: String(introDmConfig.introChannelId || ''),
       logChannelId: String(introDmConfig.logChannelId || fallbackLogChannelId || ''),
-      maxReminderCount: 3,
+      maxReminderCount: null,
       cooldownHoursByCount: [0, 24, 168],
       failureCooldownHours: 24,
-      sendOnVoiceJoin: true
+      sendOnVoiceJoin: true,
+      rapidRejoinWindowMinutes: 30,
+      firstReminderJoinCount: 1,
+      earlyReminderJoinCounts: defaultEarlyCounts,
+      repeatEveryQualifyingJoins: 5,
+      minimumDaysBetweenReminders: 7,
+      dmFailureCooldownDays: 14
     };
   }
 
@@ -224,10 +231,20 @@ function ensureIntroVcReminderConfig(value, introDmConfig = {}, fallbackLogChann
     devUserId: String(value.devUserId || introDmConfig.devUserId || ''),
     introChannelId: String(value.introChannelId || introDmConfig.introChannelId || ''),
     logChannelId: String(value.logChannelId || introDmConfig.logChannelId || fallbackLogChannelId || ''),
-    maxReminderCount: Math.max(1, Number(value.maxReminderCount ?? 3)),
+    maxReminderCount: value.maxAutomaticReminders == null && value.maxReminderCount == null
+      ? null
+      : Math.max(1, Number(value.maxAutomaticReminders ?? value.maxReminderCount)),
     cooldownHoursByCount: rawCooldowns.map((entry) => Math.max(0, Number(entry || 0))),
     failureCooldownHours: Math.max(1, Number(value.failureCooldownHours ?? 24)),
-    sendOnVoiceJoin: value.sendOnVoiceJoin !== false
+    sendOnVoiceJoin: value.sendOnVoiceJoin !== false,
+    rapidRejoinWindowMinutes: Math.max(1, Number(value.rapidRejoinWindowMinutes ?? 30)),
+    firstReminderJoinCount: Math.max(1, Number(value.firstReminderJoinCount ?? 1)),
+    earlyReminderJoinCounts: ensureArray(value.earlyReminderJoinCounts || defaultEarlyCounts, 'introVcReminder.earlyReminderJoinCounts')
+      .map((entry) => Math.max(1, Number(entry || 0)))
+      .filter((entry) => Number.isFinite(entry)),
+    repeatEveryQualifyingJoins: Math.max(1, Number(value.repeatEveryQualifyingJoins ?? 5)),
+    minimumDaysBetweenReminders: Math.max(1, Number(value.minimumDaysBetweenReminders ?? 7)),
+    dmFailureCooldownDays: Math.max(1, Number(value.dmFailureCooldownDays ?? 14))
   };
 }
 
@@ -236,7 +253,7 @@ function ensureVoiceSessionSummaryConfig(value) {
     enabled: true,
     deleteMode: 'on_next_session',
     ttlMinutes: null,
-    restoreLatestOnReady: true,
+    restoreLatestOnReady: false,
     messages: {
       default: '通話チャンネルのご利用ありがとうございました。またお気軽にどうぞ。',
       work: '集中作業、お疲れ様でした。',
@@ -262,7 +279,14 @@ function ensureVoiceSessionSummaryConfig(value) {
       summaryLookbackHours: 24,
       maxEventsToShow: 10,
       reconcileIntervalMinutes: 5,
-      endCard: defaultEndCard
+      endCard: defaultEndCard,
+      shortActivity: {
+        enabled: true,
+        maxDisplayedEpisodes: 5,
+        maxStoredEpisodes: 50,
+        retentionDays: 7,
+        includeAfk: false
+      }
     };
   }
 
@@ -287,7 +311,7 @@ function ensureVoiceSessionSummaryConfig(value) {
       ttlMinutes: endCardValue.deleteMode === 'ttl'
         ? Math.max(1, Number(endCardValue.ttlMinutes ?? 30))
         : null,
-      restoreLatestOnReady: endCardValue.restoreLatestOnReady !== false,
+      restoreLatestOnReady: endCardValue.restoreLatestOnReady === true,
       messages: {
         ...defaultEndCard.messages,
         ...Object.fromEntries(
@@ -296,6 +320,60 @@ function ensureVoiceSessionSummaryConfig(value) {
             .filter(([, message]) => message.length > 0)
         )
       }
+    },
+    shortActivity: {
+      enabled: value.shortActivity?.enabled !== false,
+      maxDisplayedEpisodes: Math.max(1, Math.min(Number(value.shortActivity?.maxDisplayedEpisodes ?? 5), 20)),
+      maxStoredEpisodes: Math.max(1, Math.min(Number(value.shortActivity?.maxStoredEpisodes ?? 50), 500)),
+      retentionDays: Math.max(1, Number(value.shortActivity?.retentionDays ?? 7)),
+      includeAfk: value.shortActivity?.includeAfk === true
+    }
+  };
+}
+
+function ensureVoiceWorkTimeConfig(value) {
+  const defaultMilestoneHours = [1, 5, 10, 24, 48, 72, 100, 168, 200, 300, 336, 500, 720, 1000];
+  const cardValue = value?.milestoneCard && typeof value.milestoneCard === 'object' && !Array.isArray(value.milestoneCard)
+    ? value.milestoneCard
+    : {};
+  const generatedValue = value?.generatedMilestones && typeof value.generatedMilestones === 'object' && !Array.isArray(value.generatedMilestones)
+    ? value.generatedMilestones
+    : {};
+  const channels = Array.isArray(value?.channels)
+    ? value.channels.map((entry) => ({
+        voiceChannelId: String(entry?.voiceChannelId || '').trim(),
+        categoryId: String(entry?.categoryId || '').trim(),
+        profileChannelId: String(entry?.profileChannelId || '').trim(),
+        listenChatChannelId: String(entry?.listenChatChannelId || '').trim(),
+        label: String(entry?.label || '').trim()
+      })).filter((entry) => entry.voiceChannelId)
+    : [];
+
+  return {
+    enabled: value?.enabled === true,
+    timezone: String(value?.timezone || 'Asia/Tokyo'),
+    tickIntervalSeconds: Math.max(30, Number(value?.tickIntervalSeconds ?? 60)),
+    channels,
+    milestoneHours: Array.isArray(value?.milestoneHours)
+      ? value.milestoneHours.map((entry) => Math.max(1, Number(entry || 0))).filter(Number.isFinite)
+      : defaultMilestoneHours,
+    generatedMilestones: {
+      startExclusiveHours: Math.max(1, Number(generatedValue.startExclusiveHours ?? 1000)),
+      everyHours: Math.max(1, Number(generatedValue.everyHours ?? 500)),
+      throughHours: Math.max(1, Number(generatedValue.throughHours ?? 10000))
+    },
+    milestoneCard: {
+      enabled: cardValue.enabled !== false,
+      width: Math.max(600, Number(cardValue.width ?? 1200)),
+      height: Math.max(315, Number(cardValue.height ?? 630)),
+      useDiscordBanner: cardValue.useDiscordBanner !== false,
+      useTwitterHeaderFallback: cardValue.useTwitterHeaderFallback !== false,
+      darkOverlayOpacity: Math.max(0, Math.min(Number(cardValue.darkOverlayOpacity ?? 0.42), 1)),
+      blurBackground: cardValue.blurBackground !== false,
+      footerBranding: String(cardValue.footerBranding || 'Otaku Assistant'),
+      cacheTtlMinutes: Math.max(1, Number(cardValue.cacheTtlMinutes ?? 1440)),
+      maxAssetBytes: Math.max(100_000, Number(cardValue.maxAssetBytes ?? 10_000_000)),
+      fetchTimeoutMs: Math.max(1000, Number(cardValue.fetchTimeoutMs ?? 10_000))
     }
   };
 }
@@ -410,6 +488,30 @@ function ensurePosthocRelayConfig(value) {
   };
 }
 
+function ensureKnowledgeExportConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      enabled: true,
+      forumChannelId: '1503762457779376179',
+      maxMessages: 5000,
+      maxTotalAttachmentBytes: 50_000_000,
+      fetchTimeoutMs: 15_000,
+      maxConcurrentExports: 2,
+      timezone: 'Asia/Tokyo'
+    };
+  }
+
+  return {
+    enabled: value.enabled !== false,
+    forumChannelId: String(value.forumChannelId || '1503762457779376179'),
+    maxMessages: Math.max(1, Math.min(Number(value.maxMessages ?? 5000), 10_000)),
+    maxTotalAttachmentBytes: Math.max(0, Number(value.maxTotalAttachmentBytes ?? 50_000_000)),
+    fetchTimeoutMs: Math.max(1000, Number(value.fetchTimeoutMs ?? 15_000)),
+    maxConcurrentExports: Math.max(1, Number(value.maxConcurrentExports ?? 2)),
+    timezone: String(value.timezone || 'Asia/Tokyo')
+  };
+}
+
 function ensureAnimeConfig(value) {
   const defaultReviewRoles = [
     { threshold: 10, roleId: null, name: 'アニメ視聴者 Lv.1' },
@@ -479,6 +581,52 @@ function ensureAnnictConfig(value) {
   };
 }
 
+function ensureAnnictUserIntegrationConfig(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      enabled: true,
+      oauthClientIdEnv: 'ANNICT_OAUTH_CLIENT_ID',
+      oauthClientSecretEnv: 'ANNICT_OAUTH_CLIENT_SECRET',
+      tokenEncryptionKeyEnv: 'ANNICT_TOKEN_ENCRYPTION_KEY',
+      tokenEncryptionKeyId: 'default',
+      redirectUri: 'urn:ietf:wg:oauth:2.0:oob',
+      syncIntervalMinutes: 10,
+      maxWorksPerSync: 100,
+      initialImportEnabled: false,
+      introDm: {
+        enabled: true,
+        excludedChannelIds: [],
+        retryCooldownDays: 14,
+        globalSendIntervalMs: 3000,
+        minTitleLength: 4
+      }
+    };
+  }
+
+  const introDmValue = value.introDm && typeof value.introDm === 'object' && !Array.isArray(value.introDm)
+    ? value.introDm
+    : {};
+
+  return {
+    enabled: value.enabled !== false,
+    oauthClientIdEnv: String(value.oauthClientIdEnv || 'ANNICT_OAUTH_CLIENT_ID'),
+    oauthClientSecretEnv: String(value.oauthClientSecretEnv || 'ANNICT_OAUTH_CLIENT_SECRET'),
+    tokenEncryptionKeyEnv: String(value.tokenEncryptionKeyEnv || 'ANNICT_TOKEN_ENCRYPTION_KEY'),
+    tokenEncryptionKeyId: String(value.tokenEncryptionKeyId || 'default'),
+    redirectUri: String(value.redirectUri || 'urn:ietf:wg:oauth:2.0:oob'),
+    syncIntervalMinutes: Math.max(1, Number(value.syncIntervalMinutes ?? 10)),
+    maxWorksPerSync: Math.max(1, Math.min(Number(value.maxWorksPerSync ?? 100), 100)),
+    initialImportEnabled: value.initialImportEnabled === true,
+    introDm: {
+      enabled: introDmValue.enabled !== false,
+      excludedChannelIds: ensureArray(introDmValue.excludedChannelIds || [], 'annictUserIntegration.introDm.excludedChannelIds'),
+      retryCooldownDays: Math.max(1, Number(introDmValue.retryCooldownDays ?? 14)),
+      globalSendIntervalMs: Math.max(1000, Number(introDmValue.globalSendIntervalMs ?? 3000)),
+      minTitleLength: Math.max(4, Number(introDmValue.minTitleLength ?? 4))
+    }
+  };
+}
+
 function loadConfig(configPath) {
   if (!process.env.DISCORD_TOKEN) {
     throw new Error('DISCORD_TOKEN is missing in .env');
@@ -537,6 +685,7 @@ function loadConfig(configPath) {
       channelStatusLabels: ensureStringMap(parsed.voiceProfile?.channelStatusLabels || parsed.voiceProfile?.statusText, 'voiceProfile.channelStatusLabels')
     },
     voiceSessionSummary: ensureVoiceSessionSummaryConfig(parsed.voiceSessionSummary),
+    voiceWorkTime: ensureVoiceWorkTimeConfig(parsed.voiceWorkTime),
     mediaRelay: {
       maxReuploadBytes: Number(parsed.mediaRelay?.maxReuploadBytes ?? 25_000_000),
       tempDir: String(parsed.mediaRelay?.tempDir || './tmp/relay-media')
@@ -584,12 +733,14 @@ function loadConfig(configPath) {
     },
     questionRolePrompt: ensureQuestionRolePromptConfig(parsed.questionRolePrompt),
     posthocRelay: ensurePosthocRelayConfig(parsed.posthocRelay),
+    knowledgeExport: ensureKnowledgeExportConfig(parsed.knowledgeExport),
     introAddendums: ensureIntroAddendumsConfig(parsed.introAddendums),
     introDm: normalizedIntroDm,
     introVcReminder: ensureIntroVcReminderConfig(parsed.introVcReminder, normalizedIntroDm, normalizedOps.logChannelId || ''),
     welcomeDm: ensureWelcomeDmConfig(parsed.welcomeDm, normalizedOps.logChannelId || ''),
     anime: ensureAnimeConfig(parsed.anime),
     annict: ensureAnnictConfig(parsed.annict),
+    annictUserIntegration: ensureAnnictUserIntegrationConfig(parsed.annictUserIntegration),
     ops: normalizedOps,
     moderatorLogs: ensureModeratorLogsConfig(parsed.moderatorLogs, normalizedOps),
     questionForumTags: ensureTagMap(parsed.questionForumTags, 'questionForumTags'),

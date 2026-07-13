@@ -473,6 +473,7 @@ function createDatabase(databasePath) {
         profile_channel_id AS profileChannelId,
         voice_channel_id AS voiceChannelId,
         joined_at AS joinedAt,
+        joined_at_estimated AS joinedAtEstimated,
         updated_at AS updatedAt
       FROM vc_profile_member_sessions
       WHERE guild_id = ? AND user_id = ? AND category_id = ? AND profile_channel_id = ?
@@ -486,6 +487,7 @@ function createDatabase(databasePath) {
         profile_channel_id AS profileChannelId,
         voice_channel_id AS voiceChannelId,
         joined_at AS joinedAt,
+        joined_at_estimated AS joinedAtEstimated,
         updated_at AS updatedAt
       FROM vc_profile_member_sessions
       WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
@@ -499,9 +501,20 @@ function createDatabase(databasePath) {
         profile_channel_id,
         voice_channel_id,
         joined_at,
+        joined_at_estimated,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(guild_id, user_id, category_id, profile_channel_id) DO UPDATE SET
+        joined_at = CASE
+          WHEN vc_profile_member_sessions.voice_channel_id = excluded.voice_channel_id
+          THEN vc_profile_member_sessions.joined_at
+          ELSE excluded.joined_at
+        END,
+        joined_at_estimated = CASE
+          WHEN vc_profile_member_sessions.voice_channel_id = excluded.voice_channel_id
+          THEN vc_profile_member_sessions.joined_at_estimated
+          ELSE excluded.joined_at_estimated
+        END,
         voice_channel_id = excluded.voice_channel_id,
         updated_at = excluded.updated_at
     `),
@@ -1023,6 +1036,209 @@ function createDatabase(databasePath) {
       UPDATE vc_voice_session_summary_messages
       SET status = ?, updated_at = ?
       WHERE guild_id = ? AND session_id = ? AND profile_channel_id = ?
+    `),
+    insertVcShortActivityEpisode: sqlite.prepare(`
+      INSERT OR IGNORE INTO vc_short_activity_episodes (
+        stable_episode_key,
+        guild_id,
+        category_id,
+        profile_channel_id,
+        voice_channel_id,
+        started_at,
+        ended_at,
+        duration_seconds,
+        participant_ids_json,
+        peak_human_count,
+        close_reason,
+        status,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `),
+    listVcShortActivityEpisodes: sqlite.prepare(`
+      SELECT
+        id,
+        stable_episode_key AS stableEpisodeKey,
+        guild_id AS guildId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        voice_channel_id AS voiceChannelId,
+        started_at AS startedAt,
+        ended_at AS endedAt,
+        duration_seconds AS durationSeconds,
+        participant_ids_json AS participantIdsJson,
+        peak_human_count AS peakHumanCount,
+        close_reason AS closeReason,
+        status,
+        created_at AS createdAt,
+        updated_at AS updatedAt
+      FROM vc_short_activity_episodes
+      WHERE guild_id = ?
+        AND category_id = ?
+        AND profile_channel_id = ?
+        AND status = 'active'
+      ORDER BY datetime(ended_at) DESC, id DESC
+      LIMIT ?
+    `),
+    clearVcShortActivityForChannel: sqlite.prepare(`
+      UPDATE vc_short_activity_episodes
+      SET status = 'cleared',
+          updated_at = ?
+      WHERE guild_id = ?
+        AND category_id = ?
+        AND profile_channel_id = ?
+        AND voice_channel_id = ?
+        AND status = 'active'
+    `),
+    expireVcShortActivityBefore: sqlite.prepare(`
+      UPDATE vc_short_activity_episodes
+      SET status = 'expired',
+          updated_at = ?
+      WHERE status = 'active'
+        AND datetime(ended_at) < datetime(?)
+    `),
+    getVcShortActivityMessage: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        category_id AS categoryId,
+        profile_channel_id AS profileChannelId,
+        message_id AS messageId,
+        status,
+        updated_at AS updatedAt
+      FROM vc_short_activity_messages
+      WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
+      LIMIT 1
+    `),
+    upsertVcShortActivityMessage: sqlite.prepare(`
+      INSERT INTO vc_short_activity_messages (
+        guild_id,
+        category_id,
+        profile_channel_id,
+        message_id,
+        status,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, category_id, profile_channel_id) DO UPDATE SET
+        message_id = excluded.message_id,
+        status = excluded.status,
+        updated_at = excluded.updated_at
+    `),
+    updateVcShortActivityMessageStatus: sqlite.prepare(`
+      UPDATE vc_short_activity_messages
+      SET status = ?, updated_at = ?
+      WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
+    `),
+    getOpenVcWorkInterval: sqlite.prepare(`
+      SELECT *
+      FROM vc_work_presence_intervals
+      WHERE guild_id = ? AND user_id = ? AND status = 'open'
+      LIMIT 1
+    `),
+    listOpenVcWorkIntervals: sqlite.prepare(`
+      SELECT *
+      FROM vc_work_presence_intervals
+      WHERE status = 'open'
+      ORDER BY datetime(started_at) ASC
+    `),
+    insertVcWorkInterval: sqlite.prepare(`
+      INSERT OR IGNORE INTO vc_work_presence_intervals (
+        stable_interval_key,
+        guild_id,
+        user_id,
+        category_id,
+        voice_channel_id,
+        listen_chat_channel_id,
+        started_at,
+        ended_at,
+        duration_seconds,
+        source,
+        source_session_id,
+        source_member_key,
+        start_estimated,
+        end_estimated,
+        status,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, 0, 'open', ?, ?)
+    `),
+    closeVcWorkInterval: sqlite.prepare(`
+      UPDATE vc_work_presence_intervals
+      SET ended_at = ?,
+          duration_seconds = ?,
+          end_estimated = ?,
+          status = 'closed',
+          updated_at = ?
+      WHERE id = ? AND status = 'open'
+    `),
+    getVcWorkTotal: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        user_id AS userId,
+        total_seconds AS totalSeconds,
+        historical_backfill_seconds AS historicalBackfillSeconds,
+        live_tracked_seconds AS liveTrackedSeconds,
+        last_counted_at AS lastCountedAt,
+        updated_at AS updatedAt
+      FROM vc_work_user_totals
+      WHERE guild_id = ? AND user_id = ?
+      LIMIT 1
+    `),
+    upsertVcWorkTotalDelta: sqlite.prepare(`
+      INSERT INTO vc_work_user_totals (
+        guild_id,
+        user_id,
+        total_seconds,
+        historical_backfill_seconds,
+        live_tracked_seconds,
+        last_counted_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, user_id) DO UPDATE SET
+        total_seconds = vc_work_user_totals.total_seconds + excluded.total_seconds,
+        historical_backfill_seconds = vc_work_user_totals.historical_backfill_seconds + excluded.historical_backfill_seconds,
+        live_tracked_seconds = vc_work_user_totals.live_tracked_seconds + excluded.live_tracked_seconds,
+        last_counted_at = excluded.last_counted_at,
+        updated_at = excluded.updated_at
+    `),
+    listVcWorkTotals: sqlite.prepare(`
+      SELECT guild_id AS guildId, user_id AS userId, total_seconds AS totalSeconds
+      FROM vc_work_user_totals
+      WHERE guild_id = ?
+    `),
+    insertVcWorkMilestoneAward: sqlite.prepare(`
+      INSERT OR IGNORE INTO vc_work_milestone_awards (
+        guild_id,
+        user_id,
+        milestone_hours,
+        reached_at,
+        reached_in_voice_channel_id,
+        reached_in_category_id,
+        dm_status,
+        public_status,
+        card_status,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'pending', 'pending', 'pending', ?, ?)
+    `),
+    updateVcWorkMilestoneDelivery: sqlite.prepare(`
+      UPDATE vc_work_milestone_awards
+      SET dm_status = COALESCE(?, dm_status),
+          dm_message_id = COALESCE(?, dm_message_id),
+          dm_sent_at = COALESCE(?, dm_sent_at),
+          public_status = COALESCE(?, public_status),
+          public_message_channel_id = COALESCE(?, public_message_channel_id),
+          public_message_id = COALESCE(?, public_message_id),
+          public_sent_at = COALESCE(?, public_sent_at),
+          card_status = COALESCE(?, card_status),
+          card_error = COALESCE(?, card_error),
+          updated_at = ?
+      WHERE guild_id = ? AND user_id = ? AND milestone_hours = ?
+    `),
+    listVcWorkMilestoneAwardsForUser: sqlite.prepare(`
+      SELECT *
+      FROM vc_work_milestone_awards
+      WHERE guild_id = ? AND user_id = ?
+      ORDER BY milestone_hours ASC
     `),
     listLegacyVcProfileMessagesByCategory: sqlite.prepare(`
       SELECT
@@ -1554,6 +1770,10 @@ function createDatabase(databasePath) {
         first_sent_at AS firstSentAt,
         last_sent_at AS lastSentAt,
         last_voice_join_at AS lastVoiceJoinAt,
+        qualifying_join_count AS qualifyingJoinCount,
+        last_qualifying_join_at AS lastQualifyingJoinAt,
+        last_disconnected_at AS lastDisconnectedAt,
+        last_failure_at AS lastFailureAt,
         last_channel_id AS lastChannelId,
         last_dm_message_id AS lastDmMessageId,
         last_error AS lastError,
@@ -1569,19 +1789,48 @@ function createDatabase(databasePath) {
         guild_id,
         user_id,
         reminder_count,
+        qualifying_join_count,
         first_sent_at,
         last_sent_at,
         last_voice_join_at,
+        last_qualifying_join_at,
+        last_disconnected_at,
+        last_failure_at,
         last_channel_id,
         last_dm_message_id,
         last_error,
         completed_at,
         created_at,
         updated_at
-      ) VALUES (?, ?, 0, NULL, NULL, ?, ?, NULL, NULL, NULL, ?, ?)
+      ) VALUES (?, ?, 0, ?, NULL, NULL, ?, ?, NULL, NULL, ?, NULL, NULL, NULL, ?, ?)
       ON CONFLICT(guild_id, user_id) DO UPDATE SET
         last_voice_join_at = excluded.last_voice_join_at,
+        qualifying_join_count = excluded.qualifying_join_count,
+        last_qualifying_join_at = excluded.last_qualifying_join_at,
         last_channel_id = excluded.last_channel_id,
+        updated_at = excluded.updated_at
+    `),
+    markIntroVcReminderDisconnected: sqlite.prepare(`
+      INSERT INTO intro_vc_reminder_state (
+        guild_id,
+        user_id,
+        reminder_count,
+        qualifying_join_count,
+        first_sent_at,
+        last_sent_at,
+        last_voice_join_at,
+        last_qualifying_join_at,
+        last_disconnected_at,
+        last_failure_at,
+        last_channel_id,
+        last_dm_message_id,
+        last_error,
+        completed_at,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, 0, 0, NULL, NULL, NULL, NULL, ?, NULL, NULL, NULL, NULL, NULL, ?, ?)
+      ON CONFLICT(guild_id, user_id) DO UPDATE SET
+        last_disconnected_at = excluded.last_disconnected_at,
         updated_at = excluded.updated_at
     `),
     markIntroVcReminderSent: sqlite.prepare(`
@@ -1589,16 +1838,20 @@ function createDatabase(databasePath) {
         guild_id,
         user_id,
         reminder_count,
+        qualifying_join_count,
         first_sent_at,
         last_sent_at,
         last_voice_join_at,
+        last_qualifying_join_at,
+        last_disconnected_at,
+        last_failure_at,
         last_channel_id,
         last_dm_message_id,
         last_error,
         completed_at,
         created_at,
         updated_at
-      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)
+      ) VALUES (?, ?, 1, 0, ?, ?, ?, NULL, NULL, NULL, ?, ?, NULL, NULL, ?, ?)
       ON CONFLICT(guild_id, user_id) DO UPDATE SET
         reminder_count = intro_vc_reminder_state.reminder_count + 1,
         first_sent_at = COALESCE(intro_vc_reminder_state.first_sent_at, excluded.first_sent_at),
@@ -1607,6 +1860,7 @@ function createDatabase(databasePath) {
         last_channel_id = excluded.last_channel_id,
         last_dm_message_id = excluded.last_dm_message_id,
         last_error = NULL,
+        last_failure_at = NULL,
         completed_at = NULL,
         updated_at = excluded.updated_at
     `),
@@ -1615,20 +1869,25 @@ function createDatabase(databasePath) {
         guild_id,
         user_id,
         reminder_count,
+        qualifying_join_count,
         first_sent_at,
         last_sent_at,
         last_voice_join_at,
+        last_qualifying_join_at,
+        last_disconnected_at,
+        last_failure_at,
         last_channel_id,
         last_dm_message_id,
         last_error,
         completed_at,
         created_at,
         updated_at
-      ) VALUES (?, ?, 0, NULL, NULL, ?, ?, NULL, ?, NULL, ?, ?)
+      ) VALUES (?, ?, 0, 0, NULL, NULL, ?, NULL, NULL, ?, ?, NULL, ?, NULL, ?, ?)
       ON CONFLICT(guild_id, user_id) DO UPDATE SET
         last_voice_join_at = excluded.last_voice_join_at,
         last_channel_id = excluded.last_channel_id,
         last_error = excluded.last_error,
+        last_failure_at = excluded.last_failure_at,
         updated_at = excluded.updated_at
     `),
     markIntroVcReminderCompleted: sqlite.prepare(`
@@ -2754,6 +3013,222 @@ function createDatabase(databasePath) {
       WHERE guild_id = ?
       ORDER BY id ASC
     `),
+    upsertAnnictConnection: sqlite.prepare(`
+      INSERT INTO annict_user_connections (
+        guild_id,
+        discord_user_id,
+        annict_resource_owner_id,
+        encrypted_access_token,
+        token_iv,
+        token_auth_tag,
+        encryption_version,
+        encryption_key_id,
+        scopes_json,
+        connected_at,
+        updated_at,
+        last_successful_sync_at,
+        sync_cursor_json,
+        token_status,
+        last_error_code
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, discord_user_id) DO UPDATE SET
+        annict_resource_owner_id = excluded.annict_resource_owner_id,
+        encrypted_access_token = excluded.encrypted_access_token,
+        token_iv = excluded.token_iv,
+        token_auth_tag = excluded.token_auth_tag,
+        encryption_version = excluded.encryption_version,
+        encryption_key_id = excluded.encryption_key_id,
+        scopes_json = excluded.scopes_json,
+        updated_at = excluded.updated_at,
+        last_successful_sync_at = excluded.last_successful_sync_at,
+        sync_cursor_json = excluded.sync_cursor_json,
+        token_status = excluded.token_status,
+        last_error_code = excluded.last_error_code
+    `),
+    getAnnictConnection: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        discord_user_id AS discordUserId,
+        annict_resource_owner_id AS annictResourceOwnerId,
+        encrypted_access_token AS encryptedAccessToken,
+        token_iv AS tokenIv,
+        token_auth_tag AS tokenAuthTag,
+        encryption_version AS encryptionVersion,
+        encryption_key_id AS encryptionKeyId,
+        scopes_json AS scopesJson,
+        connected_at AS connectedAt,
+        updated_at AS updatedAt,
+        last_successful_sync_at AS lastSuccessfulSyncAt,
+        sync_cursor_json AS syncCursorJson,
+        token_status AS tokenStatus,
+        last_error_code AS lastErrorCode
+      FROM annict_user_connections
+      WHERE guild_id = ? AND discord_user_id = ?
+      LIMIT 1
+    `),
+    listAnnictActiveConnections: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        discord_user_id AS discordUserId,
+        annict_resource_owner_id AS annictResourceOwnerId,
+        encrypted_access_token AS encryptedAccessToken,
+        token_iv AS tokenIv,
+        token_auth_tag AS tokenAuthTag,
+        encryption_version AS encryptionVersion,
+        encryption_key_id AS encryptionKeyId,
+        scopes_json AS scopesJson,
+        connected_at AS connectedAt,
+        updated_at AS updatedAt,
+        last_successful_sync_at AS lastSuccessfulSyncAt,
+        sync_cursor_json AS syncCursorJson,
+        token_status AS tokenStatus,
+        last_error_code AS lastErrorCode
+      FROM annict_user_connections
+      WHERE guild_id = ? AND token_status = 'active'
+      ORDER BY updated_at ASC
+    `),
+    deleteAnnictConnection: sqlite.prepare(`
+      DELETE FROM annict_user_connections
+      WHERE guild_id = ? AND discord_user_id = ?
+    `),
+    updateAnnictConnectionSync: sqlite.prepare(`
+      UPDATE annict_user_connections
+      SET last_successful_sync_at = ?,
+          sync_cursor_json = ?,
+          token_status = ?,
+          last_error_code = ?,
+          updated_at = ?
+      WHERE guild_id = ? AND discord_user_id = ?
+    `),
+    insertAnnictOauthState: sqlite.prepare(`
+      INSERT INTO annict_oauth_states (
+        state,
+        guild_id,
+        discord_user_id,
+        redirect_uri,
+        scopes_json,
+        created_at,
+        expires_at,
+        consumed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, null)
+    `),
+    getAnnictOauthState: sqlite.prepare(`
+      SELECT
+        state,
+        guild_id AS guildId,
+        discord_user_id AS discordUserId,
+        redirect_uri AS redirectUri,
+        scopes_json AS scopesJson,
+        created_at AS createdAt,
+        expires_at AS expiresAt,
+        consumed_at AS consumedAt
+      FROM annict_oauth_states
+      WHERE state = ?
+      LIMIT 1
+    `),
+    consumeAnnictOauthState: sqlite.prepare(`
+      UPDATE annict_oauth_states
+      SET consumed_at = ?
+      WHERE state = ? AND consumed_at IS NULL
+    `),
+    deleteExpiredAnnictOauthStates: sqlite.prepare(`
+      DELETE FROM annict_oauth_states
+      WHERE expires_at < ?
+    `),
+    upsertAnnictUserWorkState: sqlite.prepare(`
+      INSERT INTO annict_user_work_states (
+        guild_id,
+        discord_user_id,
+        annict_work_id,
+        anime_entry_id,
+        status,
+        source,
+        source_updated_at,
+        synced_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, discord_user_id, annict_work_id) DO UPDATE SET
+        anime_entry_id = COALESCE(excluded.anime_entry_id, annict_user_work_states.anime_entry_id),
+        status = excluded.status,
+        source = excluded.source,
+        source_updated_at = excluded.source_updated_at,
+        synced_at = excluded.synced_at
+    `),
+    getAnnictUserWorkState: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        discord_user_id AS discordUserId,
+        annict_work_id AS annictWorkId,
+        anime_entry_id AS animeEntryId,
+        status,
+        source,
+        source_updated_at AS sourceUpdatedAt,
+        synced_at AS syncedAt
+      FROM annict_user_work_states
+      WHERE guild_id = ? AND discord_user_id = ? AND annict_work_id = ?
+      LIMIT 1
+    `),
+    upsertAnnictStatusWriteLog: sqlite.prepare(`
+      INSERT INTO annict_status_write_log (
+        guild_id,
+        discord_user_id,
+        annict_work_id,
+        target_status,
+        idempotency_key,
+        status,
+        created_at,
+        updated_at,
+        last_error_code
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, discord_user_id, annict_work_id, target_status) DO UPDATE SET
+        idempotency_key = excluded.idempotency_key,
+        status = excluded.status,
+        updated_at = excluded.updated_at,
+        last_error_code = excluded.last_error_code
+    `),
+    getAnnictFeatureIntroDmState: sqlite.prepare(`
+      SELECT
+        guild_id AS guildId,
+        discord_user_id AS discordUserId,
+        trigger_message_id AS triggerMessageId,
+        trigger_type AS triggerType,
+        matched_term AS matchedTerm,
+        matched_anime_entry_id AS matchedAnimeEntryId,
+        first_triggered_at AS firstTriggeredAt,
+        sent_at AS sentAt,
+        dm_message_id AS dmMessageId,
+        status,
+        last_error_code AS lastErrorCode,
+        updated_at AS updatedAt
+      FROM annict_feature_intro_dm_state
+      WHERE guild_id = ? AND discord_user_id = ?
+      LIMIT 1
+    `),
+    upsertAnnictFeatureIntroDmState: sqlite.prepare(`
+      INSERT INTO annict_feature_intro_dm_state (
+        guild_id,
+        discord_user_id,
+        trigger_message_id,
+        trigger_type,
+        matched_term,
+        matched_anime_entry_id,
+        first_triggered_at,
+        sent_at,
+        dm_message_id,
+        status,
+        last_error_code,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(guild_id, discord_user_id) DO UPDATE SET
+        trigger_message_id = excluded.trigger_message_id,
+        trigger_type = excluded.trigger_type,
+        matched_term = excluded.matched_term,
+        matched_anime_entry_id = excluded.matched_anime_entry_id,
+        sent_at = excluded.sent_at,
+        dm_message_id = excluded.dm_message_id,
+        status = excluded.status,
+        last_error_code = excluded.last_error_code,
+        updated_at = excluded.updated_at
+    `),
     upsertBotDeletableMessage: sqlite.prepare(`
       INSERT INTO bot_deletable_messages (
         guild_id,
@@ -2985,6 +3460,27 @@ function createDatabase(databasePath) {
     } catch {
       return [];
     }
+  }
+
+  function parseJsonObject(value) {
+    try {
+      const parsed = JSON.parse(value || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function parseAnnictConnection(row) {
+    if (!row) {
+      return null;
+    }
+
+    return {
+      ...row,
+      scopes: parseJsonArray(row.scopesJson),
+      syncCursor: parseJsonObject(row.syncCursorJson)
+    };
   }
 
   function extractUrls(text) {
@@ -3322,7 +3818,7 @@ function createDatabase(databasePath) {
       listMemberSessions({ guildId, categoryId, profileChannelId }) {
         return statements.listVcProfileMemberSessions.all(guildId, categoryId, profileChannelId);
       },
-      upsertMemberSession({ guildId, userId, categoryId, profileChannelId, voiceChannelId, joinedAt }) {
+      upsertMemberSession({ guildId, userId, categoryId, profileChannelId, voiceChannelId, joinedAt, joinedAtEstimated = false }) {
         const now = new Date().toISOString();
         statements.upsertVcProfileMemberSession.run(
           guildId,
@@ -3331,6 +3827,7 @@ function createDatabase(databasePath) {
           profileChannelId,
           voiceChannelId,
           joinedAt || now,
+          joinedAtEstimated ? 1 : 0,
           now
         );
       },
@@ -3570,6 +4067,137 @@ function createDatabase(databasePath) {
         ).changes;
       }
     },
+    vcShortActivity: {
+      insertEpisode(record) {
+        const now = new Date().toISOString();
+        return statements.insertVcShortActivityEpisode.run(
+          record.stableEpisodeKey,
+          record.guildId,
+          record.categoryId,
+          record.profileChannelId,
+          record.voiceChannelId,
+          record.startedAt,
+          record.endedAt,
+          Number(record.durationSeconds || 0),
+          JSON.stringify(record.participantIds || []),
+          Number(record.peakHumanCount || 0),
+          record.closeReason || null,
+          record.status || 'active',
+          now,
+          now
+        ).changes;
+      },
+      listEpisodes({ guildId, categoryId, profileChannelId, limit = 50 }) {
+        return statements.listVcShortActivityEpisodes.all(guildId, categoryId, profileChannelId, Number(limit || 50));
+      },
+      clearChannel({ guildId, categoryId, profileChannelId, voiceChannelId }) {
+        return statements.clearVcShortActivityForChannel.run(
+          new Date().toISOString(),
+          guildId,
+          categoryId,
+          profileChannelId,
+          voiceChannelId
+        ).changes;
+      },
+      expireBefore(cutoffIso) {
+        return statements.expireVcShortActivityBefore.run(new Date().toISOString(), cutoffIso).changes;
+      },
+      getMessage({ guildId, categoryId, profileChannelId }) {
+        return statements.getVcShortActivityMessage.get(guildId, categoryId, profileChannelId) || null;
+      },
+      upsertMessage({ guildId, categoryId, profileChannelId, messageId, status = 'active' }) {
+        statements.upsertVcShortActivityMessage.run(guildId, categoryId, profileChannelId, messageId, status, new Date().toISOString());
+      },
+      updateMessageStatus({ guildId, categoryId, profileChannelId, status }) {
+        return statements.updateVcShortActivityMessageStatus.run(status, new Date().toISOString(), guildId, categoryId, profileChannelId).changes;
+      }
+    },
+    vcWorkTime: {
+      getOpenInterval(guildId, userId) {
+        return statements.getOpenVcWorkInterval.get(guildId, userId) || null;
+      },
+      listOpenIntervals() {
+        return statements.listOpenVcWorkIntervals.all();
+      },
+      openInterval(record) {
+        const now = new Date().toISOString();
+        return statements.insertVcWorkInterval.run(
+          record.stableIntervalKey,
+          record.guildId,
+          record.userId,
+          record.categoryId,
+          record.voiceChannelId,
+          record.listenChatChannelId || null,
+          record.startedAt,
+          record.source || 'voice_state_update',
+          record.sourceSessionId || null,
+          record.sourceMemberKey || null,
+          record.startEstimated ? 1 : 0,
+          now,
+          now
+        ).changes;
+      },
+      closeInterval({ intervalId, endedAt, durationSeconds, endEstimated = false }) {
+        return statements.closeVcWorkInterval.run(
+          endedAt,
+          Number(durationSeconds || 0),
+          endEstimated ? 1 : 0,
+          new Date().toISOString(),
+          intervalId
+        ).changes;
+      },
+      addTotalDelta({ guildId, userId, liveTrackedSeconds = 0, historicalBackfillSeconds = 0, countedAt = new Date().toISOString() }) {
+        const total = Number(liveTrackedSeconds || 0) + Number(historicalBackfillSeconds || 0);
+        statements.upsertVcWorkTotalDelta.run(
+          guildId,
+          userId,
+          total,
+          Number(historicalBackfillSeconds || 0),
+          Number(liveTrackedSeconds || 0),
+          countedAt,
+          new Date().toISOString()
+        );
+      },
+      getTotal(guildId, userId) {
+        return statements.getVcWorkTotal.get(guildId, userId) || null;
+      },
+      listTotals(guildId) {
+        return statements.listVcWorkTotals.all(guildId);
+      },
+      claimMilestone(record) {
+        const now = new Date().toISOString();
+        return statements.insertVcWorkMilestoneAward.run(
+          record.guildId,
+          record.userId,
+          Number(record.milestoneHours),
+          record.reachedAt || now,
+          record.voiceChannelId || null,
+          record.categoryId || null,
+          now,
+          now
+        ).changes;
+      },
+      updateMilestoneDelivery(record) {
+        return statements.updateVcWorkMilestoneDelivery.run(
+          record.dmStatus ?? null,
+          record.dmMessageId ?? null,
+          record.dmSentAt ?? null,
+          record.publicStatus ?? null,
+          record.publicMessageChannelId ?? null,
+          record.publicMessageId ?? null,
+          record.publicSentAt ?? null,
+          record.cardStatus ?? null,
+          record.cardError ?? null,
+          new Date().toISOString(),
+          record.guildId,
+          record.userId,
+          Number(record.milestoneHours)
+        ).changes;
+      },
+      listAwardsForUser(guildId, userId) {
+        return statements.listVcWorkMilestoneAwardsForUser.all(guildId, userId);
+      }
+    },
     guides: {
       getGuidePost(channelId, guideKey) {
         return statements.getGuidePost.get(channelId, guideKey) || null;
@@ -3798,14 +4426,21 @@ function createDatabase(databasePath) {
       },
       recordJoin({ guildId, userId, channelId, joinedAt = new Date().toISOString() }) {
         const now = new Date().toISOString();
+        const existing = statements.getIntroVcReminderState.get(guildId, userId) || null;
         statements.upsertIntroVcReminderJoin.run(
           guildId,
           userId,
+          Number(existing?.qualifyingJoinCount || 0) + 1,
+          joinedAt,
           joinedAt,
           channelId || null,
           now,
           now
         );
+      },
+      recordDisconnect({ guildId, userId, leftAt = new Date().toISOString() }) {
+        const now = new Date().toISOString();
+        statements.markIntroVcReminderDisconnected.run(guildId, userId, leftAt, now, now);
       },
       markSent({ guildId, userId, channelId, dmMessageId = null, sentAt = new Date().toISOString(), voiceJoinAt = null }) {
         const now = new Date().toISOString();
@@ -3827,6 +4462,7 @@ function createDatabase(databasePath) {
           guildId,
           userId,
           voiceJoinAt,
+          now,
           channelId || null,
           String(error || 'unknown'),
           now,
@@ -4226,6 +4862,126 @@ function createDatabase(databasePath) {
           statements.deleteAnimeEntryById.run(targetEntryId);
         });
         transaction(entryId);
+      }
+    },
+    annictUserIntegration: {
+      upsertConnection(record) {
+        const now = new Date().toISOString();
+        statements.upsertAnnictConnection.run(
+          record.guildId,
+          record.discordUserId,
+          record.annictResourceOwnerId,
+          record.encryptedAccessToken,
+          record.tokenIv,
+          record.tokenAuthTag,
+          Number(record.encryptionVersion || 1),
+          record.encryptionKeyId || 'default',
+          JSON.stringify(record.scopes || []),
+          record.connectedAt || now,
+          now,
+          record.lastSuccessfulSyncAt || null,
+          JSON.stringify(record.syncCursor || {}),
+          record.tokenStatus || 'active',
+          record.lastErrorCode || null
+        );
+      },
+      getConnection(guildId, discordUserId) {
+        return parseAnnictConnection(statements.getAnnictConnection.get(guildId, discordUserId) || null);
+      },
+      listActiveConnections(guildId) {
+        return statements.listAnnictActiveConnections.all(guildId).map(parseAnnictConnection);
+      },
+      deleteConnection(guildId, discordUserId) {
+        statements.deleteAnnictConnection.run(guildId, discordUserId);
+      },
+      updateConnectionSync({ guildId, discordUserId, lastSuccessfulSyncAt = null, syncCursor = null, tokenStatus = 'active', lastErrorCode = null }) {
+        const now = new Date().toISOString();
+        statements.updateAnnictConnectionSync.run(
+          lastSuccessfulSyncAt,
+          syncCursor == null ? null : JSON.stringify(syncCursor),
+          tokenStatus,
+          lastErrorCode,
+          now,
+          guildId,
+          discordUserId
+        );
+      },
+      insertOauthState({ state, guildId, discordUserId, redirectUri, scopes, expiresAt }) {
+        statements.insertAnnictOauthState.run(
+          state,
+          guildId,
+          discordUserId,
+          redirectUri,
+          JSON.stringify(scopes || []),
+          new Date().toISOString(),
+          expiresAt
+        );
+      },
+      getOauthState(state) {
+        const row = statements.getAnnictOauthState.get(state) || null;
+        if (!row) {
+          return null;
+        }
+        return {
+          ...row,
+          scopes: parseJsonArray(row.scopesJson)
+        };
+      },
+      consumeOauthState(state) {
+        return statements.consumeAnnictOauthState.run(new Date().toISOString(), state).changes > 0;
+      },
+      deleteExpiredOauthStates(nowIso = new Date().toISOString()) {
+        statements.deleteExpiredAnnictOauthStates.run(nowIso);
+      },
+      upsertUserWorkState({ guildId, discordUserId, annictWorkId, animeEntryId = null, status, source, sourceUpdatedAt = null, syncedAt = new Date().toISOString() }) {
+        statements.upsertAnnictUserWorkState.run(
+          guildId,
+          discordUserId,
+          annictWorkId,
+          animeEntryId,
+          status,
+          source,
+          sourceUpdatedAt,
+          syncedAt
+        );
+      },
+      getUserWorkState(guildId, discordUserId, annictWorkId) {
+        return statements.getAnnictUserWorkState.get(guildId, discordUserId, annictWorkId) || null;
+      },
+      upsertStatusWriteLog({ guildId, discordUserId, annictWorkId, targetStatus, idempotencyKey, status, lastErrorCode = null }) {
+        const now = new Date().toISOString();
+        statements.upsertAnnictStatusWriteLog.run(
+          guildId,
+          discordUserId,
+          annictWorkId,
+          targetStatus,
+          idempotencyKey,
+          status,
+          now,
+          now,
+          lastErrorCode
+        );
+      },
+      getIntroDmState(guildId, discordUserId) {
+        return statements.getAnnictFeatureIntroDmState.get(guildId, discordUserId) || null;
+      },
+      upsertIntroDmState(record) {
+        const now = new Date().toISOString();
+        const existing = statements.getAnnictFeatureIntroDmState.get(record.guildId, record.discordUserId) || null;
+        statements.upsertAnnictFeatureIntroDmState.run(
+          record.guildId,
+          record.discordUserId,
+          record.triggerMessageId || existing?.triggerMessageId || null,
+          record.triggerType || existing?.triggerType || null,
+          record.matchedTerm || existing?.matchedTerm || null,
+          record.matchedAnimeEntryId || existing?.matchedAnimeEntryId || null,
+          record.firstTriggeredAt || existing?.firstTriggeredAt || now,
+          record.sentAt || null,
+          record.dmMessageId || null,
+          record.status || 'pending',
+          record.lastErrorCode || null,
+          now
+        );
       }
     },
     deletableMessages: {

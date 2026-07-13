@@ -13,6 +13,11 @@ const {
 } = require('discord.js');
 const { registerVcSummaryDeletableMessage } = require('../deletableMessages');
 const { appendOperationLog } = require('../logDashboard');
+const {
+  recordShortActivityForIgnoredSession,
+  clearShortActivityForMeaningfulSession,
+  updateShortActivityCard
+} = require('../vcShortActivity');
 
 const DEFAULT_ACCENT_COLOR = 0x3b82f6;
 const SESSION_STATUSES = {
@@ -43,7 +48,7 @@ function getConfig(client) {
       enabled: true,
       deleteMode: 'on_next_session',
       ttlMinutes: null,
-      restoreLatestOnReady: true,
+      restoreLatestOnReady: false,
       messages: {
         default: '通話チャンネルのご利用ありがとうございました。またお気軽にどうぞ。',
         work: '集中作業、お疲れ様でした。',
@@ -972,13 +977,19 @@ async function postVoiceSessionEndSummaryCard(client, sessionRow, { reason = 'se
 }
 
 async function restoreLatestVoiceSessionEndSummaryCards(client, { reason = 'ready_cleanup' } = {}) {
+  const forceRuntimeRestore = /short_activity|runtime_restore/i.test(String(reason || ''));
   const endCardConfig = getEndCardConfig(client);
-  if (!endCardConfig.enabled || !endCardConfig.restoreLatestOnReady) {
-    client.logger.info('vc end summary restore skipped disabled', {
+  if (!endCardConfig.enabled || (!endCardConfig.restoreLatestOnReady && !forceRuntimeRestore)) {
+    client.logger.info(
+      !endCardConfig.restoreLatestOnReady && !forceRuntimeRestore
+        ? 'vc end-summary startup recreation disabled'
+        : 'vc end summary restore skipped disabled',
+      {
       reason,
       enabled: endCardConfig.enabled,
       restoreLatestOnReady: endCardConfig.restoreLatestOnReady
-    });
+      }
+    );
     return { restoredCount: 0, skippedCount: 0, errorCount: 0 };
   }
   if (!client.voiceProfileCategoryMap?.size) {
@@ -1466,6 +1477,13 @@ async function closeSession(client, session, snapshot, {
   });
 
   if (finalStatus === SESSION_STATUSES.CLOSED) {
+    await clearShortActivityForMeaningfulSession(client, session).catch((error) => {
+      client.logger.warn('vc short activity clear failed', {
+        guildId: session.guildId,
+        sessionId: session.sessionId,
+        error: error.message
+      });
+    });
     await postVoiceSessionEndSummaryCard(client, session, { reason }).catch((error) => {
       client.logger.warn('vc session end summary card post failed', {
         guildId: session.guildId,
@@ -1477,6 +1495,33 @@ async function closeSession(client, session, snapshot, {
       });
     });
   } else {
+    await recordShortActivityForIgnoredSession(client, session, { reason }).catch((error) => {
+      client.logger.warn('vc short activity record failed', {
+        guildId: session.guildId,
+        sessionId: session.sessionId,
+        error: error.message
+      });
+    });
+    await restoreLatestVoiceSessionEndSummaryCards(client, {
+      reason: 'restored_previous_summary_after_short_activity'
+    }).catch((error) => {
+      client.logger.warn('restored previous summary after short activity failed', {
+        guildId: session.guildId,
+        sessionId: session.sessionId,
+        error: error.message
+      });
+    });
+    await updateShortActivityCard(client, {
+      guildId: session.guildId,
+      categoryId: session.categoryId,
+      profileChannelId: session.profileChannelId
+    }).catch(() => null);
+    client.logger.info('restored previous summary after short activity', {
+      guildId: session.guildId,
+      categoryId: session.categoryId,
+      profileChannelId: session.profileChannelId,
+      sessionId: session.sessionId
+    });
     client.logger.info('vc session end summary card skipped ignored session', {
       guildId: session.guildId,
       sessionId: session.sessionId,

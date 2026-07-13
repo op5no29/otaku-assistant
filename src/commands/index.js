@@ -8,6 +8,9 @@ const introCommand = require('./intro');
 const animeCommand = require('./anime');
 const rolePanelCommand = require('./rolePanel');
 const vcSummaryCommand = require('./vcSummary');
+const workTimeCommand = require('./workTime');
+const knowledgeExportCommand = require('./knowledgeExport');
+const annictCommand = require('./annict');
 
 const list = [
   resolveCommand,
@@ -19,7 +22,10 @@ const list = [
   introCommand,
   animeCommand,
   rolePanelCommand,
-  vcSummaryCommand
+  vcSummaryCommand,
+  workTimeCommand,
+  knowledgeExportCommand,
+  annictCommand
 ];
 
 module.exports = {
