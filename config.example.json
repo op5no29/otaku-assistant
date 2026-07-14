@@ -292,6 +292,7 @@
     "watchedEmoji": "✅",
     "maxCastInCard": 5,
     "maxReviewsInCard": 5,
+    "cardReconcileDelayMs": 1000,
     "indexPageSize": 25,
     "apiTimeoutMs": 15000,
     "apiCacheTtlHours": 24,

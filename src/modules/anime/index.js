@@ -171,6 +171,13 @@ function matchesConfiguredEmoji(emoji, configured) {
   return getEmojiKey(emoji) === raw;
 }
 
+function getAnimeStatusReactionEmojis(client) {
+  return {
+    interested: String(client.appConfig.anime.interestEmoji || '👀'),
+    watched: String(client.appConfig.anime.watchedEmoji || '✅')
+  };
+}
+
 function buildTitle(entry) {
   return getPreferredAnimeDisplayTitle(entry) || `${String(entry.provider || 'anime')} ${entry.providerMediaId}`;
 }
@@ -1005,8 +1012,9 @@ async function postAnimeToChannel(guild, media, createdByUserId, additionalAlias
       animeChannelId,
       animeChannelMessageId: sentMessage.id
     });
-    await sentMessage.react(client.appConfig.anime.interestEmoji).catch(() => null);
-    await sentMessage.react(client.appConfig.anime.watchedEmoji).catch(() => null);
+    const statusReactionEmojis = getAnimeStatusReactionEmojis(client);
+    await sentMessage.react(statusReactionEmojis.interested).catch(() => null);
+    await sentMessage.react(statusReactionEmojis.watched).catch(() => null);
     client.logger.info('anime channel card sent', {
       animeEntryId: entry.id,
       messageId: sentMessage.id,
@@ -1118,6 +1126,37 @@ async function addAnimeUserReactionStatus(client, guildId, animeEntryId, userId,
   }
 
   client.db.anime.upsertUserStatus(next);
+  return next;
+}
+
+function calculateAnimeStatusAfterReactionRemoval(current, removedType) {
+  const next = {
+    interested: current?.interested ? 1 : 0,
+    watched: current?.watched ? 1 : 0,
+    interestedAt: current?.interestedAt || null,
+    watchedAt: current?.watchedAt || null
+  };
+  if (removedType === 'interested') {
+    next.interested = 0;
+    next.interestedAt = null;
+  } else if (removedType === 'watched') {
+    next.watched = 0;
+    next.watchedAt = null;
+  }
+  const targetKind = next.watched ? 'watched' : (next.interested ? 'wanna_watch' : 'no_status');
+  return { next, targetKind };
+}
+
+function persistCalculatedAnimeStatus(client, guildId, animeEntryId, userId, next) {
+  client.db.anime.upsertUserStatus({
+    guildId,
+    animeEntryId,
+    userId,
+    interested: next.interested ? 1 : 0,
+    watched: next.watched ? 1 : 0,
+    interestedAt: next.interestedAt || null,
+    watchedAt: next.watchedAt || null
+  });
 }
 
 async function updateReviewRoles(member) {
@@ -1480,38 +1519,54 @@ async function handleAnimeReactionAdd(reaction, user) {
   }
 
   const action = interestedMatch ? 'interested' : 'watched';
-  try {
-    const { updateAnnictStatusForAnimeEntry } = require('../annictUserIntegration');
-    await updateAnnictStatusForAnimeEntry(client, {
-      guildId: message.guildId,
-      userId: user.id,
-      entry,
-      action,
-      idempotencyKey: `reaction:${message.id}:${user.id}:${action}`,
-      source: 'discord_reaction',
-      updateLocal: true
-    });
+  const connection = client.db.annictUserIntegration.getConnection(message.guildId, user.id);
+  if (!connection || connection.tokenStatus !== 'active') {
+    await addAnimeUserReactionStatus(client, message.guildId, entry.id, user.id, action, true);
     await updateAnimeChannelCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
     await updateAnimeReviewCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
-    client.logger.info('anime reaction annict status updated', {
+    const notConnectedError = new Error('Annict connection missing');
+    notConnectedError.code = 'not_connected';
+    await maybeNotifyAnnictReactionFailure(client, user, notConnectedError);
+    client.logger.info('anime reaction stored locally without annict connection', {
       guildId: message.guildId,
       animeEntryId: entry.id,
       userId: user.id,
       reactionType: action
     });
-  } catch (error) {
-    await maybeNotifyAnnictReactionFailure(client, user, error);
-    await reaction.users?.remove?.(user.id).catch(() => null);
-    client.logger.warn('anime reaction annict status update failed', {
-      guildId: message.guildId,
-      animeEntryId: entry.id,
-      userId: user.id,
-      reactionType: action,
-      annictWorkId: String(entry.provider || '') === 'annict' ? entry.providerMediaId || null : null,
-      errorCode: error.code || null,
-      error: error.message
-    });
-    return;
+  } else {
+    try {
+      const { updateAnnictStatusForAnimeEntry } = require('../annictUserIntegration');
+      await updateAnnictStatusForAnimeEntry(client, {
+        guildId: message.guildId,
+        userId: user.id,
+        entry,
+        action,
+        idempotencyKey: `reaction:${message.id}:${user.id}:${action}`,
+        source: 'discord_reaction',
+        updateLocal: true
+      });
+      await updateAnimeChannelCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
+      await updateAnimeReviewCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
+      client.logger.info('anime reaction annict status updated', {
+        guildId: message.guildId,
+        animeEntryId: entry.id,
+        userId: user.id,
+        reactionType: action
+      });
+    } catch (error) {
+      await maybeNotifyAnnictReactionFailure(client, user, error);
+      await reaction.users?.remove?.(user.id).catch(() => null);
+      client.logger.warn('anime reaction annict status update failed', {
+        guildId: message.guildId,
+        animeEntryId: entry.id,
+        userId: user.id,
+        reactionType: action,
+        annictWorkId: String(entry.provider || '') === 'annict' ? entry.providerMediaId || null : null,
+        errorCode: error.code || null,
+        error: error.message
+      });
+      return;
+    }
   }
 
   if (watchedMatch) {
@@ -1571,6 +1626,20 @@ async function maybeNotifyAnnictReactionFailure(client, user, error) {
   });
 }
 
+async function restoreRemovedReactionBestEffort(reaction, userId) {
+  // Discord does not normally allow a bot to recreate another user's reaction.
+  // Keep an injectable path for compatible adapters while treating failure as non-fatal.
+  if (typeof reaction?.users?.add !== 'function') {
+    return false;
+  }
+  try {
+    await reaction.users.add(userId);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function handleAnimeReactionRemove(reaction, user) {
   if (user?.bot) {
     return;
@@ -1592,15 +1661,79 @@ async function handleAnimeReactionRemove(reaction, user) {
     return;
   }
 
-  await addAnimeUserReactionStatus(client, message.guildId, entry.id, user.id, interestedMatch ? 'interested' : 'watched', false);
-  await updateAnimeChannelCard(client, entry).catch(() => null);
-  await updateAnimeReviewCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
-  client.logger.info('anime reaction removed', {
+  const removedType = interestedMatch ? 'interested' : 'watched';
+  const current = client.db.anime.getUserStatus(message.guildId, entry.id, user.id) || null;
+  const { next, targetKind } = calculateAnimeStatusAfterReactionRemoval(current, removedType);
+  client.logger.info(targetKind === 'no_status' ? 'annict anime status clear requested' : 'annict anime status removal recalculated', {
     guildId: message.guildId,
     animeEntryId: entry.id,
     userId: user.id,
-    reactionType: interestedMatch ? 'interested' : 'watched'
+    reactionType: removedType,
+    targetKind
   });
+
+  const connection = client.db.annictUserIntegration.getConnection(message.guildId, user.id);
+  if (!connection || connection.tokenStatus !== 'active') {
+    persistCalculatedAnimeStatus(client, message.guildId, entry.id, user.id, next);
+    await updateAnimeChannelCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
+    await updateAnimeReviewCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
+    const notConnectedError = new Error('Annict connection missing');
+    notConnectedError.code = 'not_connected';
+    await maybeNotifyAnnictReactionFailure(client, user, notConnectedError);
+    return;
+  }
+
+  try {
+    const { updateAnnictStatusForAnimeEntry } = require('../annictUserIntegration');
+    await updateAnnictStatusForAnimeEntry(client, {
+      guildId: message.guildId,
+      userId: user.id,
+      entry,
+      targetKind,
+      idempotencyKey: `reaction-remove:${message.id}:${user.id}:${removedType}:${targetKind}`,
+      source: 'discord_reaction_remove',
+      updateLocal: false
+    });
+    persistCalculatedAnimeStatus(client, message.guildId, entry.id, user.id, next);
+    await updateAnimeChannelCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
+    await updateAnimeReviewCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
+    client.logger.info(targetKind === 'no_status' ? 'annict anime status cleared' : 'anime reaction removed', {
+      guildId: message.guildId,
+      animeEntryId: entry.id,
+      userId: user.id,
+      reactionType: removedType,
+      targetKind
+    });
+  } catch (error) {
+    if (error.code === 'not_connected') {
+      persistCalculatedAnimeStatus(client, message.guildId, entry.id, user.id, next);
+      await updateAnimeChannelCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
+      await updateAnimeReviewCard(client, normalizeEntry(client.db.anime.getEntryById(entry.id))).catch(() => null);
+      await maybeNotifyAnnictReactionFailure(client, user, error);
+      return;
+    }
+    const reactionRestored = await restoreRemovedReactionBestEffort(reaction, user.id);
+    await maybeNotifyAnnictReactionFailure(client, user, error);
+    if (reactionRestored) {
+      client.logger.info('annict reaction restored after removal failure', {
+        guildId: message.guildId,
+        animeEntryId: entry.id,
+        userId: user.id,
+        reactionType: removedType
+      });
+    }
+    client.logger.warn('annict anime status removal failed', {
+      guildId: message.guildId,
+      animeEntryId: entry.id,
+      userId: user.id,
+      reactionType: removedType,
+      targetKind,
+      annictWorkId: String(entry.provider || '') === 'annict' ? entry.providerMediaId || null : null,
+      errorCode: error.code || null,
+      reactionRestored,
+      error: error.message
+    });
+  }
 }
 
 async function findRegisteredAnime(client, guildId, query, limit = 10) {
@@ -1752,6 +1885,82 @@ async function runAnimeOrphanScan(client) {
     guildId,
     scannedCount: entries.length
   });
+}
+
+async function reconcileAnimeCardControls(client, options = {}) {
+  if (!client.appConfig.anime?.enabled) {
+    return { skipped: true, reason: 'disabled' };
+  }
+  if (client.animeCardReconcileRunning) {
+    client.logger.info('anime card control reconciliation skipped', { reason: 'already_running' });
+    return { skipped: true, reason: 'already_running' };
+  }
+
+  const guildId = String(options.guildId || process.env.GUILD_ID || '');
+  if (!guildId) {
+    return { skipped: true, reason: 'guild_missing' };
+  }
+
+  const delayMs = options.delayMs == null
+    ? Math.max(250, Number(client.appConfig.anime.cardReconcileDelayMs || 1000))
+    : Math.max(0, Number(options.delayMs));
+  const entries = client.db.anime.listAllEntries(guildId).map(normalizeEntry);
+  const result = { scanned: entries.length, updated: 0, skipped: 0, failed: 0 };
+  client.animeCardReconcileRunning = true;
+  client.logger.info('anime card control reconciliation started', {
+    guildId,
+    entryCount: entries.length,
+    delayMs
+  });
+
+  try {
+    for (let index = 0; index < entries.length; index += 1) {
+      const entry = entries[index];
+      if (!entry?.animeChannelMessageId) {
+        result.skipped += 1;
+        continue;
+      }
+      try {
+        const message = await updateAnimeChannelCard(client, entry);
+        if (!message) {
+          result.skipped += 1;
+        } else {
+          result.updated += 1;
+          if (entry.reviewCardMessageId || entry.threadCardMessageId) {
+            await updateAnimeReviewCard(client, entry).catch((error) => {
+              client.logger.warn('anime review card control reconciliation failed', {
+                guildId,
+                animeEntryId: entry.id,
+                error: error.message
+              });
+            });
+          }
+          client.logger.info('anime card controls reconciled', {
+            guildId,
+            animeEntryId: entry.id,
+            animeChannelMessageId: entry.animeChannelMessageId,
+            threadId: entry.threadId || null
+          });
+        }
+      } catch (error) {
+        result.failed += 1;
+        client.logger.warn('anime card control reconciliation failed', {
+          guildId,
+          animeEntryId: entry?.id || null,
+          animeChannelMessageId: entry?.animeChannelMessageId || null,
+          error: error.message
+        });
+      }
+      if (delayMs > 0 && index < entries.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  } finally {
+    client.animeCardReconcileRunning = false;
+  }
+
+  client.logger.info('anime card control reconciliation completed', { guildId, ...result });
+  return result;
 }
 
 async function appendAnimeThreadButtonToTimelineMessage(client, timelineMessageId, entry) {
@@ -1951,12 +2160,15 @@ module.exports = {
   updateReviewRoles,
   handleAnimeReactionAdd,
   handleAnimeReactionRemove,
+  calculateAnimeStatusAfterReactionRemoval,
+  getAnimeStatusReactionEmojis,
   handleAnimeWatchedPromptReply,
   findRegisteredAnime,
   listAnimeIndex,
   cleanupAnimeEntry,
   handleAnimeParentMessageDeleted,
   runAnimeOrphanScan,
+  reconcileAnimeCardControls,
   appendAnimeThreadButtonToTimelineMessage,
   updateAnimeRelayedCards,
   linkAnimeHashtagSourceToEntry,

@@ -29,6 +29,7 @@ const STATUS_TO_ANNICT_KIND = {
   interested: 'wanna_watch',
   watched: 'watched'
 };
+const SUPPORTED_ANNICT_STATUS_KINDS = new Set(['wanna_watch', 'watched', 'no_status']);
 const STATUS_TO_GRAPHQL_STATE = {
   wanna_watch: 'WANNA_WATCH',
   watching: 'WATCHING',
@@ -772,7 +773,8 @@ async function updateAnnictStatusForAnimeEntry(client, {
   guildId,
   userId,
   entry,
-  action,
+  action = null,
+  targetKind: explicitTargetKind = null,
   idempotencyKey,
   source = 'discord_action',
   updateLocal = true
@@ -786,8 +788,8 @@ async function updateAnnictStatusForAnimeEntry(client, {
     throw new AnnictUserIntegrationError('この作品カードはAnnict作品IDを確認できないため、Annictには反映できません。', 'annict_work_id_missing');
   }
 
-  const targetKind = STATUS_TO_ANNICT_KIND[action];
-  if (!targetKind) {
+  const targetKind = explicitTargetKind || STATUS_TO_ANNICT_KIND[action];
+  if (!SUPPORTED_ANNICT_STATUS_KINDS.has(targetKind)) {
     throw new AnnictUserIntegrationError('未対応のAnnict操作です。', 'unsupported_annict_action');
   }
 
@@ -821,7 +823,7 @@ async function updateAnnictStatusForAnimeEntry(client, {
       status: 'success'
     });
     if (updateLocal) {
-      await updateLocalAnimeStatus(client, guildId, entry.id, userId, action);
+      await updateLocalAnimeStatus(client, guildId, entry.id, userId, action || targetKind);
     }
     client.logger.info('annict anime status update succeeded', {
       guildId,
@@ -829,10 +831,20 @@ async function updateAnnictStatusForAnimeEntry(client, {
       animeEntryId: entry.id,
       annictWorkId,
       action,
+      targetKind,
       source
     });
     return { annictWorkId, targetKind };
   } catch (error) {
+    client.db.annictUserIntegration.upsertStatusWriteLog({
+      guildId,
+      discordUserId: userId,
+      annictWorkId,
+      targetStatus: targetKind,
+      idempotencyKey,
+      status: 'failed',
+      lastErrorCode: error.code || 'annict_status_write_failed'
+    });
     if (error.code === 'annict_unauthorized') {
       await markConnectionInvalid(client, guildId, userId, error.code);
     }
@@ -902,10 +914,10 @@ async function updateLocalAnimeStatus(client, guildId, animeEntryId, userId, act
     guildId,
     animeEntryId,
     userId,
-    interested: action === 'interested' ? 1 : (current?.interested ? 1 : 0),
-    watched: action === 'watched' ? 1 : (current?.watched ? 1 : 0),
-    interestedAt: action === 'interested' ? now : (current?.interestedAt || null),
-    watchedAt: action === 'watched' ? now : (current?.watchedAt || null)
+    interested: action === 'no_status' ? 0 : (action === 'interested' || action === 'wanna_watch' ? 1 : (current?.interested ? 1 : 0)),
+    watched: action === 'no_status' ? 0 : (action === 'watched' ? 1 : (current?.watched ? 1 : 0)),
+    interestedAt: action === 'no_status' ? null : (action === 'interested' || action === 'wanna_watch' ? now : (current?.interestedAt || null)),
+    watchedAt: action === 'no_status' ? null : (action === 'watched' ? now : (current?.watchedAt || null))
   });
   const entry = client.db.anime.getEntryById(animeEntryId);
   await updateAnimeChannelCard(client, entry).catch(() => null);

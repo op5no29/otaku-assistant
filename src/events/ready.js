@@ -8,7 +8,7 @@ const { getBotHealth } = require('../modules/ops/health');
 const { notifyOpsChannel } = require('../modules/ops/notify');
 const { ensureLogDashboards } = require('../modules/logDashboard');
 const { startIntroDmQueueProcessor } = require('../modules/introDm');
-const { runAnimeOrphanScan } = require('../modules/anime');
+const { runAnimeOrphanScan, reconcileAnimeCardControls } = require('../modules/anime');
 const { getAnnictAccessToken } = require('../modules/anime/annictClient');
 const { startAnnictUserSync, startAnnictWatchedImportWorker } = require('../modules/annictUserIntegration');
 const { startQuestionRolePromptTimeouts } = require('../modules/timelineRelay');
@@ -151,6 +151,11 @@ module.exports = {
 
     await runAnimeOrphanScan(client).catch((error) => {
       client.logger.error('anime orphan scan failed', {
+        error: error.message
+      });
+    });
+    await reconcileAnimeCardControls(client).catch((error) => {
+      client.logger.error('anime card control reconciliation failed', {
         error: error.message
       });
     });
