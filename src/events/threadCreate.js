@@ -1,4 +1,5 @@
 const { relayForumThread } = require('../modules/timelineRelay');
+const { handleTimelineThreadCreate } = require('../modules/timelineRestoration');
 
 module.exports = {
   async execute(thread) {
@@ -9,6 +10,15 @@ module.exports = {
       parentId: String(thread.parentId || ''),
       ownerId: thread.ownerId || null
     });
+
+    try {
+      await handleTimelineThreadCreate(client, thread);
+    } catch (error) {
+      client.logger.error('Failed to retain personal timeline thread binding', {
+        threadId: thread.id,
+        error: error.message
+      });
+    }
 
     try {
       await relayForumThread(thread, {

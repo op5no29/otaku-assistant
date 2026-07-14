@@ -48,7 +48,9 @@ function getConfig(client) {
     maxDisplayedEpisodes: 5,
     maxStoredEpisodes: 50,
     retentionDays: 7,
-    includeAfk: false
+    includeAfk: false,
+    visibleDuringLiveProfile: true,
+    trackSoloVisits: true
   };
 }
 
@@ -111,6 +113,15 @@ async function updateShortActivityCard(client, { guildId, categoryId, profileCha
   if (expired) {
     client.logger.info('vc short activity expired', { guildId, categoryId, profileChannelId, expired });
   }
+  const pruned = client.db.vcShortActivity.pruneScope({
+    guildId,
+    categoryId,
+    profileChannelId,
+    limit: Number(config.maxStoredEpisodes || 50)
+  });
+  if (pruned) {
+    client.logger.info('vc short activity expired', { guildId, categoryId, profileChannelId, pruned });
+  }
   const guild = await client.guilds.fetch(guildId).catch(() => null);
   const channel = await client.channels.fetch(profileChannelId).catch(() => null);
   if (!guild || !channel?.isTextBased?.()) return null;
@@ -140,6 +151,9 @@ async function updateShortActivityCard(client, { guildId, categoryId, profileCha
 }
 
 async function hideShortActivityCardForLiveProfile(client, { guildId, categoryId, profileChannelId }) {
+  if (getConfig(client).visibleDuringLiveProfile !== false) {
+    return false;
+  }
   const record = client.db.vcShortActivity.getMessage({ guildId, categoryId, profileChannelId });
   if (!record?.messageId || record.status !== 'active') {
     return false;
@@ -157,7 +171,12 @@ async function hideShortActivityCardForLiveProfile(client, { guildId, categoryId
 
 async function recordShortActivityForIgnoredSession(client, session, { reason = 'ignored_session' } = {}) {
   const config = getConfig(client);
-  if (!config.enabled || !session?.guildId || !session?.mainVoiceChannelId) return false;
+  if (!config.enabled
+    || config.trackSoloVisits !== false
+    || !session?.guildId
+    || !session?.mainVoiceChannelId) {
+    return false;
+  }
   if (!config.includeAfk && /afk/i.test(String(session.mainVoiceChannelName || session.voiceChannelName || ''))) {
     return false;
   }

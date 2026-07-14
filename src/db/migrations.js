@@ -284,6 +284,39 @@ function runMigrations(database) {
       PRIMARY KEY (guild_id, category_id, profile_channel_id)
     );
 
+    CREATE TABLE IF NOT EXISTS vc_activity_windows (
+      guild_id TEXT NOT NULL,
+      category_id TEXT NOT NULL,
+      profile_channel_id TEXT NOT NULL,
+      voice_channel_id TEXT NOT NULL,
+      window_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      started_at TEXT NOT NULL,
+      ended_at TEXT,
+      participant_ids_json TEXT NOT NULL,
+      participant_intervals_json TEXT NOT NULL,
+      peak_human_count INTEGER NOT NULL DEFAULT 0,
+      meaningful_session_id TEXT,
+      qualified_meaningful INTEGER NOT NULL DEFAULT 0,
+      close_reason TEXT,
+      start_estimated INTEGER NOT NULL DEFAULT 0,
+      end_estimated INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, window_id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vc_activity_windows_one_open_channel
+      ON vc_activity_windows (guild_id, category_id, profile_channel_id, voice_channel_id)
+      WHERE status = 'open';
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vc_activity_windows_one_open_actual_channel
+      ON vc_activity_windows (guild_id, voice_channel_id)
+      WHERE status = 'open';
+
+    CREATE INDEX IF NOT EXISTS idx_vc_activity_windows_open
+      ON vc_activity_windows (status, guild_id, category_id, profile_channel_id);
+
     CREATE TABLE IF NOT EXISTS vc_work_presence_intervals (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       stable_interval_key TEXT NOT NULL UNIQUE,
@@ -914,7 +947,310 @@ function runMigrations(database) {
       updated_at TEXT NOT NULL,
       PRIMARY KEY (guild_id, destination_channel_id)
     );
+
+    CREATE TABLE IF NOT EXISTS guild_member_membership_episodes (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      episode_id INTEGER NOT NULL,
+      joined_at TEXT NOT NULL,
+      left_at TEXT,
+      username_at_join TEXT,
+      global_name_at_join TEXT,
+      display_name_at_join TEXT,
+      nickname_at_join TEXT,
+      avatar_url_at_join TEXT,
+      avatar_hash_at_join TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id, episode_id)
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_membership_episodes_one_open
+      ON guild_member_membership_episodes (guild_id, user_id)
+      WHERE left_at IS NULL;
+
+    CREATE INDEX IF NOT EXISTS idx_membership_episodes_joined
+      ON guild_member_membership_episodes (guild_id, user_id, joined_at);
+
+    CREATE TABLE IF NOT EXISTS guild_member_identity_history (
+      identity_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      observed_at TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      username TEXT,
+      global_name TEXT,
+      display_name TEXT,
+      nickname TEXT,
+      avatar_url TEXT,
+      avatar_hash TEXT,
+      identity_fingerprint TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE (guild_id, user_id, identity_fingerprint, event_type, observed_at)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_member_identity_history_lookup
+      ON guild_member_identity_history (guild_id, user_id, observed_at);
+
+    CREATE TABLE IF NOT EXISTS timeline_user_threads (
+      guild_id TEXT NOT NULL,
+      owner_user_id TEXT NOT NULL,
+      forum_channel_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      thread_name TEXT,
+      starter_message_id TEXT,
+      status TEXT NOT NULL DEFAULT 'active',
+      deletion_reason TEXT,
+      created_at TEXT NOT NULL,
+      archived_at TEXT,
+      locked_at TEXT,
+      owner_left_at TEXT,
+      preservation_started_at TEXT,
+      preservation_completed_at TEXT,
+      deletion_requested_at TEXT,
+      deleted_at TEXT,
+      replacement_thread_id TEXT,
+      restoration_job_id INTEGER,
+      snapshot_count INTEGER NOT NULL DEFAULT 0,
+      media_count INTEGER NOT NULL DEFAULT 0,
+      preservation_coverage_json TEXT,
+      created_by_current_member_episode_id INTEGER,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, thread_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_timeline_user_threads_owner
+      ON timeline_user_threads (guild_id, owner_user_id, status, created_at);
+
+    CREATE TABLE IF NOT EXISTS timeline_restore_snapshots (
+      snapshot_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      source_forum_id TEXT NOT NULL,
+      source_thread_id TEXT NOT NULL,
+      source_message_id TEXT NOT NULL,
+      thread_owner_user_id TEXT NOT NULL,
+      author_user_id TEXT,
+      author_username_snapshot TEXT,
+      author_global_name_snapshot TEXT,
+      author_display_name_snapshot TEXT,
+      author_nickname_snapshot TEXT,
+      author_avatar_url_snapshot TEXT,
+      author_avatar_hash_snapshot TEXT,
+      author_avatar_source TEXT,
+      author_is_bot INTEGER NOT NULL DEFAULT 0,
+      content TEXT,
+      clean_content TEXT,
+      attachments_json TEXT NOT NULL DEFAULT '[]',
+      embeds_json TEXT NOT NULL DEFAULT '[]',
+      components_json TEXT NOT NULL DEFAULT '[]',
+      stickers_json TEXT NOT NULL DEFAULT '[]',
+      reactions_json TEXT NOT NULL DEFAULT '[]',
+      referenced_source_message_id TEXT,
+      referenced_author_user_id TEXT,
+      referenced_author_name_snapshot TEXT,
+      referenced_content_snapshot TEXT,
+      reply_kind TEXT NOT NULL DEFAULT 'not_a_reply',
+      message_type INTEGER,
+      sequence_snowflake TEXT NOT NULL,
+      source_created_at TEXT NOT NULL,
+      source_edited_at TEXT,
+      source_deleted_at TEXT,
+      timeline_message_id TEXT,
+      timeline_channel_id TEXT,
+      timeline_card_payload_json TEXT,
+      timeline_card_author_avatar_url TEXT,
+      snapshot_source TEXT NOT NULL,
+      restoration_fidelity TEXT NOT NULL,
+      restore_eligible INTEGER NOT NULL DEFAULT 1,
+      quality_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (guild_id, source_message_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_restore_snapshots_thread_order
+      ON timeline_restore_snapshots (guild_id, source_thread_id, source_created_at, sequence_snowflake);
+    CREATE INDEX IF NOT EXISTS idx_restore_snapshots_owner
+      ON timeline_restore_snapshots (guild_id, thread_owner_user_id, restore_eligible, source_created_at);
+
+    CREATE TABLE IF NOT EXISTS timeline_restore_media (
+      media_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      snapshot_id INTEGER NOT NULL,
+      source_message_id TEXT NOT NULL,
+      source_url TEXT,
+      proxy_url TEXT,
+      timeline_message_id TEXT,
+      timeline_attachment_id TEXT,
+      timeline_attachment_url TEXT,
+      component_media_url TEXT,
+      original_filename TEXT,
+      safe_filename TEXT,
+      content_type TEXT,
+      byte_size INTEGER NOT NULL DEFAULT 0,
+      sha256 TEXT,
+      local_path TEXT,
+      media_kind TEXT NOT NULL,
+      source_kind TEXT NOT NULL,
+      spoiler INTEGER NOT NULL DEFAULT 0,
+      width INTEGER,
+      height INTEGER,
+      duration_seconds REAL,
+      download_status TEXT NOT NULL DEFAULT 'pending',
+      last_error_code TEXT,
+      first_downloaded_at TEXT,
+      last_verified_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (snapshot_id) REFERENCES timeline_restore_snapshots(snapshot_id),
+      UNIQUE (snapshot_id, source_kind, source_url)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_restore_media_snapshot
+      ON timeline_restore_media (snapshot_id, download_status, media_kind);
+    CREATE INDEX IF NOT EXISTS idx_restore_media_hash
+      ON timeline_restore_media (guild_id, sha256);
+    CREATE INDEX IF NOT EXISTS idx_restore_media_source_url
+      ON timeline_restore_media (guild_id, source_url, download_status);
+
+    CREATE TABLE IF NOT EXISTS guild_member_return_notices (
+      guild_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      membership_episode_id INTEGER NOT NULL,
+      welcome_dm_status TEXT NOT NULL DEFAULT 'pending',
+      welcome_dm_sent_at TEXT,
+      restoration_dm_status TEXT NOT NULL DEFAULT 'not_applicable',
+      restoration_dm_sent_at TEXT,
+      last_error_code TEXT,
+      last_attempt_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, user_id, membership_episode_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS timeline_restoration_jobs (
+      job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      owner_user_id TEXT NOT NULL,
+      mode TEXT NOT NULL DEFAULT 'normal',
+      historical_owner_user_id TEXT,
+      initiator_user_id TEXT,
+      destination_test_thread_id TEXT,
+      destination_forum_id TEXT NOT NULL,
+      destination_thread_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      source_thread_ids_json TEXT NOT NULL,
+      total_item_count INTEGER NOT NULL DEFAULT 0,
+      completed_item_count INTEGER NOT NULL DEFAULT 0,
+      failed_item_count INTEGER NOT NULL DEFAULT 0,
+      skipped_item_count INTEGER NOT NULL DEFAULT 0,
+      text_restored_count INTEGER NOT NULL DEFAULT 0,
+      image_restored_count INTEGER NOT NULL DEFAULT 0,
+      video_restored_count INTEGER NOT NULL DEFAULT 0,
+      file_restored_count INTEGER NOT NULL DEFAULT 0,
+      reply_restored_count INTEGER NOT NULL DEFAULT 0,
+      unavailable_media_count INTEGER NOT NULL DEFAULT 0,
+      current_sequence INTEGER NOT NULL DEFAULT 0,
+      progress_percent REAL NOT NULL DEFAULT 0,
+      started_at TEXT,
+      last_processed_at TEXT,
+      next_run_at TEXT,
+      completed_at TEXT,
+      cancelled_at TEXT,
+      last_error_code TEXT,
+      previous_thread_locked INTEGER NOT NULL DEFAULT 0,
+      previous_thread_archived INTEGER NOT NULL DEFAULT 0,
+      previous_slowmode_seconds INTEGER NOT NULL DEFAULT 0,
+      previous_applied_tags_json TEXT NOT NULL DEFAULT '[]',
+      progress_message_id TEXT,
+      completion_message_id TEXT,
+      quality_json TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (guild_id, destination_thread_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_restoration_jobs_due
+      ON timeline_restoration_jobs (status, next_run_at);
+
+    CREATE TABLE IF NOT EXISTS timeline_restoration_items (
+      job_id INTEGER NOT NULL,
+      snapshot_id INTEGER NOT NULL,
+      source_thread_id TEXT NOT NULL,
+      source_message_id TEXT NOT NULL,
+      destination_message_id TEXT,
+      destination_webhook_id TEXT,
+      sequence_index INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      author_user_id TEXT,
+      author_name_used TEXT,
+      avatar_url_used TEXT,
+      identity_source_used TEXT,
+      text_status TEXT,
+      media_status TEXT,
+      reply_status TEXT,
+      last_error_code TEXT,
+      processed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (job_id, snapshot_id),
+      FOREIGN KEY (job_id) REFERENCES timeline_restoration_jobs(job_id),
+      FOREIGN KEY (snapshot_id) REFERENCES timeline_restore_snapshots(snapshot_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_restoration_items_pending
+      ON timeline_restoration_items (job_id, status, sequence_index);
+
+    CREATE TABLE IF NOT EXISTS timeline_restored_message_map (
+      guild_id TEXT NOT NULL,
+      destination_message_id TEXT NOT NULL,
+      destination_thread_id TEXT NOT NULL,
+      snapshot_id INTEGER NOT NULL,
+      restoration_job_id INTEGER NOT NULL,
+      webhook_id TEXT,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, destination_message_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_restored_message_map_thread
+      ON timeline_restored_message_map (guild_id, destination_thread_id, restoration_job_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_restored_message_map_job_snapshot
+      ON timeline_restored_message_map (restoration_job_id, snapshot_id);
+
+    CREATE TABLE IF NOT EXISTS timeline_restoration_webhooks (
+      guild_id TEXT NOT NULL,
+      forum_channel_id TEXT NOT NULL,
+      webhook_id TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (guild_id, forum_channel_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS timeline_media_audit_log (
+      audit_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      guild_id TEXT NOT NULL,
+      source_message_id TEXT,
+      timeline_message_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      before_json TEXT,
+      after_json TEXT,
+      error_code TEXT,
+      created_at TEXT NOT NULL
+    );
   `);
+
+  const guildMemberColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(guild_members)')
+      .all()
+      .map((column) => column.name)
+  );
+  if (guildMemberColumns.size && !guildMemberColumns.has('avatar_url')) {
+    database.exec('ALTER TABLE guild_members ADD COLUMN avatar_url TEXT');
+  }
+  if (guildMemberColumns.size && !guildMemberColumns.has('avatar_hash')) {
+    database.exec('ALTER TABLE guild_members ADD COLUMN avatar_hash TEXT');
+  }
 
   const vcProfileColumns = new Set(
     database
@@ -1123,6 +1459,47 @@ function runMigrations(database) {
 
   if (botDeletableMessageColumns.size && !botDeletableMessageColumns.has('metadata_json')) {
     database.exec('ALTER TABLE bot_deletable_messages ADD COLUMN metadata_json TEXT');
+  }
+
+  const timelineRestorationJobColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(timeline_restoration_jobs)')
+      .all()
+      .map((column) => column.name)
+  );
+
+  if (timelineRestorationJobColumns.size && !timelineRestorationJobColumns.has('mode')) {
+    database.exec("ALTER TABLE timeline_restoration_jobs ADD COLUMN mode TEXT NOT NULL DEFAULT 'normal'");
+  }
+  if (timelineRestorationJobColumns.size && !timelineRestorationJobColumns.has('historical_owner_user_id')) {
+    database.exec('ALTER TABLE timeline_restoration_jobs ADD COLUMN historical_owner_user_id TEXT');
+  }
+  if (timelineRestorationJobColumns.size && !timelineRestorationJobColumns.has('initiator_user_id')) {
+    database.exec('ALTER TABLE timeline_restoration_jobs ADD COLUMN initiator_user_id TEXT');
+  }
+  if (timelineRestorationJobColumns.size && !timelineRestorationJobColumns.has('destination_test_thread_id')) {
+    database.exec('ALTER TABLE timeline_restoration_jobs ADD COLUMN destination_test_thread_id TEXT');
+  }
+
+  const timelineRestorationItemColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(timeline_restoration_items)')
+      .all()
+      .map((column) => column.name)
+  );
+  if (timelineRestorationItemColumns.size && !timelineRestorationItemColumns.has('identity_source_used')) {
+    database.exec('ALTER TABLE timeline_restoration_items ADD COLUMN identity_source_used TEXT');
+  }
+
+  const vcActivityWindowColumns = new Set(
+    database
+      .prepare('PRAGMA table_info(vc_activity_windows)')
+      .all()
+      .map((column) => column.name)
+  );
+
+  if (vcActivityWindowColumns.size && !vcActivityWindowColumns.has('qualified_meaningful')) {
+    database.exec('ALTER TABLE vc_activity_windows ADD COLUMN qualified_meaningful INTEGER NOT NULL DEFAULT 0');
   }
 }
 

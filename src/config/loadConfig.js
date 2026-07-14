@@ -285,7 +285,9 @@ function ensureVoiceSessionSummaryConfig(value) {
         maxDisplayedEpisodes: 5,
         maxStoredEpisodes: 50,
         retentionDays: 7,
-        includeAfk: false
+        includeAfk: false,
+        visibleDuringLiveProfile: true,
+        trackSoloVisits: true
       }
     };
   }
@@ -326,7 +328,9 @@ function ensureVoiceSessionSummaryConfig(value) {
       maxDisplayedEpisodes: Math.max(1, Math.min(Number(value.shortActivity?.maxDisplayedEpisodes ?? 5), 20)),
       maxStoredEpisodes: Math.max(1, Math.min(Number(value.shortActivity?.maxStoredEpisodes ?? 50), 500)),
       retentionDays: Math.max(1, Number(value.shortActivity?.retentionDays ?? 7)),
-      includeAfk: value.shortActivity?.includeAfk === true
+      includeAfk: value.shortActivity?.includeAfk === true,
+      visibleDuringLiveProfile: value.shortActivity?.visibleDuringLiveProfile !== false,
+      trackSoloVisits: value.shortActivity?.trackSoloVisits !== false
     }
   };
 }
@@ -521,6 +525,42 @@ function ensureKnowledgeExportConfig(value) {
     fetchTimeoutMs: Math.max(1000, Number(value.fetchTimeoutMs ?? 15_000)),
     maxConcurrentExports: Math.max(1, Number(value.maxConcurrentExports ?? 2)),
     timezone: String(value.timezone || 'Asia/Tokyo')
+  };
+}
+
+function ensureTimelineRestorationConfig(value) {
+  const source = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+  const restoringTagIds = source.restoringTagIds && typeof source.restoringTagIds === 'object'
+    ? Object.fromEntries(Object.entries(source.restoringTagIds).map(([forumId, tagId]) => [String(forumId), String(tagId || '')]))
+    : {};
+
+  return {
+    enabled: source.enabled !== false,
+    // Thread deletion is deliberately not a product capability. Preservation never calls delete().
+    deletePersonalThreadOnMemberLeave: false,
+    leaveCleanupDelayMinutes: Math.max(0, Number(source.leaveCleanupDelayMinutes ?? 10)),
+    automaticRestoreOnThreadCreate: false,
+    userCommandRequired: true,
+    maxConcurrentJobs: Math.max(1, Number(source.maxConcurrentJobs ?? 1)),
+    messagesPerBatch: Math.max(1, Math.min(Number(source.messagesPerBatch ?? 20), 50)),
+    delayBetweenMessagesMs: Math.max(250, Number(source.delayBetweenMessagesMs ?? 1500)),
+    delayBetweenBatchesMs: Math.max(1000, Number(source.delayBetweenBatchesMs ?? 5000)),
+    maxAttemptsPerItem: Math.max(1, Number(source.maxAttemptsPerItem ?? 5)),
+    permanentMediaMirror: source.permanentMediaMirror !== false,
+    preserveDeletedSnapshots: source.preserveDeletedSnapshots !== false,
+    restoreOtherHumanParticipants: source.restoreOtherHumanParticipants !== false,
+    restoreBotMessages: source.restoreBotMessages === true,
+    blockHumanMessagesDuringRestore: source.blockHumanMessagesDuringRestore !== false,
+    completionMentionOwner: source.completionMentionOwner !== false,
+    successMediaCacheDays: null,
+    maxMediaBytes: Math.max(1_000_000, Number(source.maxMediaBytes ?? 50_000_000)),
+    mediaFetchTimeoutMs: Math.max(1000, Number(source.mediaFetchTimeoutMs ?? 20_000)),
+    maxRedirects: Math.max(0, Math.min(Number(source.maxRedirects ?? 4), 10)),
+    returnDmFailureCooldownDays: Math.max(1, Number(source.returnDmFailureCooldownDays ?? 14)),
+    managedWebhookName: String(source.managedWebhookName || 'Otaku Assistant Timeline Restore').slice(0, 80),
+    restorationNoticeCooldownMs: Math.max(10_000, Number(source.restorationNoticeCooldownMs ?? 60_000)),
+    temporarySlowmodeSeconds: Math.max(0, Math.min(Number(source.temporarySlowmodeSeconds ?? 21600), 21600)),
+    restoringTagIds
   };
 }
 
@@ -767,6 +807,7 @@ function loadConfig(configPath) {
     questionRolePrompt: ensureQuestionRolePromptConfig(parsed.questionRolePrompt),
     posthocRelay: ensurePosthocRelayConfig(parsed.posthocRelay),
     knowledgeExport: ensureKnowledgeExportConfig(parsed.knowledgeExport),
+    timelineRestoration: ensureTimelineRestorationConfig(parsed.timelineRestoration),
     introAddendums: ensureIntroAddendumsConfig(parsed.introAddendums),
     introDm: normalizedIntroDm,
     introVcReminder: ensureIntroVcReminderConfig(parsed.introVcReminder, normalizedIntroDm, normalizedOps.logChannelId || ''),

@@ -1,13 +1,9 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { fetchWithRedirectLimit } = require('../timelineRestoration/mediaMirror');
 
 const DEFAULT_TEMP_DIR = path.resolve(__dirname, '../../../tmp/relay-media');
 const DEFAULT_MAX_PREVIEW_IMAGE_BYTES = 8_000_000;
-
-const PREVIEW_IMAGE_FETCH_HEADERS = {
-  'User-Agent': 'Mozilla/5.0 compatible preview fetcher',
-  Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
-};
 
 function getTempDirectory(config) {
   const configured = config?.mediaRelay?.tempDir;
@@ -102,11 +98,7 @@ async function removeFile(filePath, logger = null, context = {}) {
 }
 
 async function downloadPreviewImage(url, outputPath, maxBytes) {
-  const response = await fetch(url, {
-    headers: PREVIEW_IMAGE_FETCH_HEADERS,
-    redirect: 'follow',
-    signal: AbortSignal.timeout(30_000)
-  });
+  const response = await fetchWithRedirectLimit(url, { timeoutMs: 30_000, maxRedirects: 4 });
 
   if (!response.ok) {
     throw new Error(`Preview image download failed with status ${response.status}`);
@@ -125,12 +117,14 @@ async function downloadPreviewImage(url, outputPath, maxBytes) {
     if (buffer.length > maxBytes) {
       throw new Error(`Preview image exceeds max bytes: ${buffer.length}`);
     }
+    const extension = detectImageExtension(buffer);
+    if (!extension || extension === 'svg') throw new Error('Preview response was not a supported raster image');
     await fs.mkdir(path.dirname(outputPath), { recursive: true });
     await fs.writeFile(outputPath, buffer);
     return {
       bytes: buffer.length,
       contentType: response.headers.get('content-type') || null,
-      extension: detectImageExtension(buffer) || inferExtensionFromContentType(response.headers.get('content-type'))
+      extension
     };
   }
 
@@ -152,12 +146,15 @@ async function downloadPreviewImage(url, outputPath, maxBytes) {
   }
 
   const finalBuffer = Buffer.concat(chunks);
+  if (!finalBuffer.length) throw new Error('Preview image download returned zero bytes');
+  const extension = detectImageExtension(finalBuffer);
+  if (!extension || extension === 'svg') throw new Error('Preview response was not a supported raster image');
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, finalBuffer);
   return {
     bytes: finalBuffer.length,
     contentType: response.headers.get('content-type') || null,
-    extension: detectImageExtension(finalBuffer) || inferExtensionFromContentType(response.headers.get('content-type'))
+    extension
   };
 }
 
@@ -186,13 +183,23 @@ async function preparePreviewImageRelay(post, config, logger = null) {
       continue;
     }
 
-    if (item.requiresReupload !== true) {
+    if (item.requiresReupload !== true && !/^https?:\/\//iu.test(String(item.url || ''))) {
       nextMediaItems.push(item);
       continue;
     }
 
     const sourceMessageId = post.messageId || null;
     const sourceUrl = socialPreview.sourceUrl || null;
+    if (componentFiles.length >= 10) {
+      omitted.add(item.url);
+      logger?.warn?.('media gallery item skipped preview_upload_limit_reached', {
+        sourceMessageId,
+        sourceUrl,
+        sourceType: item.sourceType || item.source || 'link_preview_image',
+        maxAttachmentCount: 10
+      });
+      continue;
+    }
     const downloadUrl = item.finalUrl || item.url;
     const preferredExtension = item.extension || inferExtensionFromContentType(item.contentType) || 'png';
     const uploadName = sanitizeFilePart(`preview-${sourceMessageId || 'message'}-${index + 1}.${preferredExtension}`);

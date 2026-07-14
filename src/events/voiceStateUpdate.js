@@ -3,6 +3,7 @@ const { handleVoiceSessionStateUpdate } = require('../modules/vcSessionSummary')
 const { handleVoiceWorkTimeStateUpdate } = require('../modules/voiceWorkTime');
 const { updateGuildMemberVcJoined, upsertGuildMember } = require('../modules/guildMembers');
 const { maybeSendVcNoIntroDm } = require('../modules/introDm');
+const { handleVoiceActivityWindowStateUpdate } = require('../modules/vcActivityWindows');
 
 module.exports = {
   async execute(oldState, newState) {
@@ -21,6 +22,17 @@ module.exports = {
       await handleVoiceSessionStateUpdate(oldState, newState);
     } catch (error) {
       newState.client.logger.error('Failed to handle VC session summary state', {
+        userId: newState.id,
+        oldChannelId: oldState.channelId,
+        newChannelId: newState.channelId,
+        error: error.message
+      });
+    }
+
+    try {
+      await handleVoiceActivityWindowStateUpdate(oldState, newState);
+    } catch (error) {
+      newState.client.logger.error('Failed to handle VC activity window state', {
         userId: newState.id,
         oldChannelId: oldState.channelId,
         newChannelId: newState.channelId,

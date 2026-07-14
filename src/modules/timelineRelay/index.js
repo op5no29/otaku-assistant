@@ -21,6 +21,7 @@ const { resolveRouteAccentColor } = require('../../utils/accentColors');
 const { handleAnimeHashtagPost } = require('../anime/hashtagIntegration');
 const { registerPosthocDeletableCard } = require('../deletableMessages');
 const { cleanupRelayedBotMessageState } = require('./relayDeletionCleanup');
+const { captureTimelineMessageSnapshot, recordTimelineRelayDelivery } = require('../timelineRestoration');
 
 const QUESTION_ROLE_SELECT_PREFIX = 'question-role-select:';
 const QUESTION_ROLE_SKIP_PREFIX = 'question-role-skip:';
@@ -1379,10 +1380,13 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
       forumType: 'tweet',
       logger
     });
-    await timelineMessage.edit({
+    const editedTimelineMessage = await timelineMessage.edit({
       ...mergePayload,
       attachments: []
     });
+    if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
+      await recordTimelineRelayDelivery(message.client, message, editedTimelineMessage, mergePayload);
+    }
     db.relays.upsertMessageRelayTarget({
       sourceMessageId: message.id,
       destinationChannelId: target.destinationChannelId,
@@ -1733,6 +1737,11 @@ async function sendForumThreadTimelineCard(thread, post, {
     throw new Error('Timeline channel was not found or is not text-based');
   }
 
+  if (forumType === 'tweet' && relayPost.message) {
+    await captureTimelineMessageSnapshot(thread.client, relayPost.message, {
+      snapshotSource: 'thread_starter_relay'
+    });
+  }
   const { payload, cleanup } = await buildTimelinePayload(relayPost, {
     config,
     forumType,
@@ -1748,6 +1757,26 @@ async function sendForumThreadTimelineCard(thread, post, {
       sendPurpose: 'timeline:thread-primary-card-send',
       callsiteLabel: 'timeline:thread-create'
     });
+    if (forumType === 'tweet' && relayPost.message) {
+      let verification = await recordTimelineRelayDelivery(thread.client, relayPost.message, sentMessage, payload);
+      if (!verification.valid) {
+        await sentMessage.delete().catch(() => null);
+        sentMessage = await sendRelayMessage(timelineChannel, payload, logger, {
+          sourceMessageId: relayPost.messageId,
+          destinationChannelId: String(config.timelineChannelId || ''),
+          relayKind: forumType,
+          sendPurpose: 'timeline:thread-media-verification-retry',
+          callsiteLabel: 'timeline:thread-create'
+        });
+        verification = await recordTimelineRelayDelivery(thread.client, relayPost.message, sentMessage, payload);
+        if (!verification.valid) {
+          await sentMessage.delete().catch(() => null);
+          throw Object.assign(new Error('Timeline starter media verification failed after retry'), {
+            code: 'timeline_media_verification_failed'
+          });
+        }
+      }
+    }
   } finally {
     await cleanup();
   }
@@ -2396,6 +2425,32 @@ async function relayTweetMessage(message, { config, db, logger }) {
             sendPurpose: buildRelaySendPurpose(message, target),
             callsiteLabel: 'timeline:message-create'
           });
+          if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
+            let verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, sendPayload);
+            if (!verification.valid) {
+              await sentMessage.delete().catch(() => null);
+              logger.warn('timeline media upload verification retrying', {
+                sourceMessageId: message.id,
+                destinationChannelId: target.destinationChannelId,
+                missingReferenceCount: verification.missingReferences.length,
+                zeroByteCount: verification.zeroByteAttachments.length
+              });
+              sentMessage = await sendRelayMessage(destinationChannel, sendPayload, logger, {
+                sourceMessageId: message.id,
+                destinationChannelId: target.destinationChannelId,
+                relayKind: target.relayKind,
+                sendPurpose: 'timeline:media-verification-retry',
+                callsiteLabel: 'timeline:message-create'
+              });
+              verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, sendPayload);
+              if (!verification.valid) {
+                await sentMessage.delete().catch(() => null);
+                throw Object.assign(new Error('Timeline media verification failed after retry'), {
+                  code: 'timeline_media_verification_failed'
+                });
+              }
+            }
+          }
         } finally {
           await cleanup();
         }
@@ -2593,10 +2648,28 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
         logger
       });
       try {
-        await timelineMessage.edit({
+        let editedTimelineMessage = await timelineMessage.edit({
           ...payload,
           attachments: []
         });
+        if (String(relayTarget.destinationChannelId) === String(config.timelineChannelId || '')) {
+          let verification = await recordTimelineRelayDelivery(message.client, message, editedTimelineMessage, payload);
+          if (!verification.valid) {
+            logger.warn('timeline media edit verification retrying', {
+              sourceMessageId: message.id,
+              timelineMessageId: timelineMessage.id,
+              missingReferenceCount: verification.missingReferences.length,
+              zeroByteCount: verification.zeroByteAttachments.length
+            });
+            editedTimelineMessage = await timelineMessage.edit({ ...payload, attachments: [] });
+            verification = await recordTimelineRelayDelivery(message.client, message, editedTimelineMessage, payload);
+            if (!verification.valid) {
+              throw Object.assign(new Error('Timeline media edit verification failed after retry'), {
+                code: 'timeline_media_verification_failed'
+              });
+            }
+          }
+        }
       } finally {
         await cleanup();
       }
@@ -2693,16 +2766,26 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
           logger
         });
         try {
-          sentMessage = await sendRelayMessage(destinationChannel, {
+          const sendPayload = {
             ...payload,
             ...(reply ? { reply } : {})
-          }, logger, {
+          };
+          sentMessage = await sendRelayMessage(destinationChannel, sendPayload, logger, {
             sourceMessageId: message.id,
             destinationChannelId: target.destinationChannelId,
             relayKind: target.relayKind,
             sendPurpose: 'timeline:missing-route-create-send',
             callsiteLabel: 'timeline:message-update'
           });
+          if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
+            const verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, sendPayload);
+            if (!verification.valid) {
+              await sentMessage.delete().catch(() => null);
+              throw Object.assign(new Error('Timeline media verification failed on update-created card'), {
+                code: 'timeline_media_verification_failed'
+              });
+            }
+          }
         } finally {
           await cleanup();
         }

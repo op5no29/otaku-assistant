@@ -6,10 +6,34 @@ const { handleIntroDmMessage } = require('../modules/introDm');
 const { saveIntroProfileFromMessage } = require('../modules/introProfiles');
 const { handleAnimeWatchedPromptReply } = require('../modules/anime');
 const { handleAnnictIntroDmCandidate } = require('../modules/annictUserIntegration');
+const { handleRestorationMessageCreate, captureTimelineMessageSnapshot } = require('../modules/timelineRestoration');
 
 module.exports = {
   async execute(message) {
     const client = message.client;
+
+    try {
+      if (await handleRestorationMessageCreate(message)) {
+        return;
+      }
+    } catch (error) {
+      client.logger.error('Restoration thread message guard failed', {
+        messageId: message.id,
+        channelId: message.channelId,
+        error: error.message
+      });
+      return;
+    }
+
+    try {
+      await captureTimelineMessageSnapshot(client, message);
+    } catch (error) {
+      client.logger.error('Timeline restoration snapshot save failed', {
+        messageId: message.id,
+        channelId: message.channelId,
+        error: error.message
+      });
+    }
 
     try {
       const handledIntroDm = await handleIntroDmMessage(message);

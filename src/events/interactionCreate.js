@@ -1,6 +1,20 @@
 module.exports = {
   async execute(interaction) {
     if (!interaction.isChatInputCommand()) {
+      const { handleTimelineRestorationInteraction } = require('../modules/timelineRestoration');
+      try {
+        const handledTimelineRestoration = await handleTimelineRestorationInteraction(interaction);
+        if (handledTimelineRestoration) {
+          return;
+        }
+      } catch (error) {
+        interaction.client.logger.error('Timeline restoration component interaction failed', {
+          interactionId: interaction.id,
+          customId: interaction.customId || null,
+          error: error.message
+        });
+      }
+
       const { handleVcSummaryInteraction } = require('../modules/vcSessionSummary');
       try {
         const handledVcSummary = await handleVcSummaryInteraction(interaction);

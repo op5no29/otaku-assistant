@@ -1420,6 +1420,21 @@ function addActiveSeconds(session, untilIso) {
     secondsBetween(session.lastActiveAt, untilIso);
 }
 
+async function clearShortActivityIfThresholdCrossed(client, session, previousSeconds, config) {
+  const thresholdSeconds = Number(config.minSessionActiveMinutes || 5) * 60;
+  if (Number(previousSeconds || 0) >= thresholdSeconds || Number(session.twoPlusTotalSeconds || 0) < thresholdSeconds) {
+    return;
+  }
+  await clearShortActivityForMeaningfulSession(client, session).catch((error) => {
+    client.logger.warn('vc short activity clear failed', {
+      guildId: session.guildId,
+      sessionId: session.sessionId,
+      reason: 'meaningful_threshold_crossed',
+      error: error.message
+    });
+  });
+}
+
 async function closeSession(client, session, snapshot, {
   closedAt,
   reason,
@@ -1495,13 +1510,15 @@ async function closeSession(client, session, snapshot, {
       });
     });
   } else {
-    await recordShortActivityForIgnoredSession(client, session, { reason }).catch((error) => {
-      client.logger.warn('vc short activity record failed', {
-        guildId: session.guildId,
-        sessionId: session.sessionId,
-        error: error.message
+    if (config.shortActivity?.trackSoloVisits === false) {
+      await recordShortActivityForIgnoredSession(client, session, { reason }).catch((error) => {
+        client.logger.warn('vc short activity record failed', {
+          guildId: session.guildId,
+          sessionId: session.sessionId,
+          error: error.message
+        });
       });
-    });
+    }
     await restoreLatestVoiceSessionEndSummaryCards(client, {
       reason: 'restored_previous_summary_after_short_activity'
     }).catch((error) => {
@@ -1699,7 +1716,9 @@ async function processVoiceSessionSnapshotLocked(client, guild, categoryId, mapp
           reason
         });
       }
+      const previousActiveSeconds = Number(session.twoPlusTotalSeconds || 0);
       addActiveSeconds(session, nowIso);
+      await clearShortActivityIfThresholdCrossed(client, session, previousActiveSeconds, config);
       session.lastActiveAt = nowIso;
     }
     session.lastTwoPlusAt = nowIso;
@@ -1732,7 +1751,9 @@ async function processVoiceSessionSnapshotLocked(client, guild, categoryId, mapp
   }
 
   if (session.status === SESSION_STATUSES.ACTIVE) {
+    const previousActiveSeconds = Number(session.twoPlusTotalSeconds || 0);
     addActiveSeconds(session, nowIso);
+    await clearShortActivityIfThresholdCrossed(client, session, previousActiveSeconds, config);
     session.status = SESSION_STATUSES.SOLO_GRACE;
     session.soloSince = nowIso;
     session.lastActiveAt = null;
@@ -1989,6 +2010,8 @@ function startVoiceSessionReconciliation(client) {
   const runTick = async () => {
     try {
       await reconcileVoiceSessions(client, { reason: 'periodic_reconcile' });
+      const { reconcileVoiceActivityWindows } = require('../vcActivityWindows');
+      await reconcileVoiceActivityWindows(client, { reason: 'periodic_reconcile' });
     } catch (error) {
       client.logger.error('vc session reconciliation failed', {
         error: error.message

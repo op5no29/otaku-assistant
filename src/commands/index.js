@@ -12,6 +12,7 @@ const workTimeCommand = require('./workTime');
 const workRankingCommand = require('./workRanking');
 const knowledgeExportCommand = require('./knowledgeExport');
 const annictCommand = require('./annict');
+const timelineRestoreCommand = require('./timelineRestore');
 
 const list = [
   resolveCommand,
@@ -27,7 +28,8 @@ const list = [
   workTimeCommand,
   workRankingCommand,
   knowledgeExportCommand,
-  annictCommand
+  annictCommand,
+  timelineRestoreCommand
 ];
 
 module.exports = {

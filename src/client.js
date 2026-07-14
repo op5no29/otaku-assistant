@@ -2,6 +2,7 @@ const { Client, Collection, GatewayIntentBits, Partials } = require('discord.js'
 const commands = require('./commands');
 const readyEvent = require('./events/ready');
 const threadCreateEvent = require('./events/threadCreate');
+const threadDeleteEvent = require('./events/threadDelete');
 const messageCreateEvent = require('./events/messageCreate');
 const messageUpdateEvent = require('./events/messageUpdate');
 const messageDeleteEvent = require('./events/messageDelete');
@@ -12,6 +13,7 @@ const interactionCreateEvent = require('./events/interactionCreate');
 const voiceStateUpdateEvent = require('./events/voiceStateUpdate');
 const guildMemberAddEvent = require('./events/guildMemberAdd');
 const guildMemberRemoveEvent = require('./events/guildMemberRemove');
+const guildMemberUpdateEvent = require('./events/guildMemberUpdate');
 
 function createBotClient({ appConfig, database, logger }) {
   const client = new Client({
@@ -80,9 +82,21 @@ function createBotClient({ appConfig, database, logger }) {
   client.voiceProfileUpdateQueues = new Map();
   client.voiceWorkTimeLocks = new Set();
   client.voiceWorkTimeInterval = null;
+  client.timelineLeavePreservationTimers = new Map();
+  client.timelineRestorationJobLocks = new Set();
+  client.timelineRestorationNoticeCooldowns = new Map();
+  client.timelineReturnNoticeLocks = new Set();
+  client.timelineRestorationWorkerInterval = null;
+  client.timelineRestorationWorkerRunning = false;
+  client.timelineRestorationPermissionsReady = false;
+  client.timelineReturnNoticeRetryInterval = null;
+  client.managedTimelineRestorationWebhookIds = new Set();
+  client.timelineKnownThreadDeletionReasons = new Map();
+  client.vcActivityWindowQueues = new Map();
 
   client.once('clientReady', (...args) => readyEvent.execute(...args));
   client.on('threadCreate', (...args) => threadCreateEvent.execute(...args));
+  client.on('threadDelete', (...args) => threadDeleteEvent.execute(...args));
   client.on('messageCreate', (...args) => messageCreateEvent.execute(...args));
   client.on('messageUpdate', (...args) => messageUpdateEvent.execute(...args));
   client.on('messageDelete', (...args) => messageDeleteEvent.execute(...args));
@@ -93,6 +107,7 @@ function createBotClient({ appConfig, database, logger }) {
   client.on('voiceStateUpdate', (...args) => voiceStateUpdateEvent.execute(...args));
   client.on('guildMemberAdd', (...args) => guildMemberAddEvent.execute(...args));
   client.on('guildMemberRemove', (...args) => guildMemberRemoveEvent.execute(...args));
+  client.on('guildMemberUpdate', (...args) => guildMemberUpdateEvent.execute(...args));
 
   return client;
 }

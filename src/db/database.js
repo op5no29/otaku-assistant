@@ -2,6 +2,8 @@ const fs = require('node:fs');
 const path = require('node:path');
 const Database = require('better-sqlite3');
 const { runMigrations } = require('./migrations');
+const { createTimelineRestorationStore } = require('./timelineRestorationStore');
+const { createVcActivityWindowStore } = require('./vcActivityWindowStore');
 
 function createDatabase(databasePath) {
   const directory = path.dirname(databasePath);
@@ -10,6 +12,8 @@ function createDatabase(databasePath) {
   const sqlite = new Database(databasePath);
   sqlite.pragma('journal_mode = WAL');
   runMigrations(sqlite);
+  const timelineRestoration = createTimelineRestorationStore(sqlite);
+  const vcActivityWindows = createVcActivityWindowStore(sqlite);
 
   const statements = {
     hasThreadRelay: sqlite.prepare('SELECT 1 FROM relayed_threads WHERE thread_id = ? LIMIT 1'),
@@ -1096,6 +1100,19 @@ function createDatabase(databasePath) {
           updated_at = ?
       WHERE status = 'active'
         AND datetime(ended_at) < datetime(?)
+    `),
+    pruneVcShortActivityScope: sqlite.prepare(`
+      UPDATE vc_short_activity_episodes
+      SET status = 'pruned', updated_at = ?
+      WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
+        AND status = 'active'
+        AND id NOT IN (
+          SELECT id FROM vc_short_activity_episodes
+          WHERE guild_id = ? AND category_id = ? AND profile_channel_id = ?
+            AND status = 'active'
+          ORDER BY datetime(ended_at) DESC, id DESC
+          LIMIT ?
+        )
     `),
     getVcShortActivityMessage: sqlite.prepare(`
       SELECT
@@ -2232,6 +2249,8 @@ function createDatabase(databasePath) {
         global_name,
         display_name,
         nickname,
+        avatar_url,
+        avatar_hash,
         joined_at,
         is_bot,
         left_at,
@@ -2239,13 +2258,18 @@ function createDatabase(databasePath) {
         last_vc_joined_at,
         created_at,
         updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(guild_id, user_id) DO UPDATE SET
         username = excluded.username,
         global_name = excluded.global_name,
         display_name = excluded.display_name,
         nickname = excluded.nickname,
-        joined_at = COALESCE(excluded.joined_at, guild_members.joined_at),
+        avatar_url = excluded.avatar_url,
+        avatar_hash = excluded.avatar_hash,
+        joined_at = CASE
+          WHEN guild_members.left_at IS NOT NULL THEN COALESCE(excluded.joined_at, guild_members.joined_at)
+          ELSE COALESCE(guild_members.joined_at, excluded.joined_at)
+        END,
         is_bot = excluded.is_bot,
         left_at = excluded.left_at,
         last_seen_at = excluded.last_seen_at,
@@ -2273,6 +2297,8 @@ function createDatabase(databasePath) {
         global_name AS globalName,
         display_name AS displayName,
         nickname,
+        avatar_url AS avatarUrl,
+        avatar_hash AS avatarHash,
         joined_at AS joinedAt,
         is_bot AS isBot,
         left_at AS leftAt,
@@ -3740,6 +3766,8 @@ function createDatabase(databasePath) {
 
   return {
     sqlite,
+    timelineRestoration,
+    vcActivityWindows,
     logDashboards: {
       get(guildId, dashboardKind) {
         return statements.getLogDashboardMessage.get(guildId, dashboardKind) || null;
@@ -4302,6 +4330,18 @@ function createDatabase(databasePath) {
       expireBefore(cutoffIso) {
         return statements.expireVcShortActivityBefore.run(new Date().toISOString(), cutoffIso).changes;
       },
+      pruneScope({ guildId, categoryId, profileChannelId, limit }) {
+        return statements.pruneVcShortActivityScope.run(
+          new Date().toISOString(),
+          guildId,
+          categoryId,
+          profileChannelId,
+          guildId,
+          categoryId,
+          profileChannelId,
+          Math.max(1, Number(limit || 50))
+        ).changes;
+      },
       getMessage({ guildId, categoryId, profileChannelId }) {
         return statements.getVcShortActivityMessage.get(guildId, categoryId, profileChannelId) || null;
       },
@@ -4801,6 +4841,8 @@ function createDatabase(databasePath) {
           record.globalName || null,
           record.displayName || null,
           record.nickname || null,
+          record.avatarUrl || null,
+          record.avatarHash || null,
           record.joinedAt || null,
           record.isBot ? 1 : 0,
           record.leftAt || null,

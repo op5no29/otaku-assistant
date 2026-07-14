@@ -9,6 +9,18 @@ module.exports = {
     const messageIds = Array.from(messages.keys());
 
     try {
+      const { handleTimelineSourceMessageDeleted } = require('../modules/timelineRestoration');
+      for (const message of messages.values()) {
+        handleTimelineSourceMessageDeleted(client, message);
+      }
+    } catch (error) {
+      client.logger.error('timeline restoration bulk deletion retention failed', {
+        count: messageIds.length,
+        error: error.message
+      });
+    }
+
+    try {
       client.db.archives.deleteMessages(messageIds);
       for (const messageId of messageIds) {
         client.db.introProfiles.deleteByMessageId(messageId);

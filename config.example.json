@@ -30,6 +30,29 @@
     "includeFirstImage": true,
     "ignoreBotPosts": true
   },
+  "timelineRestoration": {
+    "enabled": true,
+    "deletePersonalThreadOnMemberLeave": false,
+    "leaveCleanupDelayMinutes": 10,
+    "automaticRestoreOnThreadCreate": false,
+    "userCommandRequired": true,
+    "maxConcurrentJobs": 1,
+    "messagesPerBatch": 20,
+    "delayBetweenMessagesMs": 1500,
+    "delayBetweenBatchesMs": 5000,
+    "maxAttemptsPerItem": 5,
+    "permanentMediaMirror": true,
+    "preserveDeletedSnapshots": true,
+    "restoreOtherHumanParticipants": true,
+    "restoreBotMessages": false,
+    "blockHumanMessagesDuringRestore": true,
+    "completionMentionOwner": true,
+    "maxMediaBytes": 50000000,
+    "mediaFetchTimeoutMs": 20000,
+    "maxRedirects": 4,
+    "managedWebhookName": "Otaku Assistant Timeline Restore",
+    "restoringTagIds": {}
+  },
   "timelineShortMergeEnabled": true,
   "timelineShortMergeMaxChars": 60,
   "timelineShortMergeWindowSeconds": 180,
@@ -75,7 +98,9 @@
       "maxDisplayedEpisodes": 5,
       "maxStoredEpisodes": 50,
       "retentionDays": 7,
-      "includeAfk": false
+      "includeAfk": false,
+      "visibleDuringLiveProfile": true,
+      "trackSoloVisits": true
     }
   },
   "voiceWorkTime": {

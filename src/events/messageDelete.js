@@ -7,6 +7,17 @@ module.exports = {
     }
 
     try {
+      const { handleTimelineSourceMessageDeleted } = require('../modules/timelineRestoration');
+      handleTimelineSourceMessageDeleted(client, message);
+    } catch (error) {
+      client.logger.error('timeline restoration source deletion retention failed', {
+        messageId,
+        channelId: message.channelId || null,
+        error: error.message
+      });
+    }
+
+    try {
       client.db.archives.deleteMessage(messageId);
       client.logger.info('Message archive deleted', {
         messageId,

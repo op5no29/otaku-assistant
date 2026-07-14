@@ -11,7 +11,11 @@
     "check": "node scripts/check.js",
     "backfill-work-time": "node scripts/backfillWorkTime.js",
     "backfill-question-tags": "node scripts/backfillQuestionTags.js",
-    "post-entrance-guide": "node scripts/postEntranceGuide.js"
+    "post-entrance-guide": "node scripts/postEntranceGuide.js",
+    "index-timeline-restore": "node scripts/indexTimelineRestore.js",
+    "audit-timeline-media": "node scripts/auditTimelineMedia.js",
+    "probe-timeline-restoration": "node scripts/probeTimelineRestoration.js",
+    "probe-focused-followup": "node scripts/probeFocusedFollowup.js"
   },
   "keywords": [
     "discord",

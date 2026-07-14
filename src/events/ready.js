@@ -19,6 +19,14 @@ const {
   startVoiceSessionReconciliation
 } = require('../modules/vcSessionSummary');
 const { reconcileVoiceWorkIntervals, startVoiceWorkTimeTicker } = require('../modules/voiceWorkTime');
+const { reconcileVoiceActivityWindows } = require('../modules/vcActivityWindows');
+const {
+  auditRestorationPermissions,
+  schedulePendingDepartedPreservationsOnReady,
+  startTimelineRestorationWorker,
+  startReturnNoticeRetryWorker
+} = require('../modules/timelineRestoration');
+const { reconcileGuildMembersOnReady } = require('../modules/guildMembers');
 
 module.exports = {
   async execute(client) {
@@ -30,6 +38,16 @@ module.exports = {
         error: error.message
       });
     });
+    const membershipGuild = client.guilds.cache.get(process.env.GUILD_ID);
+    if (membershipGuild) {
+      await reconcileGuildMembersOnReady(client, membershipGuild).catch((error) => {
+        client.logger.error('guild membership ready reconciliation failed', {
+          guildId: membershipGuild.id,
+          error: error.message
+        });
+      });
+      schedulePendingDepartedPreservationsOnReady(client, membershipGuild.id);
+    }
     await backfillIntroAddendums(client, process.env.GUILD_ID).catch((error) => {
       client.logger.error('intro addendum backfill failed', {
         guildId: process.env.GUILD_ID,
@@ -39,6 +57,11 @@ module.exports = {
     await rebuildVoiceProfileState(client, { reason: 'ready_resync' });
     await reconcileVoiceSessions(client, { reason: 'ready_resync' }).catch((error) => {
       client.logger.error('vc session ready reconciliation failed', {
+        error: error.message
+      });
+    });
+    await reconcileVoiceActivityWindows(client, { reason: 'ready_resync' }).catch((error) => {
+      client.logger.error('vc activity window ready reconciliation failed', {
         error: error.message
       });
     });
@@ -56,6 +79,23 @@ module.exports = {
     startVoiceSessionReconciliation(client);
     startVoiceWorkTimeTicker(client);
     startQuestionRolePromptTimeouts(client);
+    const restorationPermissionAudit = await auditRestorationPermissions(client);
+    if (!restorationPermissionAudit.ok) {
+      client.logDashboardStatus = 'degraded';
+      await notifyOpsChannel(client, [
+        'Timeline restoration is disabled because required Discord permissions are missing.',
+        ...restorationPermissionAudit.failures.map((failure) => (
+          `- Forum ${failure.forumId}: ${failure.missing.join(', ')}`
+        ))
+      ].join('\n'), {
+        severity: 'error',
+        eventType: 'timeline_restoration_permission_failure',
+        immediateDashboard: true,
+        standalone: true
+      }).catch(() => null);
+    }
+    startTimelineRestorationWorker(client);
+    startReturnNoticeRetryWorker(client);
     startAnnictUserSync(client);
     startAnnictWatchedImportWorker(client);
 
