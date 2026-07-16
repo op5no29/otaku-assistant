@@ -325,14 +325,53 @@ async function recordTimelineRelayDelivery(client, sourceMessage, sentMessage, p
   const sentByName = new Map(sentAttachments.map((attachment) => [String(attachment.name || ''), attachment]));
   const missingReferences = componentData.attachmentReferences.filter((reference) => !sentByName.has(reference.filename));
   const zeroByteAttachments = sentAttachments.filter((attachment) => attachment.size <= 0);
-  const verificationDeferred = componentData.attachmentReferences.length > 0
-    && !hydration.refreshSucceeded
-    && missingReferences.length > 0;
+  const expectedAttachmentCount = componentData.attachmentReferences.length;
   const mediaValid = missingReferences.length === 0 && zeroByteAttachments.length === 0;
-  const valid = mediaValid || verificationDeferred;
+  const attachmentMetadataLooksComplete = sentAttachments.length >= expectedAttachmentCount;
+  const positiveNameMismatch = expectedAttachmentCount > 0
+    && attachmentMetadataLooksComplete
+    && missingReferences.length > 0;
+  const positiveCorruption = zeroByteAttachments.length > 0 || positiveNameMismatch;
+  const verificationUnavailable = expectedAttachmentCount > 0
+    && !mediaValid
+    && !positiveCorruption;
+  // discord.js can return no attachments for a successfully rendered Components V2
+  // message. Missing metadata is inconclusive; only positive corruption evidence fails.
+  const verificationDeferred = verificationUnavailable;
+  const verificationStatus = mediaValid
+    ? 'verified'
+    : verificationUnavailable ? 'verification_unavailable' : 'broken';
+  const valid = mediaValid || verificationUnavailable;
+
+  const logMessage = verificationUnavailable
+    ? 'timeline media verification unavailable for Components V2; preserving sent message'
+    : mediaValid ? 'timeline media upload verified' : 'broken timeline media detected';
+  client.logger[mediaValid ? 'info' : 'warn'](logMessage, {
+    guildId: sourceMessage.guildId,
+    sourceMessageId: sourceMessage.id,
+    timelineMessageId: hydratedMessage.id,
+    verificationStatus,
+    refreshSucceeded: hydration.refreshSucceeded,
+    expectedAttachmentReferences: expectedAttachmentCount,
+    attachmentCount: sentAttachments.length,
+    missingReferenceCount: missingReferences.length,
+    zeroByteCount: zeroByteAttachments.length
+  });
+
   const snapshot = client.db.timelineRestoration.snapshots.get(sourceMessage.guildId, sourceMessage.id);
   if (!snapshot) {
-    return { valid, mediaValid, verificationDeferred, missingReferences, zeroByteAttachments, skipped: true, sentMessage: hydratedMessage };
+    return {
+      valid,
+      mediaValid,
+      verificationDeferred,
+      verificationUnavailable,
+      verificationStatus,
+      positiveCorruption,
+      missingReferences,
+      zeroByteAttachments,
+      skipped: true,
+      sentMessage: hydratedMessage
+    };
   }
 
   client.db.timelineRestoration.snapshots.updateTimeline(sourceMessage.guildId, sourceMessage.id, {
@@ -343,7 +382,9 @@ async function recordTimelineRelayDelivery(client, sourceMessage, sentMessage, p
     qualityJson: json({
       timelineMediaVerified: mediaValid,
       timelineMediaVerificationDeferred: verificationDeferred,
-      expectedAttachmentReferences: componentData.attachmentReferences.length,
+      timelineMediaVerificationUnavailable: verificationUnavailable,
+      timelineMediaVerificationStatus: verificationStatus,
+      expectedAttachmentReferences: expectedAttachmentCount,
       actualAttachments: sentAttachments.length,
       missingReferenceCount: missingReferences.length,
       zeroByteCount: zeroByteAttachments.length
@@ -386,19 +427,17 @@ async function recordTimelineRelayDelivery(client, sourceMessage, sentMessage, p
     }
   }
 
-  const logMessage = verificationDeferred
-    ? 'timeline media upload verification deferred'
-    : mediaValid ? 'timeline media upload verified' : 'broken timeline media detected';
-  client.logger[mediaValid ? 'info' : 'warn'](logMessage, {
-    guildId: sourceMessage.guildId,
-    sourceMessageId: sourceMessage.id,
-    timelineMessageId: hydratedMessage.id,
-    expectedAttachmentReferences: componentData.attachmentReferences.length,
-    attachmentCount: sentAttachments.length,
-    missingReferenceCount: missingReferences.length,
-    zeroByteCount: zeroByteAttachments.length
-  });
-  return { valid, mediaValid, verificationDeferred, missingReferences, zeroByteAttachments, sentMessage: hydratedMessage };
+  return {
+    valid,
+    mediaValid,
+    verificationDeferred,
+    verificationUnavailable,
+    verificationStatus,
+    positiveCorruption,
+    missingReferences,
+    zeroByteAttachments,
+    sentMessage: hydratedMessage
+  };
 }
 
 async function preserveThreadHistory(client, thread) {

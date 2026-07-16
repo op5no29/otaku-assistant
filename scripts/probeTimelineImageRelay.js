@@ -5,9 +5,17 @@ const path = require('node:path');
 const { MessageFlags } = require('discord.js');
 const { createDatabase } = require('../src/db/database');
 const { extractThreadMessagePost } = require('../src/modules/timelineRelay/extractFirstPost');
-const { buildTimelinePayload, sendRelayMessage, relayTweetMessage } = require('../src/modules/timelineRelay');
+const {
+  buildTimelinePayload,
+  sendRelayMessage,
+  relayTweetMessage,
+  runTimelineRelayRetryBatch
+} = require('../src/modules/timelineRelay');
 const { extractTimelineComponentData } = require('../src/modules/timelineRestoration/componentsParser');
-const { recordTimelineRelayDelivery } = require('../src/modules/timelineRestoration/snapshots');
+const {
+  captureTimelineMessageSnapshot,
+  recordTimelineRelayDelivery
+} = require('../src/modules/timelineRestoration/snapshots');
 
 const bytes = {
   png: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]),
@@ -132,7 +140,15 @@ function attachmentCollection(files) {
   }]));
 }
 
-async function runCase({ name, content, files, baseUrl, tempDir, expectFailure = false }) {
+async function runCase({
+  name,
+  content,
+  files,
+  baseUrl,
+  tempDir,
+  expectFailure = false,
+  hydrationMode = 'full'
+}) {
   const message = makeMessage({
     id: String(1500000000000010000n + BigInt(runCase.counter++)),
     baseUrl,
@@ -148,6 +164,8 @@ async function runCase({ name, content, files, baseUrl, tempDir, expectFailure =
   const payloadFiles = payload.files || [];
   const sourceUrls = files.map((file) => `${baseUrl}/${file.path || file.kind}`);
   let sendCount = 0;
+  let deleteCount = 0;
+  let fetchCount = 0;
   let sendObservedExistingFiles = false;
   let hydratedAttachments = new Map();
   const destinationChannel = {
@@ -167,14 +185,19 @@ async function runCase({ name, content, files, baseUrl, tempDir, expectFailure =
       const hydrated = {
         id: '1600000000000000001',
         channelId: config.timelineChannelId,
-        attachments: hydratedAttachments
-      };
-      return {
-        id: hydrated.id,
-        channelId: hydrated.channelId,
         attachments: new Map(),
-        fetch: async () => hydrated
+        async fetch() {
+          fetchCount += 1;
+          if (hydrationMode === 'full' || (hydrationMode === 'eventual' && fetchCount >= 2)) {
+            this.attachments = hydratedAttachments;
+          }
+          return this;
+        },
+        async delete() {
+          deleteCount += 1;
+        }
       };
+      return hydrated;
     }
   };
 
@@ -190,7 +213,15 @@ async function runCase({ name, content, files, baseUrl, tempDir, expectFailure =
     };
     const verification = await recordTimelineRelayDelivery(client, message, sent, payload);
     assert.equal(verification.valid, true, `${name}: hydrated attachment verification`);
+    if (hydrationMode === 'empty' && componentData.attachmentReferences.length) {
+      assert.equal(verification.mediaValid, false, `${name}: empty API metadata is not falsely verified`);
+      assert.equal(verification.verificationUnavailable, true, `${name}: empty API metadata is unavailable`);
+      assert.equal(verification.verificationStatus, 'verification_unavailable', `${name}: unavailable state retained`);
+    } else {
+      assert.equal(verification.mediaValid, true, `${name}: attachment metadata eventually verifies`);
+    }
     assert.equal(sendCount, 1, `${name}: one destination card`);
+    assert.equal(deleteCount, 0, `${name}: verification never deletes the sent card`);
     assert.equal(sendObservedExistingFiles, true, `${name}: files survive through send`);
     assert.equal((payload.flags & MessageFlags.IsComponentsV2) !== 0, true, `${name}: Components V2`);
     assert.equal(payload.content, undefined, `${name}: no forbidden content`);
@@ -218,9 +249,62 @@ async function runCase({ name, content, files, baseUrl, tempDir, expectFailure =
     await prepared.cleanup();
     for (const filePath of paths) assert.equal(await fs.stat(filePath).then(() => true, () => false), false, `${name}: temp removed after send`);
   }
-  return { payload, message };
+  return { payload, message, sendCount, deleteCount };
 }
 runCase.counter = 0;
+
+async function probePreSendValidation({ baseUrl, tempDir }) {
+  const config = makeConfig(tempDir);
+
+  const mismatchMessage = makeMessage({
+    id: '1500000000000080001',
+    baseUrl,
+    content: 'mismatched filename',
+    files: [{ kind: 'png', name: 'mismatch.png' }]
+  });
+  const mismatchExtracted = await extractThreadMessagePost(mismatchMessage, config, logger);
+  const mismatchPrepared = await buildTimelinePayload(mismatchExtracted, { config, forumType: 'tweet', logger });
+  let mismatchSendCount = 0;
+  try {
+    const expectedName = extractTimelineComponentData(mismatchPrepared.payload).attachmentReferences[0].filename;
+    mismatchPrepared.payload.files[0].name = `wrong-${expectedName}`;
+    await assert.rejects(
+      sendRelayMessage({ send: async () => { mismatchSendCount += 1; } }, mismatchPrepared.payload, logger, {
+        sourceMessageId: mismatchMessage.id,
+        destinationChannelId: config.timelineChannelId,
+        relayKind: 'probe'
+      }),
+      (error) => error?.code === 'invalid_relay_payload'
+    );
+    assert.equal(mismatchSendCount, 0, 'mismatched attachment name is rejected before Discord send');
+  } finally {
+    await mismatchPrepared.cleanup();
+  }
+
+  const missingFileMessage = makeMessage({
+    id: '1500000000000080002',
+    baseUrl,
+    content: 'missing physical file',
+    files: [{ kind: 'png', name: 'missing.png' }]
+  });
+  const missingFileExtracted = await extractThreadMessagePost(missingFileMessage, config, logger);
+  const missingFilePrepared = await buildTimelinePayload(missingFileExtracted, { config, forumType: 'tweet', logger });
+  let missingFileSendCount = 0;
+  try {
+    await fs.unlink(missingFilePrepared.payload.files[0].attachment);
+    await assert.rejects(
+      sendRelayMessage({ send: async () => { missingFileSendCount += 1; } }, missingFilePrepared.payload, logger, {
+        sourceMessageId: missingFileMessage.id,
+        destinationChannelId: config.timelineChannelId,
+        relayKind: 'probe'
+      }),
+      (error) => error?.code === 'invalid_relay_payload'
+    );
+    assert.equal(missingFileSendCount, 0, 'missing physical file is rejected before Discord send');
+  } finally {
+    await missingFilePrepared.cleanup();
+  }
+}
 
 async function main() {
   const restoreFetch = installAssetFetchMock();
@@ -243,6 +327,23 @@ async function main() {
     assert(noExtension.payload.files[0].name.endsWith('.png'), 'extension inferred from detected bytes');
     await runCase({ name: 'failed-download', content: 'fallback body', files: [{ kind: 'png', path: 'failure', name: 'failed.png' }], baseUrl, tempDir, expectFailure: true });
     await runCase({ name: 'video', content: 'video', files: [{ kind: 'mp4', name: 'clip.mp4' }], baseUrl, tempDir });
+    await runCase({
+      name: 'two-images-empty-components-v2-attachments',
+      content: 'two images with unavailable metadata',
+      files: [{ kind: 'png', name: 'first.png' }, { kind: 'jpg', name: 'second.jpg' }],
+      baseUrl,
+      tempDir,
+      hydrationMode: 'empty'
+    });
+    await runCase({
+      name: 'attachments-eventually-hydrate',
+      content: 'eventual metadata',
+      files: [{ kind: 'png', name: 'eventual.png' }],
+      baseUrl,
+      tempDir,
+      hydrationMode: 'eventual'
+    });
+    await probePreSendValidation({ baseUrl, tempDir });
 
     const sendFailureMessage = makeMessage({ id: '1500000000000099999', baseUrl, content: 'send failure', files: [{ kind: 'png', name: 'send.png' }] });
     const config = makeConfig(tempDir);
@@ -285,27 +386,54 @@ async function main() {
       });
       integratedMessage.channel.type = 11;
       const destinationMessages = new Map();
+      const integratedLogs = [];
+      const integratedLogger = {
+        info(message, metadata = {}) { integratedLogs.push({ level: 'info', message, metadata }); },
+        warn(message, metadata = {}) { integratedLogs.push({ level: 'warn', message, metadata }); },
+        error(message, metadata = {}) { integratedLogs.push({ level: 'error', message, metadata }); },
+        debug(message, metadata = {}) { integratedLogs.push({ level: 'debug', message, metadata }); }
+      };
       let integratedSendCount = 0;
+      let integratedDeleteCount = 0;
+      let integratedEditCount = 0;
+      let integratedFetchCount = 0;
       const destinationChannel = {
         id: config.timelineChannelId,
         isTextBased: () => true,
         messages: { fetch: async (id) => destinationMessages.get(String(id)) || null },
         async send(payload) {
           integratedSendCount += 1;
-          const uploaded = attachmentCollection(await Promise.all((payload.files || []).map(async (file) => ({
-            name: file.name,
-            size: (await fs.stat(file.attachment)).size,
-            contentType: 'image/png'
-          }))));
-          const hydrated = {
+          const componentNames = extractTimelineComponentData(payload).attachmentReferences.map((entry) => entry.filename);
+          const uploadNames = (payload.files || []).map((file) => file.name);
+          assert.deepEqual(componentNames, uploadNames, 'live case attachment references match final upload names');
+          for (const file of payload.files || []) {
+            assert((await fs.stat(file.attachment)).size > 0, 'live case physical upload exists during send');
+          }
+          const sent = {
             id: '1600000000000099901',
             channelId: config.timelineChannelId,
-            attachments: uploaded,
-            async delete() { destinationMessages.delete(this.id); }
+            attachments: new Map(),
+            components: payload.components,
+            async fetch() {
+              integratedFetchCount += 1;
+              return this;
+            },
+            async edit(nextPayload) {
+              integratedEditCount += 1;
+              for (const file of nextPayload.files || []) {
+                assert((await fs.stat(file.attachment)).size > 0, 'retry edit receives an existing physical upload');
+              }
+              this.components = nextPayload.components;
+              this.attachments = new Map();
+              return this;
+            },
+            async delete() {
+              integratedDeleteCount += 1;
+              destinationMessages.delete(this.id);
+            }
           };
-          const initial = { ...hydrated, attachments: new Map(), fetch: async () => hydrated };
-          destinationMessages.set(hydrated.id, hydrated);
-          return initial;
+          destinationMessages.set(sent.id, sent);
+          return sent;
         }
       };
       const integratedConfig = {
@@ -322,7 +450,7 @@ async function main() {
       const integratedClient = {
         appConfig: integratedConfig,
         db,
-        logger,
+        logger: integratedLogger,
         timelineRelayMessageInFlight: new Set(),
         timelineRelayInFlight: new Set(),
         guilds: { cache: new Map() },
@@ -337,10 +465,37 @@ async function main() {
         fetch: async (id) => String(id) === destinationChannel.id ? destinationChannel : integratedMessage.channel
       };
       integratedClient.guilds.cache.set(integratedMessage.guildId, integratedMessage.guild);
-      await relayTweetMessage(integratedMessage, { config: integratedConfig, db, logger });
+      await captureTimelineMessageSnapshot(integratedClient, integratedMessage);
+      await relayTweetMessage(integratedMessage, { config: integratedConfig, db, logger: integratedLogger });
       const integratedMapping = db.relays.getMessageRelayTarget(integratedMessage.id, destinationChannel.id);
       assert.equal(integratedSendCount, 1, 'real relay boundary sends image card once');
+      assert.equal(integratedDeleteCount, 0, 'live Components V2 empty attachment metadata never deletes the card');
+      assert(integratedFetchCount >= 1, 'live case successfully refetches the sent message');
       assert.equal(integratedMapping?.relayedMessageId, '1600000000000099901', 'relay mapping committed after send');
+      assert.equal(db.timelineRelayRetries.get(integratedMessage.id, destinationChannel.id), null, 'unavailable verification does not schedule a destructive retry');
+      const integratedSnapshot = db.timelineRestoration.snapshots.get(integratedMessage.guildId, integratedMessage.id);
+      const integratedQuality = JSON.parse(integratedSnapshot.qualityJson);
+      assert.equal(integratedSnapshot.timelineMessageId, '1600000000000099901', 'snapshot retains original destination message ID');
+      assert.equal(integratedQuality.timelineMediaVerificationStatus, 'verification_unavailable', 'snapshot records unavailable verification');
+      assert(integratedLogs.some((entry) => entry.message === 'timeline media verification unavailable for Components V2; preserving sent message'), 'unavailable verification is logged explicitly');
+      assert(!integratedLogs.some((entry) => entry.message === 'broken timeline media detected'), 'empty Components V2 metadata is never logged as broken media');
+
+      db.timelineRelayRetries.schedule({
+        guildId: integratedMessage.guildId,
+        sourceMessageId: integratedMessage.id,
+        sourceChannelId: integratedMessage.channelId,
+        destinationChannelId: destinationChannel.id,
+        relayKind: 'timeline',
+        fallbackMessageId: integratedMapping.relayedMessageId,
+        errorCode: 'media_verification_deferred',
+        nextAttemptAt: new Date(0).toISOString()
+      });
+      await runTimelineRelayRetryBatch(integratedClient);
+      assert.equal(integratedSendCount, 1, 'legacy retry inspects or edits the existing card without a replacement send');
+      assert.equal(integratedDeleteCount, 0, 'legacy retry never deletes the existing card');
+      assert.equal(integratedEditCount, 1, 'legacy retry reuses the existing destination message');
+      assert.equal(db.relays.getMessageRelayTarget(integratedMessage.id, destinationChannel.id)?.relayedMessageId, integratedMapping.relayedMessageId, 'legacy retry preserves the destination message ID');
+      assert.equal(db.timelineRelayRetries.get(integratedMessage.id, destinationChannel.id)?.status, 'completed', 'legacy retry converges without replacement');
 
       const integratedFailure = makeMessage({
         id: '1500000000000099902',
@@ -361,7 +516,7 @@ async function main() {
         cache: new Map([[failingDestination.id, failingDestination], [integratedFailure.channel.id, integratedFailure.channel]]),
         fetch: async (id) => String(id) === failingDestination.id ? failingDestination : integratedFailure.channel
       };
-      await assert.rejects(relayTweetMessage(integratedFailure, { config: integratedConfig, db, logger }));
+      await assert.rejects(relayTweetMessage(integratedFailure, { config: integratedConfig, db, logger: integratedLogger }));
       assert.equal(db.relays.getMessageRelayTarget(integratedFailure.id, failingDestination.id), null, 'failed send has no relay mapping');
       assert.equal(db.timelineRelayRetries.get(integratedFailure.id, failingDestination.id)?.status, 'pending', 'failed send is durably retryable');
     } finally {

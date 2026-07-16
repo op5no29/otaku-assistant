@@ -1892,13 +1892,13 @@ async function sendForumThreadTimelineCard(thread, post, {
     authorId: relayPost.author?.id || null
   });
   if (forumType === 'tweet' && relayPost.message) {
-    if (relayState.attachmentRelayPending || mediaVerificationDeferred) {
+    if (relayState.attachmentRelayPending) {
       scheduleTimelineRelayRetry(db, logger, {
         message: relayPost.message,
         destinationChannelId: String(config.timelineChannelId || ''),
         relayKind: 'timeline',
         fallbackMessageId: sentMessage.id,
-        errorCode: mediaVerificationDeferred ? 'media_verification_deferred' : 'attachment_copy_pending'
+        errorCode: 'attachment_copy_pending'
       });
       logger.warn('timeline relay fallback card sent', {
         guildId: relayPost.message.guildId,
@@ -2609,13 +2609,13 @@ async function relayTweetMessage(message, { config, db, logger }) {
           relayedMessageId: sentMessage.id,
           authorId: message.author?.id || null
         });
-        if (relayState.attachmentRelayPending || mediaVerificationDeferred) {
+        if (relayState.attachmentRelayPending) {
           scheduleTimelineRelayRetry(db, logger, {
             message,
             destinationChannelId: target.destinationChannelId,
             relayKind: target.relayKind,
             fallbackMessageId: sentMessage.id,
-            errorCode: mediaVerificationDeferred ? 'media_verification_deferred' : 'attachment_copy_pending'
+            errorCode: 'attachment_copy_pending'
           });
           logger.warn('timeline relay fallback card sent', {
             guildId: message.guildId,
@@ -2864,13 +2864,13 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
         await cleanup();
       }
 
-      if (relayState.attachmentRelayPending || mediaVerificationDeferred) {
+      if (relayState.attachmentRelayPending) {
         scheduleTimelineRelayRetry(db, logger, {
           message,
           destinationChannelId: relayTarget.destinationChannelId,
           relayKind: currentTarget.relayKind,
           fallbackMessageId: timelineMessage.id,
-          errorCode: mediaVerificationDeferred ? 'media_verification_deferred' : 'attachment_copy_pending'
+          errorCode: 'attachment_copy_pending'
         });
       } else {
         db.timelineRelayRetries?.complete(message.id, relayTarget.destinationChannelId, timelineMessage.id);
@@ -3017,13 +3017,13 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
         relayedMessageId: sentMessage.id,
         authorId: message.author?.id || null
       });
-      if (relayState.attachmentRelayPending || mediaVerificationDeferred) {
+      if (relayState.attachmentRelayPending) {
         scheduleTimelineRelayRetry(db, logger, {
           message,
           destinationChannelId: target.destinationChannelId,
           relayKind: target.relayKind,
           fallbackMessageId: sentMessage.id,
-          errorCode: mediaVerificationDeferred ? 'media_verification_deferred' : 'attachment_copy_pending'
+          errorCode: 'attachment_copy_pending'
         });
       } else {
         db.timelineRelayRetries?.complete(message.id, target.destinationChannelId, sentMessage.id);
