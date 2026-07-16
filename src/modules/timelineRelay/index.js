@@ -4,8 +4,10 @@ const {
   ButtonStyle,
   ChannelType,
   StringSelectMenuBuilder,
-  StringSelectMenuOptionBuilder
+  StringSelectMenuOptionBuilder,
+  MessageFlags
 } = require('discord.js');
+const fs = require('node:fs/promises');
 const { buildTimelineMessage } = require('./buildTimelineMessage');
 const { extractFirstPost, extractThreadMessagePost, extractPlainMessagePost } = require('./extractFirstPost');
 const { prepareVideoThumbnail } = require('./videoThumbnail');
@@ -22,6 +24,7 @@ const { handleAnimeHashtagPost } = require('../anime/hashtagIntegration');
 const { registerPosthocDeletableCard } = require('../deletableMessages');
 const { cleanupRelayedBotMessageState } = require('./relayDeletionCleanup');
 const { captureTimelineMessageSnapshot, recordTimelineRelayDelivery } = require('../timelineRestoration');
+const { extractTimelineComponentData } = require('../timelineRestoration/componentsParser');
 
 const QUESTION_ROLE_SELECT_PREFIX = 'question-role-select:';
 const QUESTION_ROLE_SKIP_PREFIX = 'question-role-skip:';
@@ -1008,6 +1011,15 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
       forumType,
       logger
     }),
+    relayState: {
+      attachmentRelayPending: previewPrepared.post?.attachmentRelayPending === true,
+      attachmentCopyFailures: Array.isArray(previewPrepared.post?.attachmentCopyFailures)
+        ? previewPrepared.post.attachmentCopyFailures.map((failure) => ({
+            attachmentId: failure.attachmentId || null,
+            reason: failure.reason || 'copy_unavailable'
+          }))
+        : []
+    },
     cleanup: async () => {
       await previewPrepared.cleanup();
       await attachmentPrepared.cleanup();
@@ -1015,6 +1027,37 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
       await twitterResolved.cleanup();
     }
   };
+}
+
+function scheduleTimelineRelayRetry(db, logger, {
+  message,
+  destinationChannelId,
+  relayKind,
+  fallbackMessageId = null,
+  errorCode = 'attachment_copy_pending'
+}) {
+  if (!db.timelineRelayRetries || !message?.guildId || !message?.id || !message?.channelId) return null;
+  const job = db.timelineRelayRetries.schedule({
+    guildId: message.guildId,
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    destinationChannelId,
+    relayKind,
+    fallbackMessageId,
+    errorCode
+  });
+  logger.warn('timeline relay retry scheduled', {
+    guildId: message.guildId,
+    sourceMessageId: message.id,
+    destinationChannelId,
+    relayKind,
+    fallbackMessageId,
+    attempts: job?.attempts || 0,
+    maxAttempts: job?.maxAttempts || 0,
+    nextAttemptAt: job?.nextAttemptAt || null,
+    errorCode
+  });
+  return job;
 }
 
 function isMergeableShortTweetPost(post, config) {
@@ -1604,20 +1647,77 @@ function payloadHasMediaGallery(payload) {
   }
 }
 
+async function summarizeRelayPayload(payload) {
+  const componentData = extractTimelineComponentData(payload);
+  const files = Array.isArray(payload?.files) ? payload.files : [];
+  const fileNames = files.map((file) => String(file?.name || '')).filter(Boolean);
+  const fileNameSet = new Set(fileNames);
+  const duplicateFileNames = fileNames.filter((name, index) => fileNames.indexOf(name) !== index);
+  const missingPhysicalFiles = [];
+  for (const file of files) {
+    if (typeof file?.attachment !== 'string') continue;
+    const stat = await fs.stat(file.attachment).catch(() => null);
+    if (!stat?.isFile() || stat.size <= 0) {
+      missingPhysicalFiles.push(String(file?.name || 'unnamed'));
+    }
+  }
+  const missingReferences = componentData.attachmentReferences
+    .map((reference) => reference.filename)
+    .filter((name) => !fileNameSet.has(name));
+  return {
+    fileCount: files.length,
+    fileNames,
+    mediaGalleryAttachmentNames: componentData.attachmentReferences.map((reference) => reference.filename),
+    missingReferences,
+    duplicateFileNames: [...new Set(duplicateFileNames)],
+    missingPhysicalFiles,
+    hasComponents: Array.isArray(payload?.components) && payload.components.length > 0,
+    hasContent: Boolean(payload?.content),
+    hasEmbeds: Array.isArray(payload?.embeds) && payload.embeds.length > 0
+  };
+}
+
 async function sendRelayMessage(destinationChannel, payload, logger, meta) {
+  const summary = await summarizeRelayPayload(payload);
+  const componentsV2 = (Number(payload?.flags || 0) & Number(MessageFlags.IsComponentsV2)) !== 0;
+  const invalidComponentsV2Shape = componentsV2 && (summary.hasContent || summary.hasEmbeds);
+  if (
+    invalidComponentsV2Shape
+    || summary.missingReferences.length
+    || summary.duplicateFileNames.length
+    || summary.missingPhysicalFiles.length
+  ) {
+    logger.error('relay payload validation failed', { ...meta, ...summary, invalidComponentsV2Shape });
+    throw Object.assign(new Error('Relay payload failed attachment validation'), {
+      code: 'invalid_relay_payload'
+    });
+  }
   logger.info('Relay send starting', {
     ...meta,
-    hasComponents: Array.isArray(payload?.components) && payload.components.length > 0,
-    hasFiles: Array.isArray(payload?.files) && payload.files.length > 0,
+    ...summary,
+    hasFiles: summary.fileCount > 0,
     hasMediaGallery: payloadHasMediaGallery(payload),
-    hasContent: Boolean(payload?.content)
+    hasContent: summary.hasContent
   });
 
-  const sentMessage = await destinationChannel.send(payload);
+  let sentMessage;
+  try {
+    sentMessage = await destinationChannel.send(payload);
+  } catch (error) {
+    logger.error('Relay destination send failed', {
+      ...meta,
+      ...summary,
+      errorCode: error?.code || 'discord_send_failed',
+      errorName: error?.name || 'Error'
+    });
+    throw error;
+  }
 
   logger.info('Relay send finished', {
     ...meta,
-    returnedMessageId: sentMessage.id
+    returnedMessageId: sentMessage.id,
+    destinationMessageId: sentMessage.id,
+    fileCount: summary.fileCount
   });
 
   return sentMessage;
@@ -1742,13 +1842,14 @@ async function sendForumThreadTimelineCard(thread, post, {
       snapshotSource: 'thread_starter_relay'
     });
   }
-  const { payload, cleanup } = await buildTimelinePayload(relayPost, {
+  const { payload, cleanup, relayState } = await buildTimelinePayload(relayPost, {
     config,
     forumType,
     logger
   });
 
   let sentMessage;
+  let mediaVerificationDeferred = false;
   try {
     sentMessage = await sendRelayMessage(timelineChannel, payload, logger, {
       sourceMessageId: relayPost.messageId,
@@ -1759,6 +1860,7 @@ async function sendForumThreadTimelineCard(thread, post, {
     });
     if (forumType === 'tweet' && relayPost.message) {
       let verification = await recordTimelineRelayDelivery(thread.client, relayPost.message, sentMessage, payload);
+      mediaVerificationDeferred = verification.verificationDeferred === true;
       if (!verification.valid) {
         await sentMessage.delete().catch(() => null);
         sentMessage = await sendRelayMessage(timelineChannel, payload, logger, {
@@ -1769,6 +1871,7 @@ async function sendForumThreadTimelineCard(thread, post, {
           callsiteLabel: 'timeline:thread-create'
         });
         verification = await recordTimelineRelayDelivery(thread.client, relayPost.message, sentMessage, payload);
+        mediaVerificationDeferred = verification.verificationDeferred === true;
         if (!verification.valid) {
           await sentMessage.delete().catch(() => null);
           throw Object.assign(new Error('Timeline starter media verification failed after retry'), {
@@ -1788,6 +1891,27 @@ async function sendForumThreadTimelineCard(thread, post, {
     timelineMessageId: sentMessage.id,
     authorId: relayPost.author?.id || null
   });
+  if (forumType === 'tweet' && relayPost.message) {
+    if (relayState.attachmentRelayPending || mediaVerificationDeferred) {
+      scheduleTimelineRelayRetry(db, logger, {
+        message: relayPost.message,
+        destinationChannelId: String(config.timelineChannelId || ''),
+        relayKind: 'timeline',
+        fallbackMessageId: sentMessage.id,
+        errorCode: mediaVerificationDeferred ? 'media_verification_deferred' : 'attachment_copy_pending'
+      });
+      logger.warn('timeline relay fallback card sent', {
+        guildId: relayPost.message.guildId,
+        sourceMessageId: relayPost.message.id,
+        destinationChannelId: String(config.timelineChannelId || ''),
+        destinationMessageId: sentMessage.id,
+        attachmentFailureCount: relayState.attachmentCopyFailures.length,
+        mediaVerificationDeferred
+      });
+    } else {
+      db.timelineRelayRetries?.complete(relayPost.message.id, String(config.timelineChannelId || ''), sentMessage.id);
+    }
+  }
   updateTimelineDestinationState(db, {
     guildId: thread.guildId,
     destinationChannelId: String(config.timelineChannelId || ''),
@@ -2315,7 +2439,21 @@ async function relayTweetMessage(message, { config, db, logger }) {
     return;
   }
 
+  logger.info('timeline relay received', {
+    guildId: message.guildId,
+    sourceMessageId: message.id,
+    sourceChannelId: message.channelId,
+    declaredAttachmentCount: message.attachments?.size || 0
+  });
+
   const extractedPost = await extractThreadMessagePost(message, config, logger);
+  logger.info('timeline relay attachments extracted', {
+    guildId: message.guildId,
+    sourceMessageId: message.id,
+    attachmentCount: extractedPost.attachments?.length || 0,
+    imageCount: extractedPost.attachments?.filter((attachment) => attachment.isImage || attachment.isGif).length || 0,
+    videoCount: extractedPost.attachments?.filter((attachment) => attachment.isVideo).length || 0
+  });
   const post = await enrichPostWithMusicLink(extractedPost, { db, logger });
   const desiredTargets = getTweetDestinationTargets(post, config);
   logger.info('Computed relay destinations', {
@@ -2407,12 +2545,13 @@ async function relayTweetMessage(message, { config, db, logger }) {
           rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
         });
         const targetPost = preparePostForRelayTarget(post, target, config, logger);
-        const { payload, cleanup } = await buildTimelinePayload(targetPost, {
+        const { payload, cleanup, relayState } = await buildTimelinePayload(targetPost, {
           config,
           forumType: 'tweet',
           logger
         });
         let sentMessage;
+        let mediaVerificationDeferred = false;
         try {
           const sendPayload = {
             ...payload,
@@ -2427,6 +2566,7 @@ async function relayTweetMessage(message, { config, db, logger }) {
           });
           if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
             let verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, sendPayload);
+            mediaVerificationDeferred = verification.verificationDeferred === true;
             if (!verification.valid) {
               await sentMessage.delete().catch(() => null);
               logger.warn('timeline media upload verification retrying', {
@@ -2443,6 +2583,7 @@ async function relayTweetMessage(message, { config, db, logger }) {
                 callsiteLabel: 'timeline:message-create'
               });
               verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, sendPayload);
+              mediaVerificationDeferred = verification.verificationDeferred === true;
               if (!verification.valid) {
                 await sentMessage.delete().catch(() => null);
                 throw Object.assign(new Error('Timeline media verification failed after retry'), {
@@ -2453,6 +2594,10 @@ async function relayTweetMessage(message, { config, db, logger }) {
           }
         } finally {
           await cleanup();
+          logger.info('timeline relay cleanup completed', {
+            sourceMessageId: message.id,
+            destinationChannelId: target.destinationChannelId
+          });
         }
         db.relays.upsertMessageRelayTarget({
           sourceMessageId: message.id,
@@ -2464,6 +2609,25 @@ async function relayTweetMessage(message, { config, db, logger }) {
           relayedMessageId: sentMessage.id,
           authorId: message.author?.id || null
         });
+        if (relayState.attachmentRelayPending || mediaVerificationDeferred) {
+          scheduleTimelineRelayRetry(db, logger, {
+            message,
+            destinationChannelId: target.destinationChannelId,
+            relayKind: target.relayKind,
+            fallbackMessageId: sentMessage.id,
+            errorCode: mediaVerificationDeferred ? 'media_verification_deferred' : 'attachment_copy_pending'
+          });
+          logger.warn('timeline relay fallback card sent', {
+            guildId: message.guildId,
+            sourceMessageId: message.id,
+            destinationChannelId: target.destinationChannelId,
+            destinationMessageId: sentMessage.id,
+            attachmentFailureCount: relayState.attachmentCopyFailures.length,
+            mediaVerificationDeferred
+          });
+        } else {
+          db.timelineRelayRetries?.complete(message.id, target.destinationChannelId, sentMessage.id);
+        }
         updateTimelineDestinationState(db, {
           guildId: message.guildId,
           destinationChannelId: target.destinationChannelId,
@@ -2471,6 +2635,12 @@ async function relayTweetMessage(message, { config, db, logger }) {
           sourceMessageId: message.id,
           sourceThreadId: String(message.channel.id || ''),
           authorId: message.author?.id || null
+        });
+        logger.info('timeline relay mapping committed', {
+          guildId: message.guildId,
+          sourceMessageId: message.id,
+          destinationChannelId: target.destinationChannelId,
+          destinationMessageId: sentMessage.id
         });
 
         if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
@@ -2512,6 +2682,14 @@ async function relayTweetMessage(message, { config, db, logger }) {
             relayedMessageId: sentMessage.id
           });
         }
+      } catch (error) {
+        scheduleTimelineRelayRetry(db, logger, {
+          message,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
+          errorCode: error?.code || 'relay_send_failed'
+        });
+        throw error;
       } finally {
         message.client.timelineRelayMessageInFlight.delete(relayInFlightKey);
       }
@@ -2642,11 +2820,12 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
       });
 
       const targetPost = preparePostForRelayTarget(post, currentTarget || relayTarget, config, logger);
-      const { payload, cleanup } = await buildTimelinePayload(targetPost, {
+      const { payload, cleanup, relayState } = await buildTimelinePayload(targetPost, {
         config,
         forumType: 'tweet',
         logger
       });
+      let mediaVerificationDeferred = false;
       try {
         let editedTimelineMessage = await timelineMessage.edit({
           ...payload,
@@ -2654,6 +2833,7 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
         });
         if (String(relayTarget.destinationChannelId) === String(config.timelineChannelId || '')) {
           let verification = await recordTimelineRelayDelivery(message.client, message, editedTimelineMessage, payload);
+          mediaVerificationDeferred = verification.verificationDeferred === true;
           if (!verification.valid) {
             logger.warn('timeline media edit verification retrying', {
               sourceMessageId: message.id,
@@ -2663,6 +2843,7 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
             });
             editedTimelineMessage = await timelineMessage.edit({ ...payload, attachments: [] });
             verification = await recordTimelineRelayDelivery(message.client, message, editedTimelineMessage, payload);
+            mediaVerificationDeferred = verification.verificationDeferred === true;
             if (!verification.valid) {
               throw Object.assign(new Error('Timeline media edit verification failed after retry'), {
                 code: 'timeline_media_verification_failed'
@@ -2670,8 +2851,29 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
             }
           }
         }
+      } catch (error) {
+        scheduleTimelineRelayRetry(db, logger, {
+          message,
+          destinationChannelId: relayTarget.destinationChannelId,
+          relayKind: currentTarget.relayKind,
+          fallbackMessageId: timelineMessage.id,
+          errorCode: error?.code || 'relay_edit_failed'
+        });
+        throw error;
       } finally {
         await cleanup();
+      }
+
+      if (relayState.attachmentRelayPending || mediaVerificationDeferred) {
+        scheduleTimelineRelayRetry(db, logger, {
+          message,
+          destinationChannelId: relayTarget.destinationChannelId,
+          relayKind: currentTarget.relayKind,
+          fallbackMessageId: timelineMessage.id,
+          errorCode: mediaVerificationDeferred ? 'media_verification_deferred' : 'attachment_copy_pending'
+        });
+      } else {
+        db.timelineRelayRetries?.complete(message.id, relayTarget.destinationChannelId, timelineMessage.id);
       }
 
       db.relays.upsertMessageRelayTarget({
@@ -2728,6 +2930,8 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
 
       message.client.timelineRelayMessageInFlight.add(relayInFlightKey);
       let sentMessage;
+      let relayState;
+      let mediaVerificationDeferred = false;
       try {
         const existingTarget = db.relays.getMessageRelayTarget(message.id, target.destinationChannelId);
         if (existingTarget?.relayedMessageId) {
@@ -2760,11 +2964,13 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
         });
 
         const targetPost = preparePostForRelayTarget(post, target, config, logger);
-        const { payload, cleanup } = await buildTimelinePayload(targetPost, {
+        const preparedPayload = await buildTimelinePayload(targetPost, {
           config,
           forumType: 'tweet',
           logger
         });
+        const { payload, cleanup } = preparedPayload;
+        relayState = preparedPayload.relayState;
         try {
           const sendPayload = {
             ...payload,
@@ -2779,6 +2985,7 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
           });
           if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
             const verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, sendPayload);
+            mediaVerificationDeferred = verification.verificationDeferred === true;
             if (!verification.valid) {
               await sentMessage.delete().catch(() => null);
               throw Object.assign(new Error('Timeline media verification failed on update-created card'), {
@@ -2789,6 +2996,14 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
         } finally {
           await cleanup();
         }
+      } catch (error) {
+        scheduleTimelineRelayRetry(db, logger, {
+          message,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
+          errorCode: error?.code || 'relay_send_failed'
+        });
+        throw error;
       } finally {
         message.client.timelineRelayMessageInFlight.delete(relayInFlightKey);
       }
@@ -2802,6 +3017,17 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
         relayedMessageId: sentMessage.id,
         authorId: message.author?.id || null
       });
+      if (relayState.attachmentRelayPending || mediaVerificationDeferred) {
+        scheduleTimelineRelayRetry(db, logger, {
+          message,
+          destinationChannelId: target.destinationChannelId,
+          relayKind: target.relayKind,
+          fallbackMessageId: sentMessage.id,
+          errorCode: mediaVerificationDeferred ? 'media_verification_deferred' : 'attachment_copy_pending'
+        });
+      } else {
+        db.timelineRelayRetries?.complete(message.id, target.destinationChannelId, sentMessage.id);
+      }
   }
   logger.info('Tweet timeline card copies updated', {
     messageId: message.id,
@@ -3841,6 +4067,132 @@ async function handleRouteAddedOnMessageUpdate(oldMessage, newMessage, { config,
   });
 }
 
+function relayRetryDelayMs(attempts) {
+  return Math.min(60 * 60 * 1000, 60 * 1000 * (2 ** Math.max(0, Number(attempts) || 0)));
+}
+
+async function processTimelineRelayRetry(client, job) {
+  const { logger, db, appConfig: config } = client;
+  const lockKey = `${job.sourceMessageId}:${job.destinationChannelId}`;
+  if (client.timelineRelayRetryLocks?.has(lockKey)) return;
+  client.timelineRelayRetryLocks ||= new Set();
+  client.timelineRelayRetryLocks.add(lockKey);
+  try {
+    const guild = client.guilds.cache.get(job.guildId) || await client.guilds.fetch(job.guildId).catch(() => null);
+    const sourceChannel = guild
+      ? guild.channels.cache.get(job.sourceChannelId) || await guild.channels.fetch(job.sourceChannelId).catch(() => null)
+      : null;
+    const sourceMessage = await sourceChannel?.messages?.fetch?.(job.sourceMessageId).catch(() => null);
+    if (!sourceMessage) {
+      throw Object.assign(new Error('Timeline relay retry source message is unavailable'), { code: 'source_message_unavailable' });
+    }
+
+    const targetRow = db.relays.getMessageRelayTarget(job.sourceMessageId, job.destinationChannelId);
+    if (!targetRow?.relayedMessageId) {
+      await relayTweetMessage(sourceMessage, { config, db, logger });
+      const created = db.relays.getMessageRelayTarget(job.sourceMessageId, job.destinationChannelId);
+      if (!created?.relayedMessageId) {
+        throw Object.assign(new Error('Timeline relay retry did not create a destination mapping'), { code: 'retry_mapping_missing' });
+      }
+      return;
+    }
+
+    const extracted = await extractThreadMessagePost(sourceMessage, config, logger);
+    const post = await enrichPostWithMusicLink(extracted, { db, logger });
+    const target = getTweetDestinationTargets(post, config)
+      .find((entry) => String(entry.destinationChannelId) === String(job.destinationChannelId));
+    if (!target) {
+      db.timelineRelayRetries.complete(job.sourceMessageId, job.destinationChannelId, targetRow.relayedMessageId);
+      return;
+    }
+    const targetPost = preparePostForRelayTarget(post, target, config, logger);
+    const { payload, cleanup, relayState } = await buildTimelinePayload(targetPost, {
+      config,
+      forumType: 'tweet',
+      logger
+    });
+    try {
+      if (relayState.attachmentRelayPending) {
+        throw Object.assign(new Error('Timeline relay attachment copy remains unavailable'), {
+          code: relayState.attachmentCopyFailures[0]?.reason || 'attachment_copy_pending'
+        });
+      }
+      const destinationChannel = guild.channels.cache.get(job.destinationChannelId)
+        || await guild.channels.fetch(job.destinationChannelId).catch(() => null);
+      const destinationMessage = await destinationChannel?.messages?.fetch?.(targetRow.relayedMessageId).catch(() => null);
+      if (!destinationMessage) {
+        throw Object.assign(new Error('Timeline relay fallback message is unavailable'), { code: 'fallback_message_unavailable' });
+      }
+      const edited = await destinationMessage.edit({ ...payload, attachments: [] });
+      const verification = String(job.destinationChannelId) === String(config.timelineChannelId || '')
+        ? await recordTimelineRelayDelivery(client, sourceMessage, edited, payload)
+        : { valid: true };
+      if (!verification.valid) {
+        throw Object.assign(new Error('Timeline relay retry media verification failed'), {
+          code: 'timeline_media_verification_failed'
+        });
+      }
+      db.timelineRelayRetries.complete(job.sourceMessageId, job.destinationChannelId, edited.id);
+      logger.info('timeline relay retry completed', {
+        guildId: job.guildId,
+        sourceMessageId: job.sourceMessageId,
+        destinationChannelId: job.destinationChannelId,
+        destinationMessageId: edited.id,
+        attempts: job.attempts
+      });
+    } finally {
+      await cleanup();
+      logger.info('timeline relay retry cleanup completed', {
+        sourceMessageId: job.sourceMessageId,
+        destinationChannelId: job.destinationChannelId
+      });
+    }
+  } catch (error) {
+    const updated = db.timelineRelayRetries.failAttempt(
+      job.sourceMessageId,
+      job.destinationChannelId,
+      error?.code || 'retry_failed',
+      relayRetryDelayMs(job.attempts)
+    );
+    logger[updated?.status === 'failed' ? 'error' : 'warn'](
+      updated?.status === 'failed' ? 'timeline relay retry terminal failure' : 'timeline relay retry scheduled',
+      {
+        guildId: job.guildId,
+        sourceMessageId: job.sourceMessageId,
+        destinationChannelId: job.destinationChannelId,
+        attempts: updated?.attempts || Number(job.attempts || 0) + 1,
+        maxAttempts: updated?.maxAttempts || job.maxAttempts,
+        nextAttemptAt: updated?.nextAttemptAt || null,
+        errorCode: error?.code || 'retry_failed'
+      }
+    );
+  } finally {
+    client.timelineRelayRetryLocks.delete(lockKey);
+  }
+}
+
+async function runTimelineRelayRetryBatch(client) {
+  if (!client.db.timelineRelayRetries || client.timelineRelayRetryWorkerRunning) return;
+  client.timelineRelayRetryWorkerRunning = true;
+  try {
+    const jobs = client.db.timelineRelayRetries.listDue(new Date().toISOString(), 5);
+    for (const job of jobs) await processTimelineRelayRetry(client, job);
+  } finally {
+    client.timelineRelayRetryWorkerRunning = false;
+  }
+}
+
+function startTimelineRelayRetryWorker(client) {
+  if (client.timelineRelayRetryWorkerInterval) return;
+  const run = () => void runTimelineRelayRetryBatch(client).catch((error) => {
+    client.logger.error('timeline relay retry worker failed', { errorCode: error?.code || 'worker_failed' });
+  });
+  const timer = setInterval(run, 30_000);
+  timer.unref?.();
+  client.timelineRelayRetryWorkerInterval = timer;
+  setTimeout(run, 5_000).unref?.();
+}
+
 module.exports = {
   buildTimelinePayload,
   relayForumThread,
@@ -3851,5 +4203,8 @@ module.exports = {
   handleReplyBasedGlobalHashtagRoute,
   handleRouteAddedOnMessageUpdate,
   handleQuestionRolePromptInteraction,
-  startQuestionRolePromptTimeouts
+  startQuestionRolePromptTimeouts,
+  startTimelineRelayRetryWorker,
+  runTimelineRelayRetryBatch,
+  sendRelayMessage
 };

@@ -4,6 +4,7 @@ const Database = require('better-sqlite3');
 const { runMigrations } = require('./migrations');
 const { createTimelineRestorationStore } = require('./timelineRestorationStore');
 const { createVcActivityWindowStore } = require('./vcActivityWindowStore');
+const { createTimelineRelayRetryStore } = require('./timelineRelayRetryStore');
 
 function createDatabase(databasePath) {
   const directory = path.dirname(databasePath);
@@ -14,6 +15,7 @@ function createDatabase(databasePath) {
   runMigrations(sqlite);
   const timelineRestoration = createTimelineRestorationStore(sqlite);
   const vcActivityWindows = createVcActivityWindowStore(sqlite);
+  const timelineRelayRetries = createTimelineRelayRetryStore(sqlite);
 
   const statements = {
     hasThreadRelay: sqlite.prepare('SELECT 1 FROM relayed_threads WHERE thread_id = ? LIMIT 1'),
@@ -3768,6 +3770,7 @@ function createDatabase(databasePath) {
     sqlite,
     timelineRestoration,
     vcActivityWindows,
+    timelineRelayRetries,
     logDashboards: {
       get(guildId, dashboardKind) {
         return statements.getLogDashboardMessage.get(guildId, dashboardKind) || null;

@@ -1831,7 +1831,19 @@ function extractCustomEmojiMedia(content) {
 }
 
 function logAttachmentMetadata(logger, messageId, label, attachment, messageJsonAttachments = null) {
-  const attachmentJson = typeof attachment?.toJSON === 'function' ? attachment.toJSON() : null;
+  const urlMetadata = (value) => {
+    try {
+      const parsed = new URL(String(value || ''));
+      return { host: parsed.hostname, hasQuery: Boolean(parsed.search) };
+    } catch {
+      return { host: null, hasQuery: false };
+    }
+  };
+  const attachmentUrl = urlMetadata(attachment?.url);
+  const proxyUrl = urlMetadata(attachment?.proxyURL || attachment?.proxyUrl);
+  const messageJsonAttachment = messageJsonAttachments?.find?.(
+    (entry) => String(entry?.id || '') === String(attachment?.id || '')
+  ) || null;
 
   logger?.info?.('Attachment raw metadata observed', {
     sourceMessageId: messageId,
@@ -1841,13 +1853,16 @@ function logAttachmentMetadata(logger, messageId, label, attachment, messageJson
     attachmentFilename: attachment?.filename || null,
     attachmentTitle: attachment?.title || null,
     attachmentDescription: attachment?.description || null,
-    attachmentUrl: attachment?.url ? String(attachment.url).slice(0, 240) : null,
-    attachmentProxyUrl: attachment?.proxyURL ? String(attachment.proxyURL).slice(0, 240) : null,
+    attachmentUrlHost: attachmentUrl.host,
+    attachmentUrlHasQuery: attachmentUrl.hasQuery,
+    attachmentProxyUrlHost: proxyUrl.host,
+    attachmentProxyUrlHasQuery: proxyUrl.hasQuery,
     contentType: attachment?.contentType || null,
     size: Number(attachment?.size || 0),
-    attachmentKeys: attachment ? Object.keys(attachment) : [],
-    attachmentJson,
-    messageJsonAttachment: messageJsonAttachments?.find?.((entry) => String(entry?.id || '') === String(attachment?.id || '')) || null
+    attachmentKeys: attachment ? Object.keys(attachment).filter((key) => !/url|proxy/iu.test(key)) : [],
+    messageJsonAttachmentKeys: messageJsonAttachment
+      ? Object.keys(messageJsonAttachment).filter((key) => !/url|proxy/iu.test(key))
+      : []
   });
 }
 

@@ -1,0 +1,381 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs/promises');
+const os = require('node:os');
+const path = require('node:path');
+const { MessageFlags } = require('discord.js');
+const { createDatabase } = require('../src/db/database');
+const { extractThreadMessagePost } = require('../src/modules/timelineRelay/extractFirstPost');
+const { buildTimelinePayload, sendRelayMessage, relayTweetMessage } = require('../src/modules/timelineRelay');
+const { extractTimelineComponentData } = require('../src/modules/timelineRestoration/componentsParser');
+const { recordTimelineRelayDelivery } = require('../src/modules/timelineRestoration/snapshots');
+
+const bytes = {
+  png: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]),
+  jpg: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]),
+  webp: Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from('WEBP'), Buffer.from([1, 2])]),
+  gif: Buffer.from('GIF89a-test'),
+  mp4: Buffer.concat([Buffer.alloc(4), Buffer.from('ftyp'), Buffer.from('isom-test')])
+};
+
+const contentTypes = {
+  png: 'image/png', jpg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', mp4: 'video/mp4'
+};
+
+const logger = { info() {}, warn() {}, error() {}, debug() {} };
+
+function makeConfig(tempDir) {
+  return {
+    timelineChannelId: '1500000000000000002',
+    watchedForums: { tweet: ['1500000000000000001'], question: [], knowledge: [] },
+    globalHashtagRoutes: {},
+    botHashtagRoutes: {},
+    mediaRelay: { tempDir, maxReuploadBytes: 5_000_000 },
+    timeline: {
+      includeFirstImage: true,
+      maxContentLength: 4000,
+      shortMergeEnabled: false,
+      shortMergeMaxChars: 60,
+      shortMergeWindowSeconds: 120,
+      shortMergeMaxParts: 5
+    },
+    questions: { resolvedPrefix: '[解決済]' }
+  };
+}
+
+function makeMessage({ id, baseUrl, content = '本文', files = [] }) {
+  const attachments = new Map(files.map((file, index) => {
+    const attachmentId = `${id}${index + 1}`;
+    const name = file.spoiler ? `SPOILER_${file.name}` : file.name;
+    return [attachmentId, {
+      id: attachmentId,
+      name,
+      filename: name,
+      url: `${baseUrl}/${file.path || file.kind}`,
+      proxyURL: `${baseUrl}/${file.path || file.kind}`,
+      contentType: file.contentType || contentTypes[file.kind],
+      size: file.size ?? bytes[file.kind]?.length ?? 10,
+      spoiler: file.spoiler === true,
+      toJSON() { return { id: attachmentId, name, url: this.url, content_type: this.contentType, size: this.size }; }
+    }];
+  }));
+  const guild = {
+    id: '1224747669122056232',
+    members: { fetch: async () => null },
+    emojis: { cache: { find: () => null } },
+    client: { users: { fetch: async () => null } }
+  };
+  const channel = {
+    id: '1500000000000000100',
+    guildId: guild.id,
+    parentId: '1500000000000000001',
+    name: '画像プローブ',
+    ownerId: '609027783246741515',
+    parent: { id: '1500000000000000001', name: 'つぶやき' },
+    guild,
+    isThread: () => true,
+    messages: { fetch: async () => message }
+  };
+  const author = {
+    id: '609027783246741515',
+    username: '画像テスト',
+    globalName: '画像テスト',
+    bot: false,
+    displayAvatarURL: () => 'https://cdn.discordapp.com/embed/avatars/0.png'
+  };
+  const message = {
+    id,
+    guildId: guild.id,
+    channelId: channel.id,
+    guild,
+    channel,
+    author,
+    member: null,
+    content,
+    cleanContent: content,
+    attachments,
+    embeds: [],
+    reference: null,
+    createdAt: new Date('2026-07-17T00:00:00.000Z'),
+    inGuild: () => true,
+    toJSON: () => ({ attachments: [...attachments.values()].map((entry) => entry.toJSON()) })
+  };
+  return message;
+}
+
+function installAssetFetchMock() {
+  const originalFetch = global.fetch;
+  global.fetch = async (url) => {
+    const kind = new URL(String(url)).pathname.slice(1).split('/').pop();
+    if (kind === 'failure') return new Response('unavailable', { status: 503 });
+    const body = bytes[kind] || bytes.png;
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'content-type': contentTypes[kind] || 'image/png',
+        'content-length': String(body.length)
+      }
+    });
+  };
+  return () => { global.fetch = originalFetch; };
+}
+
+function attachmentCollection(files) {
+  return new Map(files.map((file, index) => [String(index + 1), {
+    id: String(index + 1),
+    name: file.name,
+    filename: file.name,
+    url: `https://cdn.destination.invalid/${encodeURIComponent(file.name)}`,
+    proxyURL: null,
+    contentType: file.contentType || null,
+    size: file.size,
+    spoiler: file.name.startsWith('SPOILER_')
+  }]));
+}
+
+async function runCase({ name, content, files, baseUrl, tempDir, expectFailure = false }) {
+  const message = makeMessage({
+    id: String(1500000000000010000n + BigInt(runCase.counter++)),
+    baseUrl,
+    content,
+    files
+  });
+  const config = makeConfig(tempDir);
+  const extracted = await extractThreadMessagePost(message, config, logger);
+  assert.equal(extracted.attachments.length, files.length, `${name}: extraction count`);
+  const prepared = await buildTimelinePayload(extracted, { config, forumType: 'tweet', logger });
+  const payload = prepared.payload;
+  const componentData = extractTimelineComponentData(payload);
+  const payloadFiles = payload.files || [];
+  const sourceUrls = files.map((file) => `${baseUrl}/${file.path || file.kind}`);
+  let sendCount = 0;
+  let sendObservedExistingFiles = false;
+  let hydratedAttachments = new Map();
+  const destinationChannel = {
+    id: config.timelineChannelId,
+    async send(finalPayload) {
+      sendCount += 1;
+      for (const file of finalPayload.files || []) {
+        const stat = await fs.stat(file.attachment);
+        assert(stat.size > 0, `${name}: upload exists during send`);
+      }
+      sendObservedExistingFiles = true;
+      hydratedAttachments = attachmentCollection(await Promise.all((finalPayload.files || []).map(async (file) => ({
+        name: file.name,
+        size: (await fs.stat(file.attachment)).size,
+        contentType: files.find((entry) => file.name.endsWith(entry.kind === 'jpg' ? '.jpg' : `.${entry.kind}`))?.contentType || null
+      }))));
+      const hydrated = {
+        id: '1600000000000000001',
+        channelId: config.timelineChannelId,
+        attachments: hydratedAttachments
+      };
+      return {
+        id: hydrated.id,
+        channelId: hydrated.channelId,
+        attachments: new Map(),
+        fetch: async () => hydrated
+      };
+    }
+  };
+
+  try {
+    const sent = await sendRelayMessage(destinationChannel, payload, logger, {
+      sourceMessageId: message.id,
+      destinationChannelId: config.timelineChannelId,
+      relayKind: 'probe'
+    });
+    const client = {
+      db: { timelineRestoration: { snapshots: { get: () => null } } },
+      logger
+    };
+    const verification = await recordTimelineRelayDelivery(client, message, sent, payload);
+    assert.equal(verification.valid, true, `${name}: hydrated attachment verification`);
+    assert.equal(sendCount, 1, `${name}: one destination card`);
+    assert.equal(sendObservedExistingFiles, true, `${name}: files survive through send`);
+    assert.equal((payload.flags & MessageFlags.IsComponentsV2) !== 0, true, `${name}: Components V2`);
+    assert.equal(payload.content, undefined, `${name}: no forbidden content`);
+    assert.equal(payload.embeds, undefined, `${name}: no forbidden embeds`);
+
+    if (expectFailure) {
+      assert.equal(payloadFiles.length, 0, `${name}: no failed source file upload`);
+      assert.equal(componentData.attachmentReferences.length, 0, `${name}: no broken gallery slot`);
+      assert.equal(prepared.relayState.attachmentRelayPending, true, `${name}: retry remains pending`);
+      assert(JSON.stringify(componentData.rawComponents).includes('添付ファイルをコピーできませんでした'));
+    } else {
+      assert.equal(payloadFiles.length, files.length, `${name}: destination file count`);
+      assert.equal(componentData.attachmentReferences.length, files.length, `${name}: gallery/file reference count`);
+      assert.deepEqual(
+        componentData.attachmentReferences.map((entry) => entry.filename).sort(),
+        payloadFiles.map((entry) => entry.name).sort(),
+        `${name}: attachment URL names exactly match files`
+      );
+      const serialized = JSON.stringify(componentData.rawComponents);
+      for (const sourceUrl of sourceUrls) assert(!serialized.includes(sourceUrl), `${name}: source URL omitted from rendered media`);
+    }
+  } finally {
+    const paths = payloadFiles.map((file) => file.attachment).filter((value) => typeof value === 'string');
+    for (const filePath of paths) assert(await fs.stat(filePath).then(() => true, () => false), `${name}: temp exists before cleanup`);
+    await prepared.cleanup();
+    for (const filePath of paths) assert.equal(await fs.stat(filePath).then(() => true, () => false), false, `${name}: temp removed after send`);
+  }
+  return { payload, message };
+}
+runCase.counter = 0;
+
+async function main() {
+  const restoreFetch = installAssetFetchMock();
+  const baseUrl = 'https://timeline-relay-probe.invalid';
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'timeline-image-relay-probe-'));
+  const tempDir = path.join(root, 'relay');
+  try {
+    await runCase({ name: 'text-only', content: 'text only', files: [], baseUrl, tempDir });
+    await runCase({ name: 'image-only-png', content: '', files: [{ kind: 'png', name: 'image.png' }], baseUrl, tempDir });
+    await runCase({ name: 'text-png', content: 'png', files: [{ kind: 'png', name: 'image.png' }], baseUrl, tempDir });
+    await runCase({ name: 'text-jpeg', content: 'jpeg', files: [{ kind: 'jpg', name: 'photo.jpeg' }], baseUrl, tempDir });
+    await runCase({ name: 'webp', content: 'webp', files: [{ kind: 'webp', name: 'photo.webp' }], baseUrl, tempDir });
+    await runCase({ name: 'gif', content: 'gif', files: [{ kind: 'gif', name: 'anim.gif' }], baseUrl, tempDir });
+    const spoiler = await runCase({ name: 'spoiler', content: 'spoiler', files: [{ kind: 'png', name: 'hidden.png', spoiler: true }], baseUrl, tempDir });
+    assert(spoiler.payload.files[0].name.startsWith('SPOILER_'), 'spoiler upload name retained');
+    await runCase({ name: 'two-images', content: 'two', files: [{ kind: 'png', name: 'same.png' }, { kind: 'png', name: 'same.png' }], baseUrl, tempDir });
+    const unicode = await runCase({ name: 'unicode-name', content: 'unicode', files: [{ kind: 'png', name: '日本語 画像.png' }], baseUrl, tempDir });
+    assert(/^[A-Za-z0-9_.-]+$/u.test(unicode.payload.files[0].name), 'upload filename is ASCII-safe');
+    const noExtension = await runCase({ name: 'missing-extension', content: 'missing ext', files: [{ kind: 'png', name: 'attachment', contentType: 'image/png' }], baseUrl, tempDir });
+    assert(noExtension.payload.files[0].name.endsWith('.png'), 'extension inferred from detected bytes');
+    await runCase({ name: 'failed-download', content: 'fallback body', files: [{ kind: 'png', path: 'failure', name: 'failed.png' }], baseUrl, tempDir, expectFailure: true });
+    await runCase({ name: 'video', content: 'video', files: [{ kind: 'mp4', name: 'clip.mp4' }], baseUrl, tempDir });
+
+    const sendFailureMessage = makeMessage({ id: '1500000000000099999', baseUrl, content: 'send failure', files: [{ kind: 'png', name: 'send.png' }] });
+    const config = makeConfig(tempDir);
+    const extracted = await extractThreadMessagePost(sendFailureMessage, config, logger);
+    const prepared = await buildTimelinePayload(extracted, { config, forumType: 'tweet', logger });
+    let mappingCreated = false;
+    try {
+      await assert.rejects(
+        sendRelayMessage({ send: async () => { throw Object.assign(new Error('mock Discord failure'), { code: 50013 }); } }, prepared.payload, logger, {
+          sourceMessageId: sendFailureMessage.id,
+          destinationChannelId: config.timelineChannelId,
+          relayKind: 'probe'
+        })
+      );
+      assert.equal(mappingCreated, false, 'mapping is not committed after send failure');
+    } finally {
+      await prepared.cleanup();
+    }
+
+    const dbPath = path.join(root, 'retry.sqlite');
+    const db = createDatabase(dbPath);
+    try {
+      const retry = {
+        guildId: sendFailureMessage.guildId,
+        sourceMessageId: sendFailureMessage.id,
+        sourceChannelId: sendFailureMessage.channelId,
+        destinationChannelId: config.timelineChannelId,
+        relayKind: 'timeline'
+      };
+      db.timelineRelayRetries.schedule(retry);
+      db.timelineRelayRetries.schedule(retry);
+      const rows = db.sqlite.prepare('SELECT COUNT(*) AS count FROM timeline_relay_retry_jobs').get();
+      assert.equal(rows.count, 1, 'retry scheduling is idempotent per source and destination');
+
+      const integratedMessage = makeMessage({
+        id: '1500000000000099901',
+        baseUrl,
+        content: 'integrated image relay',
+        files: [{ kind: 'png', name: 'integrated.png' }]
+      });
+      integratedMessage.channel.type = 11;
+      const destinationMessages = new Map();
+      let integratedSendCount = 0;
+      const destinationChannel = {
+        id: config.timelineChannelId,
+        isTextBased: () => true,
+        messages: { fetch: async (id) => destinationMessages.get(String(id)) || null },
+        async send(payload) {
+          integratedSendCount += 1;
+          const uploaded = attachmentCollection(await Promise.all((payload.files || []).map(async (file) => ({
+            name: file.name,
+            size: (await fs.stat(file.attachment)).size,
+            contentType: 'image/png'
+          }))));
+          const hydrated = {
+            id: '1600000000000099901',
+            channelId: config.timelineChannelId,
+            attachments: uploaded,
+            async delete() { destinationMessages.delete(this.id); }
+          };
+          const initial = { ...hydrated, attachments: new Map(), fetch: async () => hydrated };
+          destinationMessages.set(hydrated.id, hydrated);
+          return initial;
+        }
+      };
+      const integratedConfig = {
+        ...config,
+        timelineRestoration: {
+          enabled: true,
+          permanentMediaMirror: false,
+          restoreBotMessages: false,
+          maxMediaBytes: 5_000_000,
+          mediaFetchTimeoutMs: 1_000,
+          maxRedirects: 1
+        }
+      };
+      const integratedClient = {
+        appConfig: integratedConfig,
+        db,
+        logger,
+        timelineRelayMessageInFlight: new Set(),
+        timelineRelayInFlight: new Set(),
+        guilds: { cache: new Map() },
+        users: { fetch: async () => null },
+        user: { id: '999999999999999999' }
+      };
+      integratedMessage.client = integratedClient;
+      integratedMessage.guild.client = integratedClient;
+      integratedMessage.channel.guild = integratedMessage.guild;
+      integratedMessage.guild.channels = {
+        cache: new Map([[destinationChannel.id, destinationChannel], [integratedMessage.channel.id, integratedMessage.channel]]),
+        fetch: async (id) => String(id) === destinationChannel.id ? destinationChannel : integratedMessage.channel
+      };
+      integratedClient.guilds.cache.set(integratedMessage.guildId, integratedMessage.guild);
+      await relayTweetMessage(integratedMessage, { config: integratedConfig, db, logger });
+      const integratedMapping = db.relays.getMessageRelayTarget(integratedMessage.id, destinationChannel.id);
+      assert.equal(integratedSendCount, 1, 'real relay boundary sends image card once');
+      assert.equal(integratedMapping?.relayedMessageId, '1600000000000099901', 'relay mapping committed after send');
+
+      const integratedFailure = makeMessage({
+        id: '1500000000000099902',
+        baseUrl,
+        content: 'integrated send failure',
+        files: [{ kind: 'png', name: 'integrated-failure.png' }]
+      });
+      integratedFailure.channel.type = 11;
+      integratedFailure.client = integratedClient;
+      integratedFailure.guild.client = integratedClient;
+      integratedFailure.channel.guild = integratedFailure.guild;
+      const failingDestination = {
+        id: destinationChannel.id,
+        isTextBased: () => true,
+        send: async () => { throw Object.assign(new Error('mock destination failure'), { code: 50013 }); }
+      };
+      integratedFailure.guild.channels = {
+        cache: new Map([[failingDestination.id, failingDestination], [integratedFailure.channel.id, integratedFailure.channel]]),
+        fetch: async (id) => String(id) === failingDestination.id ? failingDestination : integratedFailure.channel
+      };
+      await assert.rejects(relayTweetMessage(integratedFailure, { config: integratedConfig, db, logger }));
+      assert.equal(db.relays.getMessageRelayTarget(integratedFailure.id, failingDestination.id), null, 'failed send has no relay mapping');
+      assert.equal(db.timelineRelayRetries.get(integratedFailure.id, failingDestination.id)?.status, 'pending', 'failed send is durably retryable');
+    } finally {
+      db.sqlite.close();
+    }
+
+    console.log('probe-timeline-image-relay: passed (mocked Discord send boundary; no live Discord test)');
+  } finally {
+    restoreFetch();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

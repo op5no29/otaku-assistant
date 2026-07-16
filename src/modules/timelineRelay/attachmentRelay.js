@@ -1,3 +1,4 @@
+const crypto = require('node:crypto');
 const fs = require('node:fs/promises');
 const path = require('node:path');
 const {
@@ -95,22 +96,25 @@ async function downloadAttachment(url, outputPath, maxBytes, declaredContentType
   }
   const buffer = Buffer.concat(chunks);
   if (!buffer.length) throw Object.assign(new Error('Attachment download returned zero bytes'), { code: 'zero_byte_attachment' });
-  detectType(buffer.subarray(0, 512), response.headers.get('content-type') || declaredContentType);
+  const detected = detectType(buffer.subarray(0, 512), response.headers.get('content-type') || declaredContentType);
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, buffer);
-  return { byteSize: buffer.length };
+  return {
+    byteSize: buffer.length,
+    detectedContentType: detected.contentType,
+    detectedExtension: detected.extension,
+    detectedKind: detected.kind
+  };
 }
 
-function formatDownloadLabel(attachment, index, total) {
-  if (total === 1 && attachment.isVideo) {
-    return '添付動画を開く';
-  }
-
-  if (total === 1) {
-    return '添付ファイルを開く';
-  }
-
-  return `添付ファイル${index + 1}を開く`;
+function withDetectedExtension(fileName, detectedExtension) {
+  const normalizedExtension = String(detectedExtension || '').toLowerCase().replace(/[^a-z0-9]/gu, '').slice(0, 10);
+  if (!normalizedExtension) return String(fileName || 'attachment');
+  const currentExtension = path.extname(String(fileName || ''));
+  const baseName = currentExtension
+    ? String(fileName).slice(0, -currentExtension.length)
+    : String(fileName || 'attachment');
+  return `${baseName || 'attachment'}.${normalizedExtension}`;
 }
 
 function buildAttachmentDisplayLine(attachment) {
@@ -169,30 +173,6 @@ function addVideoMediaGalleryItem({
   return true;
 }
 
-function addDownloadFallback({
-  downloadableAttachments,
-  attachment,
-  index,
-  total,
-  logger,
-  context,
-  reason
-}) {
-  downloadableAttachments.push({
-    name: attachment.displayName,
-    url: attachment.url,
-    label: formatDownloadLabel(attachment, index, total),
-    isVideo: attachment.isVideo
-  });
-  if (attachment.isVideo) {
-    logger.warn('relay video download fallback used', {
-      ...context,
-      fallbackReason: reason,
-      fallbackUrl: attachment.url || null
-    });
-  }
-}
-
 async function prepareAttachmentRelay(post, config, logger) {
   const attachments = Array.isArray(post.attachments) ? post.attachments : [];
   const cleanupPaths = [];
@@ -200,6 +180,7 @@ async function prepareAttachmentRelay(post, config, logger) {
   const fileComponentUrls = [];
   const mediaGalleryItems = [...(post.mediaGalleryItems || [])];
   const downloadableAttachments = [];
+  const attachmentCopyFailures = [];
   const usedDisplayNames = new Set(
     componentFiles.map((file) => file?.name).filter(Boolean)
   );
@@ -275,7 +256,7 @@ async function prepareAttachmentRelay(post, config, logger) {
     if (attachment.isVideo) {
       logger.info('relay video attachment detected', {
         ...context,
-        attachmentUrl: attachment.url || null,
+        sourceUrlPresent: Boolean(attachment.url),
         isSpoiler: attachment.isSpoiler === true
       });
     }
@@ -303,13 +284,9 @@ async function prepareAttachmentRelay(post, config, logger) {
           spoilerPreservedByRawPreviewSuppression: true
         });
       }
-      addDownloadFallback({
-        downloadableAttachments,
-        attachment,
-        index,
-        total: relayAttachments.length,
-        logger,
-        context,
+      attachmentCopyFailures.push({
+        attachmentId: attachment.id || null,
+        displayName: attachment.displayName,
         reason: 'file_too_large'
       });
       continue;
@@ -330,40 +307,54 @@ async function prepareAttachmentRelay(post, config, logger) {
           spoilerPreservedByRawPreviewSuppression: true
         });
       }
-      addDownloadFallback({
-        downloadableAttachments,
-        attachment,
-        index,
-        total: relayAttachments.length,
-        logger,
-        context,
+      attachmentCopyFailures.push({
+        attachmentId: attachment.id || null,
+        displayName: attachment.displayName,
         reason: 'preview_upload_limit_reached'
       });
       continue;
     }
 
-    const extension = path.extname(attachment.originalFileName || attachment.name || '');
-    const tempName = `${sanitizeTempName(post.messageId)}-${sanitizeTempName(attachment.id || `${index}`)}${extension}`;
-    const filePath = path.join(tempDir, tempName);
+    const tempName = `${sanitizeTempName(post.messageId)}-${sanitizeTempName(attachment.id || `${index}`)}-${crypto.randomUUID()}.partial`;
+    let filePath = path.join(tempDir, tempName);
     context.safeTempFileName = tempName;
+    const initialComponentFileCount = componentFiles.length;
+    const initialGalleryItemCount = mediaGalleryItems.length;
+    const initialFileComponentCount = fileComponentUrls.length;
 
     try {
       if (attachment.isVideo) {
         logger.info('relay video attachment reupload started', context);
       }
       logger.info('Attachment download started', context);
-      await downloadAttachment(attachment.url, filePath, maxReuploadBytes, attachment.contentType);
+      const download = await downloadAttachment(attachment.url, filePath, maxReuploadBytes, attachment.contentType);
+      const uploadSourceName = withDetectedExtension(attachment.displayName, download.detectedExtension);
+      attachment.uploadFileName = stableUploadName(post.messageId, index, uploadSourceName, attachment.isSpoiler);
+      attachment.detectedContentType = download.detectedContentType;
+      attachment.detectedExtension = download.detectedExtension;
+      attachment.actualByteSize = download.byteSize;
+      attachment.isImage = download.detectedKind === 'image';
+      attachment.isVideo = download.detectedKind === 'video';
+      attachment.isGif = download.detectedContentType === 'image/gif';
+      context.uploadFileName = attachment.uploadFileName;
+      context.detectedContentType = download.detectedContentType;
+      context.detectedExtension = download.detectedExtension;
+      context.actualByteSize = download.byteSize;
+      const finalizedPath = path.join(tempDir, `${crypto.randomUUID()}-${sanitizeTempName(attachment.uploadFileName)}`);
+      await fs.rename(filePath, finalizedPath);
+      filePath = finalizedPath;
+      context.safeTempFileName = path.basename(finalizedPath);
       logger.info('Attachment download finished', context);
-      cleanupPaths.push(filePath);
+      logger.info('relay attachment MIME detected', context);
+      logger.info('relay attachment upload filename generated', context);
+      cleanupPaths.push(finalizedPath);
 
       logger.info('Attachment re-upload attempted', {
         ...context,
         displayFileName: attachment.displayName,
         uploadFileName: attachment.uploadFileName
       });
-      attachment.reuploadSucceeded = true;
       attachment.displayLine = attachment.displayName;
-      reuploadedCount += 1;
 
       if (attachment.isVideo) {
         hasReuploadedVideo = true;
@@ -463,6 +454,9 @@ async function prepareAttachmentRelay(post, config, logger) {
         });
       }
 
+      attachment.reuploadSucceeded = true;
+      reuploadedCount += 1;
+
       logger.info('Attachment re-upload succeeded', {
         ...context,
         displayFileName: attachment.displayName,
@@ -483,6 +477,9 @@ async function prepareAttachmentRelay(post, config, logger) {
         }
       }
     } catch (error) {
+      componentFiles.splice(initialComponentFileCount);
+      mediaGalleryItems.splice(initialGalleryItemCount);
+      fileComponentUrls.splice(initialFileComponentCount);
       logger.warn('Attachment re-upload failed; using fallback', {
         ...context,
         error: error.message,
@@ -518,15 +515,13 @@ async function prepareAttachmentRelay(post, config, logger) {
       attachment.reuploadSkippedReason = 'upload_failed';
       attachment.displayLine = buildAttachmentDisplayLine(attachment);
       await removeFile(filePath, logger, context);
-      addDownloadFallback({
-        downloadableAttachments,
-        attachment,
-        index,
-        total: relayAttachments.length,
-        logger,
-        context,
-        reason: 'download_or_upload_failed'
-      });
+      if (!attachmentCopyFailures.some((failure) => failure.attachmentId === (attachment.id || null))) {
+        attachmentCopyFailures.push({
+          attachmentId: attachment.id || null,
+          displayName: attachment.displayName,
+          reason: error.code || 'download_or_upload_failed'
+        });
+      }
     }
   }
 
@@ -539,16 +534,13 @@ async function prepareAttachmentRelay(post, config, logger) {
       continue;
     }
 
-    if (downloadableAttachments.some((entry) => entry.name === attachment.displayName && entry.url === attachment.url)) {
-      continue;
+    if (!attachmentCopyFailures.some((failure) => failure.attachmentId === (attachment.id || null))) {
+      attachmentCopyFailures.push({
+        attachmentId: attachment.id || null,
+        displayName: attachment.displayName,
+        reason: attachment.reuploadSkippedReason || 'copy_unavailable'
+      });
     }
-
-    downloadableAttachments.push({
-      name: attachment.displayName,
-      url: attachment.url,
-      label: formatDownloadLabel(attachment, index, relayAttachments.length),
-      isVideo: attachment.isVideo
-    });
   }
 
   const spoilerPreviewUrls = new Set(
@@ -589,6 +581,8 @@ async function prepareAttachmentRelay(post, config, logger) {
       componentFiles,
       fileComponentUrls,
       downloadableAttachments,
+      attachmentCopyFailures,
+      attachmentRelayPending: attachmentCopyFailures.length > 0,
       hasMoreDownloadableAttachments: downloadableAttachments.length > MAX_DOWNLOAD_BUTTONS,
       generatedVideoThumbnailUrl: shouldSuppressGeneratedVideoThumbnail ? null : post.generatedVideoThumbnailUrl,
       mediaGalleryItems

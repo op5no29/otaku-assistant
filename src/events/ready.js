@@ -11,7 +11,7 @@ const { startIntroDmQueueProcessor } = require('../modules/introDm');
 const { runAnimeOrphanScan, reconcileAnimeCardControls } = require('../modules/anime');
 const { getAnnictAccessToken } = require('../modules/anime/annictClient');
 const { startAnnictUserSync, startAnnictWatchedImportWorker } = require('../modules/annictUserIntegration');
-const { startQuestionRolePromptTimeouts } = require('../modules/timelineRelay');
+const { startQuestionRolePromptTimeouts, startTimelineRelayRetryWorker } = require('../modules/timelineRelay');
 const { backfillIntroAddendums } = require('../modules/introProfiles');
 const {
   cleanupVoiceSessionEndSummaryCards,
@@ -79,6 +79,7 @@ module.exports = {
     startVoiceSessionReconciliation(client);
     startVoiceWorkTimeTicker(client);
     startQuestionRolePromptTimeouts(client);
+    startTimelineRelayRetryWorker(client);
     const restorationPermissionAudit = await auditRestorationPermissions(client);
     if (!restorationPermissionAudit.ok) {
       client.logDashboardStatus = 'degraded';

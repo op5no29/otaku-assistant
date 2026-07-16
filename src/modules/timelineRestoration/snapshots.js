@@ -288,23 +288,60 @@ function serializeTimelinePayload(payload) {
   };
 }
 
+function wait(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function hydrateTimelineMessageAttachments(sentMessage, expectedAttachmentCount) {
+  let current = sentMessage;
+  if (!expectedAttachmentCount || collectAttachmentUrls(current).length >= expectedAttachmentCount) {
+    return { message: current, refreshSucceeded: true };
+  }
+
+  const delays = [0, 250, 750];
+  let refreshSucceeded = false;
+  for (const delay of delays) {
+    if (delay) await wait(delay);
+    const fetched = await current?.fetch?.().catch(() => null)
+      || await current?.channel?.messages?.fetch?.(current.id).catch(() => null);
+    if (fetched) {
+      current = fetched;
+      refreshSucceeded = true;
+    }
+    if (collectAttachmentUrls(current).length >= expectedAttachmentCount) break;
+  }
+  return { message: current, refreshSucceeded };
+}
+
 async function recordTimelineRelayDelivery(client, sourceMessage, sentMessage, payload) {
-  const snapshot = client.db.timelineRestoration.snapshots.get(sourceMessage.guildId, sourceMessage.id);
-  if (!snapshot) return { valid: true, skipped: true };
   const componentData = extractTimelineComponentData(payload);
-  const sentAttachments = collectAttachmentUrls(sentMessage);
+  const hydration = await hydrateTimelineMessageAttachments(
+    sentMessage,
+    componentData.attachmentReferences.length
+  );
+  const hydratedMessage = hydration.message;
+  const sentAttachments = collectAttachmentUrls(hydratedMessage);
   const sentByName = new Map(sentAttachments.map((attachment) => [String(attachment.name || ''), attachment]));
   const missingReferences = componentData.attachmentReferences.filter((reference) => !sentByName.has(reference.filename));
   const zeroByteAttachments = sentAttachments.filter((attachment) => attachment.size <= 0);
-  const valid = missingReferences.length === 0 && zeroByteAttachments.length === 0;
+  const verificationDeferred = componentData.attachmentReferences.length > 0
+    && !hydration.refreshSucceeded
+    && missingReferences.length > 0;
+  const mediaValid = missingReferences.length === 0 && zeroByteAttachments.length === 0;
+  const valid = mediaValid || verificationDeferred;
+  const snapshot = client.db.timelineRestoration.snapshots.get(sourceMessage.guildId, sourceMessage.id);
+  if (!snapshot) {
+    return { valid, mediaValid, verificationDeferred, missingReferences, zeroByteAttachments, skipped: true, sentMessage: hydratedMessage };
+  }
 
   client.db.timelineRestoration.snapshots.updateTimeline(sourceMessage.guildId, sourceMessage.id, {
-    timelineMessageId: sentMessage.id,
-    timelineChannelId: sentMessage.channelId,
+    timelineMessageId: hydratedMessage.id,
+    timelineChannelId: hydratedMessage.channelId,
     timelineCardPayloadJson: json(serializeTimelinePayload(payload), {}),
     timelineCardAuthorAvatarUrl: componentData.authorAvatarUrl,
     qualityJson: json({
-      timelineMediaVerified: valid,
+      timelineMediaVerified: mediaValid,
+      timelineMediaVerificationDeferred: verificationDeferred,
       expectedAttachmentReferences: componentData.attachmentReferences.length,
       actualAttachments: sentAttachments.length,
       missingReferenceCount: missingReferences.length,
@@ -318,7 +355,7 @@ async function recordTimelineRelayDelivery(client, sourceMessage, sentMessage, p
     if (matched) {
       client.db.timelineRestoration.media.upsert({
         ...matched,
-        timelineMessageId: sentMessage.id,
+        timelineMessageId: hydratedMessage.id,
         timelineAttachmentId: attachment.id,
         timelineAttachmentUrl: attachment.url,
         componentMediaUrl: `attachment://${attachment.name}`,
@@ -329,7 +366,7 @@ async function recordTimelineRelayDelivery(client, sourceMessage, sentMessage, p
       await mirrorMediaCandidate(client, snapshot, {
         index: mediaRows.length,
         url: attachment.url,
-        timelineMessageId: sentMessage.id,
+        timelineMessageId: hydratedMessage.id,
         timelineAttachmentId: attachment.id,
         timelineAttachmentUrl: attachment.url,
         componentMediaUrl: `attachment://${attachment.name}`,
@@ -348,16 +385,19 @@ async function recordTimelineRelayDelivery(client, sourceMessage, sentMessage, p
     }
   }
 
-  client.logger[valid ? 'info' : 'warn'](valid ? 'timeline media upload verified' : 'broken timeline media detected', {
+  const logMessage = verificationDeferred
+    ? 'timeline media upload verification deferred'
+    : mediaValid ? 'timeline media upload verified' : 'broken timeline media detected';
+  client.logger[mediaValid ? 'info' : 'warn'](logMessage, {
     guildId: sourceMessage.guildId,
     sourceMessageId: sourceMessage.id,
-    timelineMessageId: sentMessage.id,
+    timelineMessageId: hydratedMessage.id,
     expectedAttachmentReferences: componentData.attachmentReferences.length,
     attachmentCount: sentAttachments.length,
     missingReferenceCount: missingReferences.length,
     zeroByteCount: zeroByteAttachments.length
   });
-  return { valid, missingReferences, zeroByteAttachments };
+  return { valid, mediaValid, verificationDeferred, missingReferences, zeroByteAttachments, sentMessage: hydratedMessage };
 }
 
 async function preserveThreadHistory(client, thread) {

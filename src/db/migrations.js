@@ -1491,6 +1491,27 @@ function runMigrations(database) {
     database.exec('ALTER TABLE timeline_restoration_items ADD COLUMN identity_source_used TEXT');
   }
 
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS timeline_relay_retry_jobs (
+      guild_id TEXT NOT NULL,
+      source_message_id TEXT NOT NULL,
+      source_channel_id TEXT NOT NULL,
+      destination_channel_id TEXT NOT NULL,
+      relay_kind TEXT NOT NULL,
+      fallback_message_id TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 5,
+      next_attempt_at TEXT NOT NULL,
+      last_error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY (source_message_id, destination_channel_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_timeline_relay_retry_due
+      ON timeline_relay_retry_jobs (status, next_attempt_at);
+  `);
+
   const vcActivityWindowColumns = new Set(
     database
       .prepare('PRAGMA table_info(vc_activity_windows)')

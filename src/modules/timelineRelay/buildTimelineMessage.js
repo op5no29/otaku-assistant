@@ -716,6 +716,20 @@ function addFileComponentsIfPresent(container, post, logger = null) {
   }
 }
 
+function addAttachmentCopyFailureNotice(container, post) {
+  const failures = Array.isArray(post.attachmentCopyFailures) ? post.attachmentCopyFailures : [];
+  if (!failures.length) return;
+  const names = failures
+    .map((failure) => String(failure?.displayName || '').trim())
+    .filter(Boolean)
+    .slice(0, 5);
+  const suffix = failures.length > names.length ? `、ほか${failures.length - names.length}件` : '';
+  const detail = names.length ? `: ${names.join('、')}${suffix}` : '';
+  container.addTextDisplayComponents(
+    new TextDisplayBuilder().setContent(`添付ファイルをコピーできませんでした${detail}\n元のメッセージから確認できます。`)
+  );
+}
+
 function buildBottomActionRows(post, options = {}) {
   const rows = [];
   const supplementalButtons = [];
@@ -1124,7 +1138,8 @@ function hasNormalTimelineFallbackContent(post) {
     (Array.isArray(post.mediaGalleryItems) && post.mediaGalleryItems.length) ||
     (Array.isArray(post.customEmojiMediaItems) && post.customEmojiMediaItems.length) ||
     (Array.isArray(post.fileComponentUrls) && post.fileComponentUrls.length) ||
-    (Array.isArray(post.downloadableAttachments) && post.downloadableAttachments.length)
+    (Array.isArray(post.downloadableAttachments) && post.downloadableAttachments.length) ||
+    (Array.isArray(post.attachmentCopyFailures) && post.attachmentCopyFailures.length)
   );
 }
 
@@ -1225,6 +1240,7 @@ function buildTweetTimelineMessage({ post, config, logger = null }) {
     );
   }
   addFileComponentsIfPresent(container, post, logger);
+  addAttachmentCopyFailureNotice(container, post);
   if (post.hasMoreDownloadableAttachments) {
     container.addTextDisplayComponents(
       new TextDisplayBuilder().setContent('他にも添付ファイルがあります')
@@ -1310,6 +1326,7 @@ function buildQuestionTimelineMessage({ post, config, logger = null }) {
     }
   );
   addFileComponentsIfPresent(container, post, logger);
+  addAttachmentCopyFailureNotice(container, post);
   if (post.hasMoreDownloadableAttachments) {
     container.addTextDisplayComponents(
       new TextDisplayBuilder().setContent('他にも添付ファイルがあります')
@@ -1382,6 +1399,7 @@ function buildKnowledgeTimelineMessage({ post, config, logger = null }) {
     suppressMedia: uploadedMediaPresent && !(uploadedVideoPresent && isYouTubeSourceUrl(post.socialPreview?.sourceUrl))
   });
   addFileComponentsIfPresent(container, post, logger);
+  addAttachmentCopyFailureNotice(container, post);
   if (post.hasMoreDownloadableAttachments) {
     container.addTextDisplayComponents(
       new TextDisplayBuilder().setContent('他にも添付ファイルがあります')

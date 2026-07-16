@@ -18,8 +18,18 @@ function safeFilePart(value, fallback = 'attachment') {
 }
 
 function stableUploadName(messageId, index, originalName, spoiler = false) {
-  const raw = safeFilePart(originalName || `attachment-${index + 1}`);
-  const name = `${safeFilePart(messageId, 'message')}-${index + 1}-${raw}`;
+  const sourceName = String(originalName || `attachment-${index + 1}`);
+  const extension = extensionFromName(sourceName);
+  const rawStem = extension
+    ? sourceName.slice(0, -(extension.length + 1))
+    : sourceName;
+  const asciiStem = safeFilePart(rawStem, 'attachment')
+    .replace(/[^A-Za-z0-9_-]+/gu, '-')
+    .replace(/^-+|-+$/gu, '')
+    .slice(0, 64) || 'attachment';
+  const fingerprint = crypto.createHash('sha256').update(sourceName).digest('hex').slice(0, 8);
+  const messagePart = safeFilePart(messageId, 'message').replace(/[^A-Za-z0-9_-]+/gu, '-').slice(0, 32) || 'message';
+  const name = `${messagePart}-${index + 1}-${asciiStem}-${fingerprint}${extension ? `.${extension}` : ''}`;
   return spoiler && !name.startsWith('SPOILER_') ? `SPOILER_${name}` : name;
 }
 
