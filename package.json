@@ -14,6 +14,7 @@
     "post-entrance-guide": "node scripts/postEntranceGuide.js",
     "index-timeline-restore": "node scripts/indexTimelineRestore.js",
     "audit-timeline-media": "node scripts/auditTimelineMedia.js",
+    "diagnose-timeline-owner": "node scripts/diagnoseTimelineOwner.js",
     "probe-timeline-image-relay": "node scripts/probeTimelineImageRelay.js",
     "probe-timeline-restoration": "node scripts/probeTimelineRestoration.js",
     "probe-focused-followup": "node scripts/probeFocusedFollowup.js",

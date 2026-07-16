@@ -1136,6 +1136,9 @@ function runMigrations(database) {
       historical_owner_user_id TEXT,
       initiator_user_id TEXT,
       destination_test_thread_id TEXT,
+      explicit_source_thread_id TEXT,
+      source_selection_reason TEXT,
+      source_selection_evidence_json TEXT,
       destination_forum_id TEXT NOT NULL,
       destination_thread_id TEXT NOT NULL,
       status TEXT NOT NULL,
@@ -1479,6 +1482,15 @@ function runMigrations(database) {
   }
   if (timelineRestorationJobColumns.size && !timelineRestorationJobColumns.has('destination_test_thread_id')) {
     database.exec('ALTER TABLE timeline_restoration_jobs ADD COLUMN destination_test_thread_id TEXT');
+  }
+  if (timelineRestorationJobColumns.size && !timelineRestorationJobColumns.has('explicit_source_thread_id')) {
+    database.exec('ALTER TABLE timeline_restoration_jobs ADD COLUMN explicit_source_thread_id TEXT');
+  }
+  if (timelineRestorationJobColumns.size && !timelineRestorationJobColumns.has('source_selection_reason')) {
+    database.exec('ALTER TABLE timeline_restoration_jobs ADD COLUMN source_selection_reason TEXT');
+  }
+  if (timelineRestorationJobColumns.size && !timelineRestorationJobColumns.has('source_selection_evidence_json')) {
+    database.exec('ALTER TABLE timeline_restoration_jobs ADD COLUMN source_selection_evidence_json TEXT');
   }
 
   const timelineRestorationItemColumns = new Set(

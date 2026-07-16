@@ -24,6 +24,7 @@ const {
   startTimelineRestorationWorker
 } = require('./worker');
 const { buildRestorationLog } = require('./ui');
+const { diagnoseTimelineOwner, evaluateExplicitSourceThread } = require('./ownerDiagnostics');
 
 function isRestorationAdmin(interaction) {
   return isAdministrator(interaction.member);
@@ -224,11 +225,15 @@ async function createOrResumeRestorationJob(interaction, {
   force = false,
   destinationThread = null,
   mode = 'normal',
-  initiatorUserId = null
+  initiatorUserId = null,
+  explicitSourceThreadId = null
 } = {}) {
   const client = interaction.client;
   const thread = destinationThread || interaction.channel;
   const adminTest = mode === 'admin_test';
+  if (explicitSourceThreadId && !adminTest) {
+    throw Object.assign(new Error('source-thread はサーバー所有者のテスト復元でのみ指定できます。'), { code: 'source_thread_admin_test_only' });
+  }
   if (force && !adminTest) {
     throw Object.assign(new Error('force-start はテスト復元専用です。'), { code: 'force_start_requires_admin_test' });
   }
@@ -263,7 +268,8 @@ async function createOrResumeRestorationJob(interaction, {
     mode: adminTest ? 'admin_test' : 'normal',
     historicalOwnerUserId: targetOwnerId,
     ownerUserId: targetOwnerId,
-    initiatorUserId: adminTest ? String(initiatorUserId || interaction.user.id) : targetOwnerId
+    initiatorUserId: adminTest ? String(initiatorUserId || interaction.user.id) : targetOwnerId,
+    explicitSourceThreadId: explicitSourceThreadId ? String(explicitSourceThreadId) : null
   };
   const resolution = client.db.timelineRestoration.jobs.resolveRequest(requestIdentity);
   if (resolution.outcome !== 'available') {
@@ -295,8 +301,57 @@ async function createOrResumeRestorationJob(interaction, {
     await ensureTimelineUserThread(client, thread, targetOwnerId, thread.id);
   }
 
-  const historicalThreads = await resolveMissingHistoricalThreads(client, interaction.guild, targetOwnerId, thread.id);
+  let sourceSelectionReason = null;
+  let sourceSelectionEvidence = null;
+  let historicalThreads;
+  if (explicitSourceThreadId) {
+    const evaluation = evaluateExplicitSourceThread(client.db.sqlite, {
+      guildId: interaction.guildId,
+      userId: targetOwnerId,
+      sourceThreadId: explicitSourceThreadId,
+      allowedForumIds: client.appConfig.watchedForums?.tweet || []
+    });
+    if (!evaluation.accepted) {
+      const messages = {
+        source_thread_no_target_history: '指定した元スレッドには、対象ユーザーとの関係を確認できる保存済み投稿がありません。',
+        source_thread_not_missing: '指定した元スレッドは削除済みまたは欠落状態ではありません。重複復元を防ぐため使用できません。',
+        source_thread_wrong_forum: '指定した元スレッドは、設定済みのつぶやきフォーラムに属していません。',
+        source_thread_owner_evidence_conflict: '指定した元スレッドには別ユーザーを所有者とする強い証拠があります。診断結果を確認してください。',
+        source_thread_target_evidence_weak: '指定した元スレッドと対象ユーザーの関係を安全に確認できませんでした。診断結果を確認してください。'
+      };
+      throw Object.assign(new Error(messages[evaluation.code] || '指定した元スレッドをテスト復元に使用できません。'), {
+        code: evaluation.code
+      });
+    }
+    sourceSelectionReason = evaluation.code;
+    sourceSelectionEvidence = evaluation.evidence;
+    const stored = client.db.timelineRestoration.userThreads.get(interaction.guildId, explicitSourceThreadId);
+    historicalThreads = [{
+      ...(stored || {}),
+      guildId: interaction.guildId,
+      ownerUserId: stored?.ownerUserId || null,
+      forumChannelId: evaluation.evidence.sourceForumId,
+      threadId: explicitSourceThreadId,
+      status: stored?.status || 'legacy_missing',
+      deletionReason: stored?.deletionReason || 'legacy_missing'
+    }];
+  } else {
+    historicalThreads = await resolveMissingHistoricalThreads(client, interaction.guild, targetOwnerId, thread.id);
+  }
   if (!historicalThreads.length) {
+    const diagnosis = diagnoseTimelineOwner(client.db.sqlite, {
+      guildId: interaction.guildId,
+      userId: targetOwnerId
+    });
+    if (diagnosis.authoredSnapshotCount > 0) {
+      throw Object.assign(new Error(
+        `このユーザーの投稿履歴は${diagnosis.authoredSnapshotCount}件保存されていますが、削除済みスレッドの所有者情報を確定できませんでした。候補スレッド: ${diagnosis.candidateThreadCount}件（legacy_missing: ${diagnosis.legacyMissingCandidateCount}件）。サーバー所有者は \`/timeline-restore inspect\` または source-thread 指定のテスト復元を使用してください。`
+      ), {
+        code: 'history_owner_unresolved',
+        authoredSnapshotCount: diagnosis.authoredSnapshotCount,
+        candidateThreadCount: diagnosis.candidateThreadCount
+      });
+    }
     throw Object.assign(new Error('復元対象となる、削除済みまたは欠落した過去スレッドの履歴がありません。'), { code: 'history_missing' });
   }
   const sourceThreadIds = historicalThreads.map((row) => row.threadId);
@@ -314,6 +369,9 @@ async function createOrResumeRestorationJob(interaction, {
     historicalOwnerUserId: targetOwnerId,
     initiatorUserId: String(initiatorUserId || interaction.user.id),
     destinationTestThreadId: adminTest ? thread.id : null,
+    explicitSourceThreadId: explicitSourceThreadId ? String(explicitSourceThreadId) : null,
+    sourceSelectionReason,
+    sourceSelectionEvidenceJson: sourceSelectionEvidence ? JSON.stringify(sourceSelectionEvidence) : null,
     destinationForumId: String(thread.parentId || ''),
     destinationThreadId: thread.id,
     status: 'active',
@@ -365,6 +423,8 @@ function formatStatus(job) {
     `モード: ${job.mode || 'normal'}`,
     `所有者: <@${job.ownerUserId}>`,
     job.mode === 'admin_test' ? `テスト開始者: <@${job.initiatorUserId}>` : null,
+    job.explicitSourceThreadId ? `明示元スレッド: \`${job.explicitSourceThreadId}\`` : null,
+    job.sourceSelectionReason ? `採用根拠: ${job.sourceSelectionReason}` : null,
     `復元先: <#${job.destinationThreadId}>`,
     `元スレッド: ${safeArray(job.sourceThreadIdsJson).map((id) => `\`${id}\``).join(', ')}`,
     `進捗: ${handled} / ${job.totalItemCount}（${Number(job.progressPercent || 0).toFixed(1)}%）`,
@@ -462,8 +522,13 @@ async function handleTimelineRestoreCommand(interaction) {
       }
       const historicalUserId = normalizeUserIdOption(interaction.options.getString('historical-user', true));
       const destinationThread = interaction.options.getChannel('destination-thread', true);
+      const sourceThreadInput = interaction.options.getString('source-thread', false);
+      const sourceThreadId = sourceThreadInput ? String(sourceThreadInput).trim() : null;
       if (!historicalUserId) {
         throw Object.assign(new Error('historical-user にはユーザーIDまたはメンションを指定してください。'), { code: 'invalid_historical_user' });
+      }
+      if (sourceThreadId && !isDiscordSnowflake(sourceThreadId)) {
+        throw Object.assign(new Error('source-thread には元スレッドの数値IDを指定してください。'), { code: 'invalid_source_thread' });
       }
       if (!destinationThread?.isThread?.()
         || !isDiscordSnowflake(destinationThread.id)
@@ -476,13 +541,38 @@ async function handleTimelineRestoreCommand(interaction) {
         force: true,
         destinationThread,
         mode: 'admin_test',
-        initiatorUserId: interaction.user.id
+        initiatorUserId: interaction.user.id,
+        explicitSourceThreadId: sourceThreadId
       });
       await interaction.editReply({
         content: `テスト復元ジョブ ${result.job.jobId} を${result.outcome === 'resumed_exact_match' ? '再開' : '開始'}しました。履歴所有者ID: \`${historicalUserId}\` / 復元先: <#${destinationThread.id}>`,
         allowedMentions: { parse: [], users: [], roles: [] }
       });
       return;
+    }
+    if (subcommand === 'inspect') {
+      const historicalUserInput = interaction.options.getString('historical-user', false);
+      if (historicalUserInput) {
+        if (!isGuildOwner(interaction)) {
+          throw Object.assign(new Error('所有者候補の診断を実行できるのはサーバー所有者だけです。'), { code: 'guild_owner_required' });
+        }
+        const historicalUserId = normalizeUserIdOption(historicalUserInput);
+        if (!historicalUserId) {
+          throw Object.assign(new Error('historical-user にはユーザーIDまたはメンションを指定してください。'), { code: 'invalid_historical_user' });
+        }
+        const diagnosis = diagnoseTimelineOwner(client.db.sqlite, {
+          guildId: interaction.guildId,
+          userId: historicalUserId
+        });
+        const file = new AttachmentBuilder(Buffer.from(JSON.stringify(diagnosis, null, 2), 'utf8'), {
+          name: `timeline-owner-diagnosis-${historicalUserId}.json`
+        });
+        await interaction.editReply({
+          content: `投稿スナップショット: ${diagnosis.authoredSnapshotCount}件 / 候補スレッド: ${diagnosis.candidateThreadCount}件 / legacy_missing: ${diagnosis.legacyMissingCandidateCount}件。診断は読み取り専用で、所有者情報は変更していません。`,
+          files: [file]
+        });
+        return;
+      }
     }
     if (!currentJob) throw Object.assign(new Error('このスレッドには復元ジョブがありません。'), { code: 'job_missing' });
     if (subcommand === 'status') {

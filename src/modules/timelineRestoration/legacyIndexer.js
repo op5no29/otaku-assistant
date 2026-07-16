@@ -53,18 +53,8 @@ async function indexLegacyTimelineRestore(client, { apply = false } = {}) {
   const threadCache = new Map();
   const ownerIds = new Set();
   const sourceThreads = new Set();
-  const ownerFallbackByThread = new Map();
   const mediaUrlsForAudit = new Set();
   const unknownSizeUrls = new Set();
-  for (const mapping of mappings) {
-    const current = ownerFallbackByThread.get(mapping.threadId);
-    if (!current || String(mapping.sourceMessageId).localeCompare(String(current.sourceMessageId)) < 0) {
-      ownerFallbackByThread.set(mapping.threadId, {
-        sourceMessageId: mapping.sourceMessageId,
-        authorId: mapping.authorId || null
-      });
-    }
-  }
 
   for (const mapping of mappings) {
     if (seenSource.has(mapping.sourceMessageId)) {
@@ -103,11 +93,10 @@ async function indexLegacyTimelineRestore(client, { apply = false } = {}) {
     const threadRelay = client.db.relays.getThreadRelay(mapping.threadId);
     const archived = client.db.archives.getMessage(mapping.sourceMessageId);
     const existingBinding = client.db.timelineRestoration.userThreads.get(guild.id, mapping.threadId);
-    const ownerUserId = existingBinding?.ownerUserId
+    const ownerUserId = sourceThread?.ownerId
       || threadRelay?.authorId
-      || sourceThread?.ownerId
       || (threadRelay?.starterMessageId === mapping.sourceMessageId ? mapping.authorId : null)
-      || ownerFallbackByThread.get(mapping.threadId)?.authorId;
+      || existingBinding?.ownerUserId;
     if (!ownerUserId) {
       report.missingMappings += 1;
       continue;
@@ -292,7 +281,8 @@ async function indexLegacyTimelineRestore(client, { apply = false } = {}) {
     'Timeline card text may have been truncated by the historical relay limit.',
     'Merged short cards can map several source IDs to one visible body.',
     'Expired source URLs and already-broken legacy media cannot always be recovered.',
-    'Legacy reply context may be an excerpt rather than a native reference.'
+    'Legacy reply context may be an excerpt rather than a native reference.',
+    'The earliest or most prolific message author is not treated as thread-owner proof.'
   );
   client.logger.info(apply ? 'timeline restoration legacy index applied' : 'timeline restoration legacy index dry run completed', report);
   return report;

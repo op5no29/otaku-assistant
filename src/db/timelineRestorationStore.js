@@ -22,6 +22,9 @@ function classifyRestorationJobRequest(existing, request) {
     if (String(existing.destinationTestThreadId || '') !== String(request.destinationThreadId || '')) {
       return 'conflict_different_test_destination';
     }
+    if (String(existing.explicitSourceThreadId || '') !== String(request.explicitSourceThreadId || '')) {
+      return 'conflict_different_source_thread';
+    }
   } else if (String(existing.ownerUserId || '') !== String(request.ownerUserId || '')) {
     return 'conflict_different_real_owner';
   }
@@ -408,13 +411,15 @@ function createTimelineRestorationStore(sqlite) {
     insert: sqlite.prepare(`
       INSERT INTO timeline_restoration_jobs (
         guild_id, owner_user_id, mode, historical_owner_user_id, initiator_user_id,
-        destination_test_thread_id, destination_forum_id, destination_thread_id,
+        destination_test_thread_id, explicit_source_thread_id, source_selection_reason,
+        source_selection_evidence_json, destination_forum_id, destination_thread_id,
         status, source_thread_ids_json, total_item_count, started_at, next_run_at,
         previous_thread_locked, previous_thread_archived, previous_slowmode_seconds,
         previous_applied_tags_json, created_at, updated_at
       ) VALUES (
         @guildId, @ownerUserId, @mode, @historicalOwnerUserId, @initiatorUserId,
-        @destinationTestThreadId, @destinationForumId, @destinationThreadId,
+        @destinationTestThreadId, @explicitSourceThreadId, @sourceSelectionReason,
+        @sourceSelectionEvidenceJson, @destinationForumId, @destinationThreadId,
         @status, @sourceThreadIdsJson, @totalItemCount, @startedAt, @nextRunAt,
         @previousThreadLocked, @previousThreadArchived, @previousSlowmodeSeconds,
         @previousAppliedTagsJson, @createdAt, @updatedAt
@@ -508,6 +513,7 @@ function createTimelineRestorationStore(sqlite) {
 
   const jobFields = new Set([
     'mode', 'historicalOwnerUserId', 'initiatorUserId', 'destinationTestThreadId',
+    'explicitSourceThreadId', 'sourceSelectionReason', 'sourceSelectionEvidenceJson',
     'status', 'totalItemCount', 'completedItemCount', 'failedItemCount', 'skippedItemCount',
     'textRestoredCount', 'imageRestoredCount', 'videoRestoredCount', 'fileRestoredCount',
     'replyRestoredCount', 'unavailableMediaCount', 'currentSequence', 'progressPercent',
@@ -627,6 +633,9 @@ function createTimelineRestorationStore(sqlite) {
             historicalOwnerUserId: record.ownerUserId,
             initiatorUserId: record.ownerUserId,
             destinationTestThreadId: null,
+            explicitSourceThreadId: null,
+            sourceSelectionReason: null,
+            sourceSelectionEvidenceJson: null,
             ...record
           });
           const jobId = Number(sqlite.prepare('SELECT last_insert_rowid() AS id').get().id);

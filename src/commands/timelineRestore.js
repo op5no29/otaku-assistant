@@ -28,7 +28,11 @@ module.exports = {
         .setName('destination-thread')
         .setDescription('テスト復元先の一時スレッド')
         .addChannelTypes(ChannelType.PublicThread)
-        .setRequired(true)))
+        .setRequired(true))
+      .addStringOption((option) => option
+        .setName('source-thread')
+        .setDescription('所有者未確定時にテストする保存済み元スレッドID')
+        .setRequired(false)))
     .addSubcommand((subcommand) => subcommand
       .setName('retry')
       .setDescription('管理者として失敗項目を再試行します。'))
@@ -37,7 +41,11 @@ module.exports = {
       .setDescription('管理者として復元先スレッドを緊急解除します。'))
     .addSubcommand((subcommand) => subcommand
       .setName('inspect')
-      .setDescription('管理者として復元状態を調査します。')),
+      .setDescription('管理者として復元状態や所有者候補を調査します。')
+      .addStringOption((option) => option
+        .setName('historical-user')
+        .setDescription('所有者候補を調査するユーザーIDまたはメンション')
+        .setRequired(false))),
 
   async execute(interaction) {
     await handleTimelineRestoreCommand(interaction);

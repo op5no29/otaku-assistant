@@ -17,6 +17,7 @@ const {
   handleTimelineRestorationInteraction
 } = require('../src/modules/timelineRestoration');
 const { sanitizeLogValue } = require('../src/services/logger');
+const { diagnoseTimelineOwner } = require('../src/modules/timelineRestoration/ownerDiagnostics');
 const commands = require('../src/commands');
 
 const IDS = Object.freeze({
@@ -26,6 +27,7 @@ const IDS = Object.freeze({
   guildOwner: '323456789012345678',
   historicalA: '1454160830487728391',
   historicalB: '1454160830487728392',
+  historicalUnmapped: '609027783246741515',
   authorB: '1454160830487728393',
   authorC: '1454160830487728394',
   admin: '423456789012345678',
@@ -34,11 +36,15 @@ const IDS = Object.freeze({
   testThread: '1503111111111111111',
   secondTestThread: '1503111111111111112',
   ownerSelfTestThread: '1503111111111111113',
+  legacyTestThread: '1503111111111111114',
+  legacyConflictThread: '1503111111111111115',
   normalThread: '1504111111111111111',
   sourceA: '1505111111111111111',
   sourceB: '1505111111111111112',
   sourceC: '1505111111111111113',
-  sourceOwner: '1505111111111111114'
+  sourceOwner: '1505111111111111114',
+  legacyUnknownThread: '1503795619293036694',
+  legacyUnrelatedThread: '1510995196987310110'
 });
 
 function snapshotRecord(overrides = {}) {
@@ -121,6 +127,7 @@ function createProbeInteraction({
   userId,
   destinationThread,
   historicalUserId = null,
+  sourceThreadId = null,
   subcommand = 'force-start'
 }) {
   const replies = [];
@@ -138,8 +145,9 @@ function createProbeInteraction({
     options: {
       getSubcommand: () => subcommand,
       getString: (name) => {
-        assert.equal(name, 'historical-user');
-        return historicalUserId;
+        if (name === 'historical-user') return historicalUserId;
+        if (name === 'source-thread') return sourceThreadId;
+        throw new Error(`Unexpected string option: ${name}`);
       },
       getChannel: (name) => {
         assert.equal(name, 'destination-thread');
@@ -340,17 +348,22 @@ async function main() {
   assert.ok(forceStart);
   assert.ok(forceStart.options.some((option) => option.name === 'historical-user' && option.required));
   assert.ok(forceStart.options.some((option) => option.name === 'destination-thread' && option.required));
+  assert.ok(forceStart.options.some((option) => option.name === 'source-thread' && !option.required));
   assert.ok(!forceStart.options.some((option) => option.name === 'test-mode'));
 
   const testThread = createProbeThread({ id: IDS.testThread, ownerId: IDS.guildOwner });
   const secondTestThread = createProbeThread({ id: IDS.secondTestThread, ownerId: IDS.guildOwner });
   const ownerSelfTestThread = createProbeThread({ id: IDS.ownerSelfTestThread, ownerId: IDS.guildOwner });
   const normalThread = createProbeThread({ id: IDS.normalThread, ownerId: IDS.historicalA });
+  const legacyTestThread = createProbeThread({ id: IDS.legacyTestThread, ownerId: IDS.guildOwner });
+  const legacyConflictThread = createProbeThread({ id: IDS.legacyConflictThread, ownerId: IDS.guildOwner });
   const channels = new Map([
     [testThread.id, testThread],
     [secondTestThread.id, secondTestThread],
     [ownerSelfTestThread.id, ownerSelfTestThread],
-    [normalThread.id, normalThread]
+    [normalThread.id, normalThread],
+    [legacyTestThread.id, legacyTestThread],
+    [legacyConflictThread.id, legacyConflictThread]
   ]);
   const guild = {
     id: IDS.guild,
@@ -557,6 +570,133 @@ async function main() {
   assert.equal(ownerSelfJob.mode, 'admin_test', 'force-start must remain admin_test even when owners match');
   assert.equal(db.timelineRestoration.userThreads.get(IDS.guild, IDS.oldThreadOwner).replacementThreadId, null);
 
+  db.timelineRestoration.userThreads.upsert({
+    guildId: IDS.guild,
+    ownerUserId: IDS.authorB,
+    forumChannelId: IDS.forum,
+    threadId: IDS.legacyUnknownThread,
+    threadName: 'legacy unknown owner',
+    starterMessageId: null,
+    status: 'legacy_missing',
+    deletionReason: 'legacy_missing',
+    createdAt: now,
+    archivedAt: null,
+    lockedAt: null,
+    membershipEpisodeId: null,
+    updatedAt: now
+  });
+  for (let index = 0; index < 125; index += 1) {
+    const sourceMessageId = String(1517000000000000000n + BigInt(index));
+    db.timelineRestoration.snapshots.upsert(snapshotRecord({
+      sourceThreadId: IDS.legacyUnknownThread,
+      sourceMessageId,
+      threadOwnerUserId: IDS.authorB,
+      authorUserId: IDS.historicalUnmapped,
+      authorDisplayNameSnapshot: 'Unmapped',
+      content: `legacy-${index}`,
+      sourceCreatedAt: new Date(Date.parse(now) + index * 1000).toISOString()
+    }));
+  }
+  db.timelineRestoration.userThreads.upsert({
+    guildId: IDS.guild,
+    ownerUserId: IDS.authorC,
+    forumChannelId: IDS.forum,
+    threadId: IDS.legacyUnrelatedThread,
+    threadName: 'unrelated weak evidence',
+    starterMessageId: null,
+    status: 'legacy_missing',
+    deletionReason: 'legacy_missing',
+    createdAt: now,
+    archivedAt: null,
+    lockedAt: null,
+    membershipEpisodeId: null,
+    updatedAt: now
+  });
+  db.timelineRestoration.snapshots.upsert(snapshotRecord({
+    sourceThreadId: IDS.legacyUnrelatedThread,
+    sourceMessageId: '1518000000000000001',
+    threadOwnerUserId: IDS.authorC,
+    authorUserId: IDS.historicalUnmapped,
+    content: 'one unrelated post'
+  }));
+  for (let index = 0; index < 9; index += 1) {
+    db.timelineRestoration.snapshots.upsert(snapshotRecord({
+      sourceThreadId: IDS.legacyUnrelatedThread,
+      sourceMessageId: String(1518000000000000010n + BigInt(index)),
+      threadOwnerUserId: IDS.authorC,
+      authorUserId: IDS.authorC,
+      content: `other-${index}`
+    }));
+  }
+
+  const diagnosis = diagnoseTimelineOwner(db.sqlite, {
+    guildId: IDS.guild,
+    userId: IDS.historicalUnmapped
+  });
+  const unknownCandidate = diagnosis.candidates.find((candidate) => candidate.sourceThreadId === IDS.legacyUnknownThread);
+  assert.equal(diagnosis.authoredSnapshotCount, 126);
+  assert.equal(unknownCandidate.snapshotsAuthoredByTarget, 125);
+  assert.equal(unknownCandidate.currentlyStoredOwnerId, IDS.authorB);
+  assert.equal(unknownCandidate.confidence, 'participant_only');
+  assert.notEqual(unknownCandidate.suggestedAction, 'auto_reassign');
+
+  const unresolvedOwner = createProbeInteraction({
+    client,
+    guild,
+    userId: IDS.guildOwner,
+    destinationThread: legacyTestThread,
+    historicalUserId: IDS.historicalUnmapped
+  });
+  await handleTimelineRestoreCommand(unresolvedOwner);
+  assert.match(String(unresolvedOwner.lastReply || ''), /投稿履歴は126件保存/u);
+  assert.match(String(unresolvedOwner.lastReply || ''), /所有者情報を確定できません/u);
+  assert.equal(db.timelineRestoration.jobs.getByThread(IDS.guild, IDS.legacyTestThread), null);
+
+  const explicitLegacy = createProbeInteraction({
+    client,
+    guild,
+    userId: IDS.guildOwner,
+    destinationThread: legacyTestThread,
+    historicalUserId: IDS.historicalUnmapped,
+    sourceThreadId: IDS.legacyUnknownThread
+  });
+  await handleTimelineRestoreCommand(explicitLegacy);
+  assert.match(String(explicitLegacy.lastReply?.content || ''), /テスト復元ジョブ/u);
+  const legacyJob = db.timelineRestoration.jobs.getByThread(IDS.guild, IDS.legacyTestThread);
+  assert.equal(legacyJob.mode, 'admin_test');
+  assert.equal(legacyJob.explicitSourceThreadId, IDS.legacyUnknownThread);
+  assert.equal(legacyJob.sourceSelectionReason, 'meaningful_participant_evidence');
+  assert.deepEqual(JSON.parse(legacyJob.sourceThreadIdsJson), [IDS.legacyUnknownThread]);
+  assert.equal(db.timelineRestoration.userThreads.get(IDS.guild, IDS.legacyUnknownThread).ownerUserId, IDS.authorB);
+  assert.equal(db.timelineRestoration.userThreads.get(IDS.guild, IDS.legacyUnknownThread).replacementThreadId, null);
+
+  const weakUnrelated = createProbeInteraction({
+    client,
+    guild,
+    userId: IDS.guildOwner,
+    destinationThread: legacyConflictThread,
+    historicalUserId: IDS.historicalUnmapped,
+    sourceThreadId: IDS.legacyUnrelatedThread
+  });
+  await handleTimelineRestoreCommand(weakUnrelated);
+  assert.match(String(weakUnrelated.lastReply || ''), /安全に確認できません/u);
+  assert.equal(db.timelineRestoration.jobs.getByThread(IDS.guild, IDS.legacyConflictThread), null);
+
+  db.timelineRestoration.jobs.update(legacyJob.jobId, {
+    status: 'cancelled', cancelledAt: new Date().toISOString(), nextRunAt: null, updatedAt: new Date().toISOString()
+  });
+  const conflictingSourceResume = createProbeInteraction({
+    client,
+    guild,
+    userId: IDS.guildOwner,
+    destinationThread: legacyTestThread,
+    historicalUserId: IDS.historicalUnmapped,
+    sourceThreadId: IDS.legacyUnrelatedThread
+  });
+  await handleTimelineRestoreCommand(conflictingSourceResume);
+  assert.match(String(conflictingSourceResume.lastReply || ''), /別の復元ジョブ/u);
+  assert.equal(db.timelineRestoration.jobs.get(legacyJob.jobId).explicitSourceThreadId, IDS.legacyUnknownThread);
+
   const oldProgressId = ownerSelfJob.progressMessageId;
   const oldProgressMessage = ownerSelfTestThread.messageStore.get(oldProgressId);
   const originalSend = ownerSelfTestThread.send.bind(ownerSelfTestThread);
@@ -614,6 +754,9 @@ async function main() {
       'admin_test completion mentions initiator only',
       'A/B/C actual mocked webhook payload identity isolation',
       'progress replacement send failure retains old card and DB ID',
+      'unmapped authored history diagnosis without owner reassignment',
+      'explicit source-thread admin test with evidence gating',
+      'conflicting explicit source-thread resume rejection',
       'idempotent migration reopen'
     ]
   }, null, 2));

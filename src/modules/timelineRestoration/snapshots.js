@@ -59,13 +59,14 @@ function isConfiguredTweetThread(messageOrThread, config) {
 }
 
 async function resolveThreadOwner(client, thread, fallbackAuthorId = null) {
-  const existing = client.db.timelineRestoration.userThreads.get(thread.guildId, thread.id);
-  if (existing?.ownerUserId) return existing.ownerUserId;
   if (thread.ownerId) return String(thread.ownerId);
+  const fetchedOwner = await thread.fetchOwner?.().catch(() => null);
+  if (fetchedOwner?.id) return String(fetchedOwner.id);
   const relay = client.db.relays.getThreadRelay(thread.id);
   if (relay?.authorId) return String(relay.authorId);
-  const owner = await thread.fetchOwner?.().catch(() => null);
-  return String(owner?.id || fallbackAuthorId || '');
+  const existing = client.db.timelineRestoration.userThreads.get(thread.guildId, thread.id);
+  if (existing?.ownerUserId) return existing.ownerUserId;
+  return String(fallbackAuthorId || '');
 }
 
 function identityFromMember(member, user) {
