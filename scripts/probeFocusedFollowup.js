@@ -76,7 +76,7 @@ async function probeSoloVcWindow(db) {
           includeAfk: false,
           maxDisplayedEpisodes: 5,
           maxStoredEpisodes: 50,
-          retentionDays: 7
+          retentionDays: 36_500
         }
       },
       voiceWorkTime: { timezone: 'Asia/Tokyo' }

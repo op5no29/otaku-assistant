@@ -896,7 +896,10 @@ function scheduleQuestionRolePromptTimeout(client, threadId, expiresAt) {
 
 async function buildTimelinePayload(post, { config, forumType, logger }) {
   const twitterResolved = await resolveTwitterMedia(post, config, logger);
-  const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, logger);
+  const videoPrepared = await prepareVideoThumbnail(twitterResolved.post, logger, {
+    maxDownloadBytes: config?.mediaRelay?.maxReuploadBytes,
+    fetchTimeoutMs: config?.mediaRelay?.fetchTimeoutMs
+  });
   const attachmentPrepared = await prepareAttachmentRelay(videoPrepared.post, config, logger);
   const previewPrepared = await preparePreviewImageRelay(attachmentPrepared.post, config, logger);
   const previewSourceUrl = previewPrepared.post?.socialPreview?.sourceUrl || previewPrepared.post?.musicLink?.sourceUrl || null;
@@ -1011,6 +1014,7 @@ async function buildTimelinePayload(post, { config, forumType, logger }) {
       forumType,
       logger
     }),
+    preparedPost: previewPrepared.post,
     relayState: {
       attachmentRelayPending: previewPrepared.post?.attachmentRelayPending === true,
       attachmentCopyFailures: Array.isArray(previewPrepared.post?.attachmentCopyFailures)
@@ -1109,7 +1113,6 @@ function getConsecutiveMergeChain(client, message, post, config, logger) {
     sourceChannelId: String(message.channel.parentId || ''),
     sourceThreadId: message.channelId,
     authorId: message.author?.id || null,
-    bodyText: text,
     textLength: text.length,
     hasAttachments: Array.isArray(post.attachments) && post.attachments.length > 0,
     hasMedia: Boolean(
@@ -1255,7 +1258,6 @@ async function tryMergeShortTweetMessage(message, post, target, { config, db, lo
     sourceThreadId,
     parentId,
     authorId: message.author?.id || null,
-    bodyText: text,
     bodyTextLength: text.length,
     hasAttachments: Array.isArray(post.attachments) && post.attachments.length > 0,
     hasEmbeds: Boolean(post.socialPreview),
@@ -1723,6 +1725,161 @@ async function sendRelayMessage(destinationChannel, payload, logger, meta) {
   return sentMessage;
 }
 
+function attachmentReferenceName(value) {
+  const url = String(value || '');
+  if (!url.startsWith('attachment://')) return null;
+  try {
+    return decodeURIComponent(url.slice('attachment://'.length));
+  } catch {
+    return url.slice('attachment://'.length);
+  }
+}
+
+function isDiscordRequestTooLarge(error) {
+  return Number(error?.code || error?.rawError?.code || error?.data?.code) === 40005;
+}
+
+function buildVideoSendFallback(preparedPost, { config, forumType, logger }) {
+  const attachments = Array.isArray(preparedPost?.attachments) ? preparedPost.attachments : [];
+  const videos = attachments.filter((attachment) => attachment?.isVideo === true);
+  const videoUploadNames = new Set(videos.map((attachment) => String(attachment.uploadFileName || '')).filter(Boolean));
+  const generatedThumbnailName = attachmentReferenceName(preparedPost?.generatedVideoThumbnailUrl);
+  if (generatedThumbnailName) videoUploadNames.add(generatedThumbnailName);
+  const existingFailures = Array.isArray(preparedPost?.attachmentCopyFailures)
+    ? preparedPost.attachmentCopyFailures
+    : [];
+  const fallbackFailures = [...existingFailures];
+  for (const video of videos) {
+    if (fallbackFailures.some((failure) => failure.attachmentId === (video.id || null))) continue;
+    fallbackFailures.push({
+      attachmentId: video.id || null,
+      displayName: video.displayName || video.name || '動画',
+      mediaKind: 'video',
+      reason: 'video_destination_too_large',
+      retryable: false
+    });
+  }
+  const excludesVideoReference = (entry) => {
+    const url = typeof entry === 'string' ? entry : entry?.url;
+    const name = attachmentReferenceName(url);
+    return name && videoUploadNames.has(name);
+  };
+  const fallbackPost = {
+    ...preparedPost,
+    firstVideoUrl: null,
+    generatedVideoThumbnailUrl: null,
+    attachments: attachments.map((attachment) => (
+      attachment?.isVideo === true
+        ? {
+            ...attachment,
+            reuploadSucceeded: false,
+            playableMediaSucceeded: false,
+            reuploadSkippedReason: 'video_destination_too_large',
+            displayLine: `${attachment.displayName || attachment.name || '動画'}（元のメッセージから確認してください）`
+          }
+        : attachment
+    )),
+    componentFiles: (Array.isArray(preparedPost?.componentFiles) ? preparedPost.componentFiles : [])
+      .filter((file) => !videoUploadNames.has(String(file?.name || ''))),
+    mediaGalleryItems: (Array.isArray(preparedPost?.mediaGalleryItems) ? preparedPost.mediaGalleryItems : [])
+      .filter((item) => !excludesVideoReference(item)),
+    fileComponentUrls: (Array.isArray(preparedPost?.fileComponentUrls) ? preparedPost.fileComponentUrls : [])
+      .filter((item) => !excludesVideoReference(item)),
+    attachmentCopyFailures: fallbackFailures,
+    attachmentRelayPending: existingFailures.some((failure) => failure.retryable !== false)
+  };
+  return {
+    post: fallbackPost,
+    payload: buildTimelineMessage({ post: fallbackPost, config, forumType, logger })
+  };
+}
+
+async function sendRelayMessageWithVideoFallback(destinationChannel, payload, logger, meta, {
+  preparedPost,
+  config,
+  forumType
+}) {
+  try {
+    const sentMessage = await sendRelayMessage(destinationChannel, payload, logger, meta);
+    return { sentMessage, effectivePayload: payload, videoFallbackUsed: false, fallbackReason: null };
+  } catch (error) {
+    const hasUploadedVideo = (Array.isArray(preparedPost?.attachments) ? preparedPost.attachments : [])
+      .some((attachment) => (
+        attachment?.isVideo === true
+        && attachment?.reuploadSucceeded === true
+      ));
+    if (!isDiscordRequestTooLarge(error) || !hasUploadedVideo) throw error;
+
+    const fallback = buildVideoSendFallback(preparedPost, { config, forumType, logger });
+    const effectivePayload = {
+      ...fallback.payload,
+      ...(payload?.reply ? { reply: payload.reply } : {})
+    };
+    logger.warn('video destination send exceeded Discord request limit; sending text fallback', {
+      ...meta,
+      errorCode: 40005,
+      videoCount: preparedPost.attachments.filter((attachment) => attachment?.isVideo).length,
+      fallbackFileCount: Array.isArray(effectivePayload.files) ? effectivePayload.files.length : 0
+    });
+    const sentMessage = await sendRelayMessage(destinationChannel, effectivePayload, logger, {
+      ...meta,
+      sendPurpose: `${meta?.sendPurpose || 'timeline'}:video-fallback`
+    });
+    logger.warn('video fallback card created', {
+      ...meta,
+      destinationMessageId: sentMessage.id,
+      errorCode: 'video_destination_too_large'
+    });
+    return {
+      sentMessage,
+      effectivePayload,
+      videoFallbackUsed: true,
+      fallbackReason: 'video_destination_too_large'
+    };
+  }
+}
+
+async function editRelayMessageWithVideoFallback(destinationMessage, payload, logger, meta, {
+  preparedPost,
+  config,
+  forumType
+}) {
+  try {
+    const editedMessage = await destinationMessage.edit({ ...payload, attachments: [] });
+    return { editedMessage, effectivePayload: payload, videoFallbackUsed: false, fallbackReason: null };
+  } catch (error) {
+    const hasUploadedVideo = (Array.isArray(preparedPost?.attachments) ? preparedPost.attachments : [])
+      .some((attachment) => (
+        attachment?.isVideo === true
+        && attachment?.reuploadSucceeded === true
+      ));
+    if (!isDiscordRequestTooLarge(error) || !hasUploadedVideo) throw error;
+
+    const fallback = buildVideoSendFallback(preparedPost, { config, forumType, logger });
+    const effectivePayload = {
+      ...fallback.payload,
+      ...(payload?.reply ? { reply: payload.reply } : {})
+    };
+    logger.warn('video destination edit exceeded Discord request limit; preserving card with text fallback', {
+      ...meta,
+      errorCode: 40005,
+      fallbackFileCount: Array.isArray(effectivePayload.files) ? effectivePayload.files.length : 0
+    });
+    const editedMessage = await destinationMessage.edit({ ...effectivePayload, attachments: [] });
+    logger.warn('video fallback card updated', {
+      ...meta,
+      destinationMessageId: editedMessage.id,
+      errorCode: 'video_destination_too_large'
+    });
+    return {
+      editedMessage,
+      effectivePayload,
+      videoFallbackUsed: true,
+      fallbackReason: 'video_destination_too_large'
+    };
+  }
+}
+
 function buildRelayInFlightKey(sourceMessageId, destinationChannelId, relayKind) {
   return `${sourceMessageId}:${destinationChannelId}:${relayKind}`;
 }
@@ -1842,35 +1999,42 @@ async function sendForumThreadTimelineCard(thread, post, {
       snapshotSource: 'thread_starter_relay'
     });
   }
-  const { payload, cleanup, relayState } = await buildTimelinePayload(relayPost, {
+  const { payload, cleanup, relayState, preparedPost } = await buildTimelinePayload(relayPost, {
     config,
     forumType,
     logger
   });
 
   let sentMessage;
+  let effectivePayload = payload;
   let mediaVerificationDeferred = false;
   try {
-    sentMessage = await sendRelayMessage(timelineChannel, payload, logger, {
+    const delivery = await sendRelayMessageWithVideoFallback(timelineChannel, payload, logger, {
       sourceMessageId: relayPost.messageId,
       destinationChannelId: String(config.timelineChannelId || ''),
       relayKind: forumType,
       sendPurpose: 'timeline:thread-primary-card-send',
       callsiteLabel: 'timeline:thread-create'
+    }, {
+      preparedPost,
+      config,
+      forumType
     });
+    sentMessage = delivery.sentMessage;
+    effectivePayload = delivery.effectivePayload;
     if (forumType === 'tweet' && relayPost.message) {
-      let verification = await recordTimelineRelayDelivery(thread.client, relayPost.message, sentMessage, payload);
+      let verification = await recordTimelineRelayDelivery(thread.client, relayPost.message, sentMessage, effectivePayload);
       mediaVerificationDeferred = verification.verificationDeferred === true;
       if (!verification.valid) {
         await sentMessage.delete().catch(() => null);
-        sentMessage = await sendRelayMessage(timelineChannel, payload, logger, {
+        sentMessage = await sendRelayMessage(timelineChannel, effectivePayload, logger, {
           sourceMessageId: relayPost.messageId,
           destinationChannelId: String(config.timelineChannelId || ''),
           relayKind: forumType,
           sendPurpose: 'timeline:thread-media-verification-retry',
           callsiteLabel: 'timeline:thread-create'
         });
-        verification = await recordTimelineRelayDelivery(thread.client, relayPost.message, sentMessage, payload);
+        verification = await recordTimelineRelayDelivery(thread.client, relayPost.message, sentMessage, effectivePayload);
         mediaVerificationDeferred = verification.verificationDeferred === true;
         if (!verification.valid) {
           await sentMessage.delete().catch(() => null);
@@ -2181,18 +2345,25 @@ async function relayForumThread(thread, {
 async function relayQuestionThreadAfterRolePrompt(client, threadId, {
   selectedRoleIds = [],
   status = 'selected',
+  alreadyClaimed = false,
   loggerContext = {}
 } = {}) {
-  const state = client.db.questionRolePrompts.get(threadId);
+  let state = client.db.questionRolePrompts.get(threadId);
   if (!state) {
     return null;
   }
 
-  if (state.status !== 'pending') {
+  if (!alreadyClaimed && state.status === 'pending') {
+    const normalizedRoleIds = normalizeQuestionRoleSelection(client.appConfig, selectedRoleIds);
+    client.db.questionRolePrompts.claimProcessing(threadId, normalizedRoleIds);
+    state = client.db.questionRolePrompts.get(threadId);
+  }
+
+  if (state?.status !== 'processing') {
     client.logger.info('question role prompt relay skipped because prompt was already handled', {
       threadId,
-      status: state.status,
-      relayedMessageId: state.relayedMessageId || null,
+      status: state?.status || 'missing',
+      relayedMessageId: state?.relayedMessageId || null,
       ...loggerContext
     });
     return client.db.relays.getThreadRelay(threadId);
@@ -2202,6 +2373,7 @@ async function relayQuestionThreadAfterRolePrompt(client, threadId, {
   const guild = await client.guilds.fetch(state.guildId).catch(() => null);
   const thread = guild ? await guild.channels.fetch(threadId).catch(() => null) : null;
   if (!thread?.isThread?.()) {
+    client.db.questionRolePrompts.releaseProcessing(threadId);
     client.logger.warn('question role prompt relay failed because thread was unavailable', {
       threadId,
       guildId: state.guildId,
@@ -2211,21 +2383,40 @@ async function relayQuestionThreadAfterRolePrompt(client, threadId, {
   }
 
   const normalizedRoleIds = normalizeQuestionRoleSelection(client.appConfig, selectedRoleIds);
-  const sentMessage = await relayForumThread(thread, {
-    config: client.appConfig,
-    db: client.db,
-    logger: client.logger,
-    skipQuestionRolePrompt: true,
-    questionRoleIds: normalizedRoleIds,
-    allowQuestionRoleMentions: normalizedRoleIds.length > 0
+  client.logger.info('question relay processing started', {
+    threadId,
+    selectedRoleCount: normalizedRoleIds.length,
+    ...loggerContext
   });
+  let sentMessage;
+  try {
+    sentMessage = await relayForumThread(thread, {
+      config: client.appConfig,
+      db: client.db,
+      logger: client.logger,
+      skipQuestionRolePrompt: true,
+      questionRoleIds: normalizedRoleIds,
+      allowQuestionRoleMentions: normalizedRoleIds.length > 0
+    });
+  } catch (error) {
+    client.db.questionRolePrompts.releaseProcessing(threadId);
+    client.logger.warn('question role prompt failed and controls restored', {
+      threadId,
+      errorCode: error?.code || error?.rawError?.code || error?.name || 'relay_failed',
+      automaticRetryScheduled: false,
+      ...loggerContext
+    });
+    throw error;
+  }
   const relay = client.db.relays.getThreadRelay(threadId);
   const relayedMessageId = sentMessage?.id || relay?.timelineMessageId || null;
   if (!relayedMessageId) {
+    client.db.questionRolePrompts.releaseProcessing(threadId);
     client.logger.warn('question role prompt relay did not produce timeline message', {
       threadId,
       status,
       selectedRoleIds: normalizedRoleIds,
+      automaticRetryScheduled: false,
       ...loggerContext
     });
     return null;
@@ -2234,6 +2425,12 @@ async function relayQuestionThreadAfterRolePrompt(client, threadId, {
     selectedRoleIds: normalizedRoleIds,
     status,
     relayedMessageId
+  });
+  client.logger.info('question role prompt completed', {
+    threadId,
+    status,
+    timelineMessageId: relayedMessageId,
+    ...loggerContext
   });
 
   client.logger.info(normalizedRoleIds.length
@@ -2281,6 +2478,8 @@ function startQuestionRolePromptTimeouts(client) {
   }
   client.questionRolePromptTimers.clear();
 
+  const recoveredProcessingCount = client.db.questionRolePrompts.resetProcessing();
+
   const pendingPrompts = client.db.questionRolePrompts.listPending();
   for (const prompt of pendingPrompts) {
     if (!prompt.expiresAt || new Date(prompt.expiresAt).getTime() <= Date.now()) {
@@ -2297,7 +2496,8 @@ function startQuestionRolePromptTimeouts(client) {
 
   client.logger.info('question role prompt pending timers restored', {
     pendingCount: pendingPrompts.length,
-    scheduledCount: client.questionRolePromptTimers.size
+    scheduledCount: client.questionRolePromptTimers.size,
+    recoveredProcessingCount
   });
 }
 
@@ -2339,7 +2539,7 @@ async function handleQuestionRolePromptInteraction(interaction) {
 
   if (state.status !== 'pending') {
     await interaction.reply({
-      content: 'この質問はすでにタイムラインへ共有されています。',
+      content: 'この質問カードはすでに処理中、または共有済みです。',
       ephemeral: true
     }).catch(() => null);
     return true;
@@ -2349,30 +2549,87 @@ async function handleQuestionRolePromptInteraction(interaction) {
     ? normalizeQuestionRoleSelection(interaction.client.appConfig, interaction.values || [])
     : [];
 
-  interaction.client.logger.info(isSelect ? 'question role prompt selected' : 'question role prompt skipped', {
+  interaction.client.logger.info('question role interaction received', {
     threadId,
     promptMessageId: state.promptMessageId,
     authorUserId: state.authorUserId,
-    selectedRoleIds
+    selectedRoleCount: selectedRoleIds.length,
+    action: isSelect ? 'select' : 'skip'
   });
 
-  await interaction.deferUpdate().catch(() => null);
-  const result = await relayQuestionThreadAfterRolePrompt(interaction.client, threadId, {
-    selectedRoleIds,
-    status: isSelect ? 'selected' : 'skipped',
-    loggerContext: {
+  if (!interaction.client.db.questionRolePrompts.claimProcessing(threadId, selectedRoleIds)) {
+    await interaction.reply({
+      content: 'この質問カードはすでに処理中、または共有済みです。',
+      ephemeral: true
+    }).catch(() => null);
+    return true;
+  }
+
+  try {
+    await interaction.deferUpdate();
+    interaction.client.logger.info('question role interaction deferred', {
+      threadId,
+      promptMessageId: state.promptMessageId,
+      interactionId: interaction.id
+    });
+  } catch (error) {
+    interaction.client.db.questionRolePrompts.releaseProcessing(threadId);
+    scheduleQuestionRolePromptTimeout(interaction.client, threadId, state.expiresAt);
+    interaction.client.logger.warn('question role interaction defer failed', {
+      threadId,
+      promptMessageId: state.promptMessageId,
       interactionId: interaction.id,
-      promptMessageId: state.promptMessageId
-    }
-  });
+      errorCode: error?.code || error?.name || 'defer_failed'
+    });
+    return true;
+  }
+
+  await interaction.editReply({
+    content: '質問カードを作成しています…',
+    components: [],
+    allowedMentions: { parse: [] }
+  }).catch(() => null);
+
+  let result;
+  try {
+    result = await relayQuestionThreadAfterRolePrompt(interaction.client, threadId, {
+      selectedRoleIds,
+      status: isSelect ? 'selected' : 'skipped',
+      alreadyClaimed: true,
+      loggerContext: {
+        interactionId: interaction.id,
+        promptMessageId: state.promptMessageId
+      }
+    });
+  } catch (error) {
+    await interaction.message?.edit?.(
+      buildQuestionRolePromptPayload(threadId, state.authorUserId, interaction.client.appConfig.questionRolePrompt.roles || [])
+    ).catch(() => null);
+    await interaction.followUp({
+      content: '質問カードの共有に失敗しました。操作を戻したため、時間をおいてもう一度試してください。',
+      ephemeral: true
+    }).catch(() => null);
+    return true;
+  }
 
   if (!result) {
+    interaction.client.db.questionRolePrompts.releaseProcessing(threadId);
+    await interaction.message?.edit?.(
+      buildQuestionRolePromptPayload(threadId, state.authorUserId, interaction.client.appConfig.questionRolePrompt.roles || [])
+    ).catch(() => null);
     await interaction.followUp({
       content: '質問カードの共有に失敗しました。少し待ってからもう一度試してください。',
       ephemeral: true
     }).catch(() => null);
     return true;
   }
+
+  interaction.client.logger.info(isSelect ? 'question role prompt selected' : 'question role prompt skipped', {
+    threadId,
+    promptMessageId: state.promptMessageId,
+    authorUserId: state.authorUserId,
+    selectedRoleIds
+  });
 
   const content = selectedRoleIds.length
     ? [
@@ -2537,35 +2794,40 @@ async function relayTweetMessage(message, { config, db, logger }) {
         }
         logger.info('relay hashtag transform applied', {
           sourceMessageId: message.id,
-          rawContent: String(message.content || '').slice(0, 500),
-          cleanedContent: String(post.content || '').slice(0, 500),
           displayHashtags: post.displayBotHashtags || [],
           destinationChannelId: target.destinationChannelId,
           relayKind: target.relayKind,
           rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
         });
         const targetPost = preparePostForRelayTarget(post, target, config, logger);
-        const { payload, cleanup, relayState } = await buildTimelinePayload(targetPost, {
+        const { payload, cleanup, relayState, preparedPost } = await buildTimelinePayload(targetPost, {
           config,
           forumType: 'tweet',
           logger
         });
         let sentMessage;
+        let effectivePayload;
         let mediaVerificationDeferred = false;
         try {
           const sendPayload = {
             ...payload,
             ...(reply ? { reply } : {})
           };
-          sentMessage = await sendRelayMessage(destinationChannel, sendPayload, logger, {
+          const delivery = await sendRelayMessageWithVideoFallback(destinationChannel, sendPayload, logger, {
             sourceMessageId: message.id,
             destinationChannelId: target.destinationChannelId,
             relayKind: target.relayKind,
             sendPurpose: buildRelaySendPurpose(message, target),
             callsiteLabel: 'timeline:message-create'
+          }, {
+            preparedPost,
+            config,
+            forumType: 'tweet'
           });
+          sentMessage = delivery.sentMessage;
+          effectivePayload = delivery.effectivePayload;
           if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
-            let verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, sendPayload);
+            let verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, effectivePayload);
             mediaVerificationDeferred = verification.verificationDeferred === true;
             if (!verification.valid) {
               await sentMessage.delete().catch(() => null);
@@ -2575,14 +2837,14 @@ async function relayTweetMessage(message, { config, db, logger }) {
                 missingReferenceCount: verification.missingReferences.length,
                 zeroByteCount: verification.zeroByteAttachments.length
               });
-              sentMessage = await sendRelayMessage(destinationChannel, sendPayload, logger, {
+              sentMessage = await sendRelayMessage(destinationChannel, effectivePayload, logger, {
                 sourceMessageId: message.id,
                 destinationChannelId: target.destinationChannelId,
                 relayKind: target.relayKind,
                 sendPurpose: 'timeline:media-verification-retry',
                 callsiteLabel: 'timeline:message-create'
               });
-              verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, sendPayload);
+              verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, effectivePayload);
               mediaVerificationDeferred = verification.verificationDeferred === true;
               if (!verification.valid) {
                 await sentMessage.delete().catch(() => null);
@@ -2811,8 +3073,6 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
 
       logger.info('relay hashtag transform applied', {
         sourceMessageId: message.id,
-        rawContent: String(message.content || '').slice(0, 500),
-        cleanedContent: String(post.content || '').slice(0, 500),
         displayHashtags: post.displayBotHashtags || [],
         destinationChannelId: relayTarget.destinationChannelId,
         relayKind: currentTarget?.relayKind || relayTarget.relayKind || 'timeline_update',
@@ -2820,19 +3080,27 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
       });
 
       const targetPost = preparePostForRelayTarget(post, currentTarget || relayTarget, config, logger);
-      const { payload, cleanup, relayState } = await buildTimelinePayload(targetPost, {
+      const { payload, cleanup, relayState, preparedPost } = await buildTimelinePayload(targetPost, {
         config,
         forumType: 'tweet',
         logger
       });
       let mediaVerificationDeferred = false;
       try {
-        let editedTimelineMessage = await timelineMessage.edit({
-          ...payload,
-          attachments: []
+        let delivery = await editRelayMessageWithVideoFallback(timelineMessage, payload, logger, {
+          sourceMessageId: message.id,
+          destinationChannelId: relayTarget.destinationChannelId,
+          destinationMessageId: timelineMessage.id,
+          relayKind: currentTarget?.relayKind || relayTarget.relayKind
+        }, {
+          preparedPost,
+          config,
+          forumType: 'tweet'
         });
+        let editedTimelineMessage = delivery.editedMessage;
+        let effectivePayload = delivery.effectivePayload;
         if (String(relayTarget.destinationChannelId) === String(config.timelineChannelId || '')) {
-          let verification = await recordTimelineRelayDelivery(message.client, message, editedTimelineMessage, payload);
+          let verification = await recordTimelineRelayDelivery(message.client, message, editedTimelineMessage, effectivePayload);
           mediaVerificationDeferred = verification.verificationDeferred === true;
           if (!verification.valid) {
             logger.warn('timeline media edit verification retrying', {
@@ -2841,8 +3109,8 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
               missingReferenceCount: verification.missingReferences.length,
               zeroByteCount: verification.zeroByteAttachments.length
             });
-            editedTimelineMessage = await timelineMessage.edit({ ...payload, attachments: [] });
-            verification = await recordTimelineRelayDelivery(message.client, message, editedTimelineMessage, payload);
+            editedTimelineMessage = await timelineMessage.edit({ ...effectivePayload, attachments: [] });
+            verification = await recordTimelineRelayDelivery(message.client, message, editedTimelineMessage, effectivePayload);
             mediaVerificationDeferred = verification.verificationDeferred === true;
             if (!verification.valid) {
               throw Object.assign(new Error('Timeline media edit verification failed after retry'), {
@@ -2955,8 +3223,6 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
 
         logger.info('relay hashtag transform applied', {
           sourceMessageId: message.id,
-          rawContent: String(message.content || '').slice(0, 500),
-          cleanedContent: String(post.content || '').slice(0, 500),
           displayHashtags: post.displayBotHashtags || [],
           destinationChannelId: target.destinationChannelId,
           relayKind: target.relayKind,
@@ -2969,22 +3235,27 @@ async function updateTweetTimelineCard(oldMessage, newMessage, { config, db, log
           forumType: 'tweet',
           logger
         });
-        const { payload, cleanup } = preparedPayload;
+        const { payload, cleanup, preparedPost } = preparedPayload;
         relayState = preparedPayload.relayState;
         try {
           const sendPayload = {
             ...payload,
             ...(reply ? { reply } : {})
           };
-          sentMessage = await sendRelayMessage(destinationChannel, sendPayload, logger, {
+          const delivery = await sendRelayMessageWithVideoFallback(destinationChannel, sendPayload, logger, {
             sourceMessageId: message.id,
             destinationChannelId: target.destinationChannelId,
             relayKind: target.relayKind,
             sendPurpose: 'timeline:missing-route-create-send',
             callsiteLabel: 'timeline:message-update'
+          }, {
+            preparedPost,
+            config,
+            forumType: 'tweet'
           });
+          sentMessage = delivery.sentMessage;
           if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
-            const verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, sendPayload);
+            const verification = await recordTimelineRelayDelivery(message.client, message, sentMessage, delivery.effectivePayload);
             mediaVerificationDeferred = verification.verificationDeferred === true;
             if (!verification.valid) {
               await sentMessage.delete().catch(() => null);
@@ -3186,7 +3457,6 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
   logger.info('global hashtag messageCreate evaluated', {
     sourceMessageId: message.id,
     sourceChannelId,
-    rawContent: content,
     hasDoublePrefix,
     globalRouteCount: Object.keys(globalHashtagRoutes).length,
     isVcListenOnly
@@ -3224,7 +3494,6 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
   logger.info('Global hashtag relay evaluation started', {
     sourceMessageId: message.id,
     sourceChannelId,
-    rawContent: content,
     isVcListenOnly,
     globalMatchCount: globalMatches.size,
     globalMatchKeys: Array.from(globalMatches.keys()),
@@ -3401,26 +3670,30 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
           sourceMessageId: message.id,
           destinationChannelId: target.destinationChannelId,
           relayKind: target.relayKind,
-          cleanedContent: String(post.content || '').slice(0, 500),
           displayHashtags: post.displayBotHashtags || [],
           rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
         });
 
         const targetPost = preparePostForRelayTarget(post, target, config, logger);
-        const { payload, cleanup } = await buildTimelinePayload(targetPost, {
+        const { payload, cleanup, preparedPost } = await buildTimelinePayload(targetPost, {
           config,
           forumType: 'tweet',
           logger
         });
         let sentMessage;
         try {
-          sentMessage = await sendRelayMessage(destinationChannel, payload, logger, {
+          const delivery = await sendRelayMessageWithVideoFallback(destinationChannel, payload, logger, {
             sourceMessageId: message.id,
             destinationChannelId: target.destinationChannelId,
             relayKind: target.relayKind,
             sendPurpose: 'global_hashtag:relay-send',
             callsiteLabel: 'global-hashtag:message-create'
+          }, {
+            preparedPost,
+            config,
+            forumType: 'tweet'
           });
+          sentMessage = delivery.sentMessage;
         } finally {
           await cleanup();
         }
@@ -3456,7 +3729,6 @@ async function relayGlobalHashtagMessage(message, { config, db, logger }) {
           destinationChannelId: target.destinationChannelId,
           relayKind: target.relayKind,
           returnedMessageId: sentMessage.id,
-          cleanedContent: String(post.content || '').slice(0, 500),
           displayHashtags: post.displayBotHashtags || [],
           rawPrefixStillPresent: /(^|\n)\s*##/u.test(String(post.content || ''))
         });
@@ -3788,7 +4060,7 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
       ...post,
       posthocDisplayTags: targetDisplayTags
     };
-    const { payload, cleanup } = await buildTimelinePayload(targetPost, {
+    const { payload, cleanup, preparedPost } = await buildTimelinePayload(targetPost, {
       config,
       forumType: 'tweet',
       logger
@@ -3796,13 +4068,18 @@ async function handleReplyBasedGlobalHashtagRoute(message, { config, db, logger 
 
     message.client.timelineRelayMessageInFlight.add(relayInFlightKey);
     try {
-      const sentMessage = await sendRelayMessage(destinationChannel, payload, logger, {
+      const delivery = await sendRelayMessageWithVideoFallback(destinationChannel, payload, logger, {
         sourceMessageId: targetMessage.id,
         destinationChannelId: target.destinationChannelId,
         relayKind: target.relayKind,
         sendPurpose: 'reply_global_hashtag:relay-send',
         callsiteLabel: 'reply-global-hashtag:message-create'
+      }, {
+        preparedPost,
+        config,
+        forumType: 'tweet'
       });
+      const sentMessage = delivery.sentMessage;
       sentCount += 1;
       relayedRouteMessageIds[target.destinationChannelId] = sentMessage.id;
       if (String(target.destinationChannelId) === String(config.timelineChannelId || '')) {
@@ -4106,7 +4383,7 @@ async function processTimelineRelayRetry(client, job) {
       return;
     }
     const targetPost = preparePostForRelayTarget(post, target, config, logger);
-    const { payload, cleanup, relayState } = await buildTimelinePayload(targetPost, {
+    const { payload, cleanup, relayState, preparedPost } = await buildTimelinePayload(targetPost, {
       config,
       forumType: 'tweet',
       logger
@@ -4123,9 +4400,19 @@ async function processTimelineRelayRetry(client, job) {
       if (!destinationMessage) {
         throw Object.assign(new Error('Timeline relay fallback message is unavailable'), { code: 'fallback_message_unavailable' });
       }
-      const edited = await destinationMessage.edit({ ...payload, attachments: [] });
+      const delivery = await editRelayMessageWithVideoFallback(destinationMessage, payload, logger, {
+        sourceMessageId: sourceMessage.id,
+        destinationChannelId: job.destinationChannelId,
+        destinationMessageId: destinationMessage.id,
+        relayKind: target.relayKind
+      }, {
+        preparedPost,
+        config,
+        forumType: 'tweet'
+      });
+      const edited = delivery.editedMessage;
       const verification = String(job.destinationChannelId) === String(config.timelineChannelId || '')
-        ? await recordTimelineRelayDelivery(client, sourceMessage, edited, payload)
+        ? await recordTimelineRelayDelivery(client, sourceMessage, edited, delivery.effectivePayload)
         : { valid: true };
       if (!verification.valid) {
         throw Object.assign(new Error('Timeline relay retry media verification failed'), {
@@ -4206,5 +4493,9 @@ module.exports = {
   startQuestionRolePromptTimeouts,
   startTimelineRelayRetryWorker,
   runTimelineRelayRetryBatch,
-  sendRelayMessage
+  sendRelayMessage,
+  sendRelayMessageWithVideoFallback,
+  editRelayMessageWithVideoFallback,
+  buildVideoSendFallback,
+  isMergeableShortTweetPost
 };

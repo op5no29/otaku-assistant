@@ -719,6 +719,15 @@ function addFileComponentsIfPresent(container, post, logger = null) {
 function addAttachmentCopyFailureNotice(container, post) {
   const failures = Array.isArray(post.attachmentCopyFailures) ? post.attachmentCopyFailures : [];
   if (!failures.length) return;
+  const hasVideoFailure = failures.some((failure) => (
+    failure?.mediaKind === 'video' || String(failure?.reason || '').startsWith('video_')
+  ));
+  if (hasVideoFailure) {
+    container.addTextDisplayComponents(
+      new TextDisplayBuilder().setContent('動画をコピーできなかったため、元のメッセージから確認してください。')
+    );
+    return;
+  }
   const names = failures
     .map((failure) => String(failure?.displayName || '').trim())
     .filter(Boolean)

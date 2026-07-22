@@ -142,6 +142,7 @@
   },
   "mediaRelay": {
     "maxReuploadBytes": 25000000,
+    "fetchTimeoutMs": 30000,
     "tempDir": "./tmp/relay-media"
   },
   "twitterMedia": {

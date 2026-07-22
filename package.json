@@ -16,6 +16,7 @@
     "audit-timeline-media": "node scripts/auditTimelineMedia.js",
     "diagnose-timeline-owner": "node scripts/diagnoseTimelineOwner.js",
     "probe-timeline-image-relay": "node scripts/probeTimelineImageRelay.js",
+    "probe-timeline-video-relay": "node scripts/probeTimelineVideoRelay.js",
     "probe-timeline-restoration": "node scripts/probeTimelineRestoration.js",
     "probe-focused-followup": "node scripts/probeFocusedFollowup.js",
     "probe-anime-reaction-controls": "node scripts/probeAnimeReactionControls.js"

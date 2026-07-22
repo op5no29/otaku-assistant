@@ -63,9 +63,9 @@ async function removeFile(filePath, logger = null, context = {}) {
   }
 }
 
-async function downloadAttachment(url, outputPath, maxBytes, declaredContentType = '') {
+async function downloadAttachment(url, outputPath, maxBytes, declaredContentType = '', timeoutMs = 30_000) {
   const response = await fetch(url, {
-    signal: AbortSignal.timeout(30_000)
+    signal: AbortSignal.timeout(timeoutMs)
   });
 
   if (!response.ok) {
@@ -76,34 +76,50 @@ async function downloadAttachment(url, outputPath, maxBytes, declaredContentType
   if (contentLength > maxBytes) {
     throw Object.assign(new Error('Attachment exceeds configured byte limit'), { code: 'attachment_too_large' });
   }
-  const chunks = [];
   let total = 0;
+  const headerChunks = [];
+  let headerBytes = 0;
   const reader = response.body?.getReader?.();
   if (!reader) throw Object.assign(new Error('Attachment response stream unavailable'), { code: 'stream_unavailable' });
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      const chunk = Buffer.from(value);
-      total += chunk.length;
-      if (total > maxBytes) {
-        throw Object.assign(new Error('Attachment exceeds configured byte limit'), { code: 'attachment_too_large' });
-      }
-      chunks.push(chunk);
-    }
-  } finally {
-    await reader.cancel().catch(() => null);
-  }
-  const buffer = Buffer.concat(chunks);
-  if (!buffer.length) throw Object.assign(new Error('Attachment download returned zero bytes'), { code: 'zero_byte_attachment' });
-  const detected = detectType(buffer.subarray(0, 512), response.headers.get('content-type') || declaredContentType);
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
-  await fs.writeFile(outputPath, buffer);
+  const file = await fs.open(outputPath, 'w');
+  try {
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const chunk = Buffer.from(value);
+        total += chunk.length;
+        if (total > maxBytes) {
+          throw Object.assign(new Error('Attachment exceeds configured byte limit'), { code: 'attachment_too_large' });
+        }
+        if (headerBytes < 512) {
+          const headerChunk = chunk.subarray(0, 512 - headerBytes);
+          headerChunks.push(headerChunk);
+          headerBytes += headerChunk.length;
+        }
+        await file.write(chunk);
+      }
+      if (!total) throw Object.assign(new Error('Attachment download returned zero bytes'), { code: 'zero_byte_attachment' });
+    } finally {
+      await reader.cancel().catch(() => null);
+      await file.close();
+    }
+  } catch (error) {
+    await fs.unlink(outputPath).catch(() => null);
+    throw error;
+  }
+  const header = Buffer.concat(headerChunks);
+  const responseContentType = response.headers.get('content-type') || declaredContentType;
+  const detected = detectType(header, responseContentType);
+  const signatureDetected = detectType(header, '');
   return {
-    byteSize: buffer.length,
+    byteSize: total,
     detectedContentType: detected.contentType,
     detectedExtension: detected.extension,
-    detectedKind: detected.kind
+    detectedKind: detected.kind,
+    signatureDetectedKind: signatureDetected.kind,
+    signatureDetectedContentType: signatureDetected.contentType
   };
 }
 
@@ -118,8 +134,12 @@ function withDetectedExtension(fileName, detectedExtension) {
 }
 
 function buildAttachmentDisplayLine(attachment) {
-  if (attachment.reuploadSkippedReason === 'file_too_large') {
+  if (['file_too_large', 'video_too_large'].includes(attachment.reuploadSkippedReason)) {
     return `${attachment.displayName}（容量が大きいため再アップロードできませんでした。元メッセージから確認してください）`;
+  }
+
+  if (attachment.reuploadSkippedReason === 'video_unsupported') {
+    return `${attachment.displayName}（対応していない動画形式のためコピーできませんでした。元メッセージから確認してください）`;
   }
 
   if (attachment.reuploadSkippedReason === 'upload_failed') {
@@ -185,6 +205,7 @@ async function prepareAttachmentRelay(post, config, logger) {
     componentFiles.map((file) => file?.name).filter(Boolean)
   );
   const maxReuploadBytes = Number(config?.mediaRelay?.maxReuploadBytes ?? 25_000_000);
+  const fetchTimeoutMs = Number(config?.mediaRelay?.fetchTimeoutMs ?? 30_000);
   const tempDir = getTempDirectory(config);
   const normalizedAttachments = attachments.map((attachment, index) => {
     const originalFileName = attachment.originalName || attachment.name || 'attachment';
@@ -210,6 +231,7 @@ async function prepareAttachmentRelay(post, config, logger) {
     }
     return {
       ...attachment,
+      declaredAsVideo: attachment.isVideo === true,
       originalFileName,
       displayName: normalizedDisplayName,
       uploadFileName,
@@ -262,7 +284,7 @@ async function prepareAttachmentRelay(post, config, logger) {
     }
 
     if (attachment.size > maxReuploadBytes) {
-      attachment.reuploadSkippedReason = 'file_too_large';
+      attachment.reuploadSkippedReason = attachment.isVideo ? 'video_too_large' : 'file_too_large';
       attachment.displayLine = buildAttachmentDisplayLine(attachment);
       if (attachment.isVideo) {
         logger.warn('relay video skipped too large', {
@@ -287,7 +309,9 @@ async function prepareAttachmentRelay(post, config, logger) {
       attachmentCopyFailures.push({
         attachmentId: attachment.id || null,
         displayName: attachment.displayName,
-        reason: 'file_too_large'
+        mediaKind: attachment.isVideo ? 'video' : 'file',
+        reason: attachment.reuploadSkippedReason,
+        retryable: false
       });
       continue;
     }
@@ -310,7 +334,9 @@ async function prepareAttachmentRelay(post, config, logger) {
       attachmentCopyFailures.push({
         attachmentId: attachment.id || null,
         displayName: attachment.displayName,
-        reason: 'preview_upload_limit_reached'
+        mediaKind: attachment.isVideo ? 'video' : 'file',
+        reason: 'preview_upload_limit_reached',
+        retryable: false
       });
       continue;
     }
@@ -327,7 +353,21 @@ async function prepareAttachmentRelay(post, config, logger) {
         logger.info('relay video attachment reupload started', context);
       }
       logger.info('Attachment download started', context);
-      const download = await downloadAttachment(attachment.url, filePath, maxReuploadBytes, attachment.contentType);
+      const downloadStartedAt = Date.now();
+      const download = await downloadAttachment(
+        attachment.url,
+        filePath,
+        maxReuploadBytes,
+        attachment.contentType,
+        fetchTimeoutMs
+      );
+      if (
+        attachment.declaredAsVideo
+        && download.signatureDetectedKind === 'file'
+        && download.detectedKind === 'video'
+      ) {
+        throw Object.assign(new Error('Video signature is unsupported'), { code: 'video_unsupported' });
+      }
       const uploadSourceName = withDetectedExtension(attachment.displayName, download.detectedExtension);
       attachment.uploadFileName = stableUploadName(post.messageId, index, uploadSourceName, attachment.isSpoiler);
       attachment.detectedContentType = download.detectedContentType;
@@ -340,6 +380,7 @@ async function prepareAttachmentRelay(post, config, logger) {
       context.detectedContentType = download.detectedContentType;
       context.detectedExtension = download.detectedExtension;
       context.actualByteSize = download.byteSize;
+      context.elapsedMs = Date.now() - downloadStartedAt;
       const finalizedPath = path.join(tempDir, `${crypto.randomUUID()}-${sanitizeTempName(attachment.uploadFileName)}`);
       await fs.rename(filePath, finalizedPath);
       filePath = finalizedPath;
@@ -480,15 +521,26 @@ async function prepareAttachmentRelay(post, config, logger) {
       componentFiles.splice(initialComponentFileCount);
       mediaGalleryItems.splice(initialGalleryItemCount);
       fileComponentUrls.splice(initialFileComponentCount);
+      const terminalFailureCodes = new Set([
+        'attachment_too_large',
+        'video_too_large',
+        'video_unsupported',
+        'preview_upload_limit_reached'
+      ]);
+      const failureCode = error?.code === 'attachment_too_large' && attachment.declaredAsVideo
+        ? 'video_too_large'
+        : error?.code || 'download_or_upload_failed';
+      const retryable = !terminalFailureCodes.has(failureCode);
       logger.warn('Attachment re-upload failed; using fallback', {
         ...context,
-        error: error.message,
-        fallbackReason: 'download_or_upload_failed'
+        errorCode: failureCode,
+        fallbackReason: failureCode,
+        retryable
       });
       if (attachment.isVideo) {
         logger.warn('relay video relay failed', {
           ...context,
-          error: error.message,
+          errorCode: failureCode,
           fallbackStrategy: 'download_button_or_placeholder'
         });
       }
@@ -496,30 +548,32 @@ async function prepareAttachmentRelay(post, config, logger) {
       if (attachment.isSpoiler) {
         logger.warn('spoiler attachment relay failed', {
           ...context,
-          error: error.message
+          errorCode: failureCode
         });
         logger.warn('spoiler attachment relay fallback', {
           ...context,
-          error: error.message,
-          fallbackReason: 'download_or_upload_failed',
+          errorCode: failureCode,
+          fallbackReason: failureCode,
           spoilerPreservedByRawPreviewSuppression: true
         });
       }
       if (post.relayOrigin === 'posthoc_hashtag') {
         logger.warn('posthoc source attachment relay failed', {
           ...context,
-          error: error.message,
-          fallbackReason: 'download_or_upload_failed'
+          errorCode: failureCode,
+          fallbackReason: failureCode
         });
       }
-      attachment.reuploadSkippedReason = 'upload_failed';
+      attachment.reuploadSkippedReason = failureCode;
       attachment.displayLine = buildAttachmentDisplayLine(attachment);
       await removeFile(filePath, logger, context);
       if (!attachmentCopyFailures.some((failure) => failure.attachmentId === (attachment.id || null))) {
         attachmentCopyFailures.push({
           attachmentId: attachment.id || null,
           displayName: attachment.displayName,
-          reason: error.code || 'download_or_upload_failed'
+          mediaKind: attachment.isVideo ? 'video' : 'file',
+          reason: failureCode,
+          retryable
         });
       }
     }
@@ -538,7 +592,10 @@ async function prepareAttachmentRelay(post, config, logger) {
       attachmentCopyFailures.push({
         attachmentId: attachment.id || null,
         displayName: attachment.displayName,
-        reason: attachment.reuploadSkippedReason || 'copy_unavailable'
+        mediaKind: attachment.isVideo ? 'video' : 'file',
+        reason: attachment.reuploadSkippedReason || 'copy_unavailable',
+        retryable: !['video_too_large', 'video_unsupported', 'file_too_large', 'preview_upload_limit_reached']
+          .includes(attachment.reuploadSkippedReason)
       });
     }
   }
@@ -582,7 +639,7 @@ async function prepareAttachmentRelay(post, config, logger) {
       fileComponentUrls,
       downloadableAttachments,
       attachmentCopyFailures,
-      attachmentRelayPending: attachmentCopyFailures.length > 0,
+      attachmentRelayPending: attachmentCopyFailures.some((failure) => failure.retryable !== false),
       hasMoreDownloadableAttachments: downloadableAttachments.length > MAX_DOWNLOAD_BUTTONS,
       generatedVideoThumbnailUrl: shouldSuppressGeneratedVideoThumbnail ? null : post.generatedVideoThumbnailUrl,
       mediaGalleryItems

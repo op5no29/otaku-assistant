@@ -1,6 +1,6 @@
 const fs = require('node:fs/promises');
 const path = require('node:path');
-const { spawnSync, execFile } = require('node:child_process');
+const { execFile } = require('node:child_process');
 const { promisify } = require('node:util');
 
 const execFileAsync = promisify(execFile);
@@ -8,16 +8,16 @@ const TEMP_DIR = path.resolve(__dirname, '../../../data/tmp/video-previews');
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const FFMPEG_TIMEOUT_MS = 20_000;
 
-let ffmpegAvailable;
+let ffmpegAvailabilityPromise;
 
-function isFfmpegAvailable() {
-  if (typeof ffmpegAvailable === 'boolean') {
-    return ffmpegAvailable;
+async function isFfmpegAvailable() {
+  if (!ffmpegAvailabilityPromise) {
+    ffmpegAvailabilityPromise = execFileAsync('ffmpeg', ['-version'], {
+      timeout: 2_000,
+      maxBuffer: 64 * 1024
+    }).then(() => true, () => false);
   }
-
-  const result = spawnSync('ffmpeg', ['-version'], { stdio: 'ignore' });
-  ffmpegAvailable = result.status === 0;
-  return ffmpegAvailable;
+  return ffmpegAvailabilityPromise;
 }
 
 function sanitizeBaseName(value) {
@@ -54,9 +54,12 @@ async function removeFile(filePath) {
   await fs.unlink(filePath).catch(() => {});
 }
 
-async function downloadVideoFile(url, outputPath) {
+async function downloadVideoFile(url, outputPath, {
+  maxBytes = MAX_DOWNLOAD_BYTES,
+  timeoutMs = 15_000
+} = {}) {
   const response = await fetch(url, {
-    signal: AbortSignal.timeout(15_000)
+    signal: AbortSignal.timeout(timeoutMs)
   });
 
   if (!response.ok) {
@@ -64,19 +67,40 @@ async function downloadVideoFile(url, outputPath) {
   }
 
   const contentLength = Number(response.headers.get('content-length') || 0);
-  if (contentLength && contentLength > MAX_DOWNLOAD_BYTES) {
+  if (contentLength && contentLength > maxBytes) {
     throw new Error(`Video download exceeds limit: ${contentLength} bytes`);
   }
-
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
-
-  if (buffer.length > MAX_DOWNLOAD_BYTES) {
-    throw new Error(`Video download exceeds limit after fetch: ${buffer.length} bytes`);
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    throw Object.assign(new Error('Video response stream unavailable'), { code: 'stream_unavailable' });
   }
-
   await fs.mkdir(TEMP_DIR, { recursive: true });
-  await fs.writeFile(outputPath, buffer);
+  const file = await fs.open(outputPath, 'w');
+  let total = 0;
+  try {
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const chunk = Buffer.from(value);
+        total += chunk.length;
+        if (total > maxBytes) {
+          throw Object.assign(new Error('Video download exceeds configured limit'), { code: 'video_too_large' });
+        }
+        await file.write(chunk);
+      }
+      if (!total) {
+        throw Object.assign(new Error('Video download returned zero bytes'), { code: 'zero_byte_video' });
+      }
+    } finally {
+      await reader.cancel().catch(() => null);
+      await file.close();
+    }
+  } catch (error) {
+    await fs.unlink(outputPath).catch(() => null);
+    throw error;
+  }
+  return { byteSize: total };
 }
 
 async function generateThumbnail(inputPath, outputPath) {
@@ -98,7 +122,14 @@ async function generateThumbnail(inputPath, outputPath) {
   );
 }
 
-async function prepareVideoThumbnail(post, logger) {
+function hasDirectVideoAttachment(post) {
+  return (Array.isArray(post.attachments) ? post.attachments : []).some((attachment) => (
+    attachment?.isVideo === true
+    && (!post.firstVideoUrl || String(attachment.url || '') === String(post.firstVideoUrl))
+  ));
+}
+
+async function prepareVideoThumbnail(post, logger, options = {}) {
   if (!post.firstVideoUrl) {
     return {
       post,
@@ -109,11 +140,24 @@ async function prepareVideoThumbnail(post, logger) {
   logger.info('Video attachment detected for timeline relay', {
     messageId: post.messageId,
     threadId: post.threadId,
-    videoName: post.firstVideoName || null,
-    videoUrl: post.firstVideoUrl
+    videoName: post.firstVideoName || null
   });
 
-  if (!isFfmpegAvailable()) {
+  if (hasDirectVideoAttachment(post)) {
+    logger.info('video thumbnail skipped', {
+      messageId: post.messageId,
+      threadId: post.threadId,
+      reason: 'direct_upload_is_playable',
+      avoidsDuplicateDownload: true
+    });
+    return {
+      post,
+      cleanup: async () => {}
+    };
+  }
+
+  const checkFfmpeg = options.isFfmpegAvailable || isFfmpegAvailable;
+  if (!await checkFfmpeg()) {
     logger.warn('ffmpeg is not available; using video fallback without thumbnail', {
       messageId: post.messageId,
       threadId: post.threadId,
@@ -138,13 +182,21 @@ async function prepareVideoThumbnail(post, logger) {
   });
 
   try {
-    await downloadVideoFile(post.firstVideoUrl, videoPath);
-    await generateThumbnail(videoPath, thumbnailPath);
+    const download = options.downloadVideoFile || downloadVideoFile;
+    const renderThumbnail = options.generateThumbnail || generateThumbnail;
+    const startedAt = Date.now();
+    const downloaded = await download(post.firstVideoUrl, videoPath, {
+      maxBytes: Number(options.maxDownloadBytes || MAX_DOWNLOAD_BYTES),
+      timeoutMs: Number(options.fetchTimeoutMs || 15_000)
+    });
+    await renderThumbnail(videoPath, thumbnailPath);
 
     logger.info('Video thumbnail generated', {
       messageId: post.messageId,
       threadId: post.threadId,
-      thumbnailName
+      thumbnailName,
+      byteSize: downloaded?.byteSize || null,
+      elapsedMs: Date.now() - startedAt
     });
 
     return {
@@ -167,7 +219,7 @@ async function prepareVideoThumbnail(post, logger) {
     logger.warn('Video thumbnail generation failed; using fallback', {
       messageId: post.messageId,
       threadId: post.threadId,
-      error: error.message,
+      errorCode: error?.code || error?.name || 'thumbnail_failed',
       fallback: 'download_button_only'
     });
 

@@ -763,6 +763,10 @@ function loadConfig(configPath) {
     voiceWorkTime: ensureVoiceWorkTimeConfig(parsed.voiceWorkTime),
     mediaRelay: {
       maxReuploadBytes: Number(parsed.mediaRelay?.maxReuploadBytes ?? 25_000_000),
+      fetchTimeoutMs: Number.isFinite(Number(parsed.mediaRelay?.fetchTimeoutMs))
+        && Number(parsed.mediaRelay?.fetchTimeoutMs) > 0
+        ? Number(parsed.mediaRelay.fetchTimeoutMs)
+        : 30_000,
       tempDir: String(parsed.mediaRelay?.tempDir || './tmp/relay-media')
     },
     llm: {

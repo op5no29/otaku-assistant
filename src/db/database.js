@@ -314,6 +314,27 @@ function createDatabase(databasePath) {
           updated_at = ?
       WHERE thread_id = ?
     `),
+    claimQuestionRolePromptProcessing: sqlite.prepare(`
+      UPDATE question_role_prompts
+      SET selected_role_ids_json = ?,
+          status = 'processing',
+          updated_at = ?
+      WHERE thread_id = ?
+        AND status = 'pending'
+    `),
+    releaseQuestionRolePromptProcessing: sqlite.prepare(`
+      UPDATE question_role_prompts
+      SET status = 'pending',
+          updated_at = ?
+      WHERE thread_id = ?
+        AND status = 'processing'
+    `),
+    resetQuestionRolePromptProcessing: sqlite.prepare(`
+      UPDATE question_role_prompts
+      SET status = 'pending',
+          updated_at = ?
+      WHERE status = 'processing'
+    `),
     upsertRolePanelMessage: sqlite.prepare(`
       INSERT INTO role_panel_messages (
         guild_id,
@@ -3974,6 +3995,24 @@ function createDatabase(databasePath) {
           new Date().toISOString(),
           threadId
         );
+      },
+      claimProcessing(threadId, selectedRoleIds = []) {
+        return statements.claimQuestionRolePromptProcessing.run(
+          JSON.stringify(Array.isArray(selectedRoleIds) ? selectedRoleIds.map(String) : []),
+          new Date().toISOString(),
+          threadId
+        ).changes === 1;
+      },
+      releaseProcessing(threadId) {
+        return statements.releaseQuestionRolePromptProcessing.run(
+          new Date().toISOString(),
+          threadId
+        ).changes === 1;
+      },
+      resetProcessing() {
+        return statements.resetQuestionRolePromptProcessing.run(
+          new Date().toISOString()
+        ).changes;
       }
     },
     rolePanels: {
